@@ -17,7 +17,7 @@ A Zig exploration of QUIC/HTTP‑3 built on Cloudflare’s quiche via its C FFI.
 - `docs/` — design and plan notes; `qlogs/` — runtime qlog output.
 
 ## Prerequisites
-- Zig toolchain (recent release; 0.12.x+ recommended) and a C toolchain (`clang`/`gcc`).
+- Zig toolchain 0.15.1 or later, and a C toolchain (`clang`/`gcc`).
 - Rust and Cargo (required to build vendored `quiche`): Rust 1.82+.
 - libev headers and library if using the event loop:
   - macOS: `brew install libev`
@@ -42,16 +42,17 @@ A Zig exploration of QUIC/HTTP‑3 built on Cloudflare’s quiche via its C FFI.
 ## Roadmap
 - M1: Event loop + UDP echo (done)
 - M2: QUIC server with handshake, timers, qlog, dual‑stack UDP (done)
-- M3: Minimal HTTP/3 request/response path (H3 frames + streams)
+- M3: Minimal HTTP/3 request/response path (H3 frames + streams) (done)
 - M4: DATAGRAM support (QUIC + H3), feature flags, backpressure
 - M5: Observability (metrics), structured logs, better error mapping
 - M6: Interop matrix and automated conformance runs; docs polish
 
-## What’s Done So Far
+## What's Done So Far
 - Wired `quiche` C FFI and basic Zig wrappers; enabled debug logging and qlog output.
 - Implemented IPv4/IPv6 UDP binding, libev‑based IO/timers/signals.
-- Accepts QUIC Initial, negotiates ALPN (M2 defaults to `hq-interop`), drives handshake, and drains egress.
+- Accepts QUIC Initial, negotiates ALPN (prioritizes `h3` for HTTP/3), drives handshake, and drains egress.
 - Connection table, HMAC‑derived SCIDs, timeout processing, and send/recv paths.
+- HTTP/3 support: H3 connection management, event polling, header processing, static response generation.
 - Shared library export (`zigquicheh3`) for simple FFI smoke tests; unit test prints `quiche` version.
 
 See `AGENTS.md` for contributor guidelines and `docs/` for detailed design notes.

@@ -34,3 +34,8 @@
 ## Commit & Pull Request Guidelines
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `chore:`). Keep subject ≤72 chars; add body for context.
 - PRs must include: purpose, key changes, how to run/tests (`zig`/`cargo` commands), platform used, and relevant logs or `qlogs/` paths. Update docs if flags or behavior changed.
+
+## Language Notes
+- Zig version: use Zig 0.15.1 or later.
+- C call convention: use `callconv(.c)` (lowercase `.c`), not `.C`.
+- Zig 0.15 note: `std.ArrayList` is unmanaged; pass an allocator to operations (or use `std.ArrayListUnmanaged`).

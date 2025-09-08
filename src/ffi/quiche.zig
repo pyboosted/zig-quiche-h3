@@ -381,3 +381,242 @@ pub fn toCSockaddr(addr: *const std.posix.sockaddr) *const c.struct_sockaddr {
 pub fn toCSockaddrStorage(addr: *const std.posix.sockaddr.storage) *const c.struct_sockaddr_storage {
     return @ptrCast(addr);
 }
+
+// Forward declarations to avoid ambiguity
+const QuicConnection = Connection;
+const QuicConfig = Config;
+
+// HTTP/3 namespace - nested for organization
+pub const h3 = struct {
+    // H3 error codes
+    pub const Error = error{
+        Done, // H3_ERR_DONE - no work to do (non-fatal)
+        BufferTooShort,
+        InternalError,
+        ExcessiveLoad,
+        IdError,
+        StreamCreationError,
+        StreamBlocked,
+        RequestRejected,
+        RequestCancelled,
+        RequestIncomplete,
+        MessageError,
+        ConnectError,
+        VersionFallback,
+        QpackDecompressionFailed,
+        QpackEncoderStreamError,
+        QpackDecoderStreamError,
+        TransportError,
+        FrameUnexpected,
+        FrameError,
+        MissingSettings,
+        GeneralProtocolError,
+    };
+
+    pub fn mapError(err: c_int) Error!void {
+        switch (err) {
+            c.QUICHE_H3_ERR_DONE => return Error.Done,
+            c.QUICHE_H3_ERR_BUFFER_TOO_SHORT => return Error.BufferTooShort,
+            c.QUICHE_H3_ERR_INTERNAL_ERROR => return Error.InternalError,
+            c.QUICHE_H3_ERR_EXCESSIVE_LOAD => return Error.ExcessiveLoad,
+            c.QUICHE_H3_ERR_ID_ERROR => return Error.IdError,
+            c.QUICHE_H3_ERR_STREAM_CREATION_ERROR => return Error.StreamCreationError,
+            c.QUICHE_H3_ERR_STREAM_BLOCKED => return Error.StreamBlocked,
+            c.QUICHE_H3_ERR_REQUEST_REJECTED => return Error.RequestRejected,
+            c.QUICHE_H3_ERR_REQUEST_CANCELLED => return Error.RequestCancelled,
+            c.QUICHE_H3_ERR_REQUEST_INCOMPLETE => return Error.RequestIncomplete,
+            c.QUICHE_H3_ERR_MESSAGE_ERROR => return Error.MessageError,
+            c.QUICHE_H3_ERR_CONNECT_ERROR => return Error.ConnectError,
+            c.QUICHE_H3_ERR_VERSION_FALLBACK => return Error.VersionFallback,
+            c.QUICHE_H3_ERR_QPACK_DECOMPRESSION_FAILED => return Error.QpackDecompressionFailed,
+            // c.QUICHE_H3_ERR_QPACK_ENCODER_STREAM_ERROR => return Error.QpackEncoderStreamError,
+            // c.QUICHE_H3_ERR_QPACK_DECODER_STREAM_ERROR => return Error.QpackDecoderStreamError,
+            c.QUICHE_H3_TRANSPORT_ERR_DONE => return Error.Done, // Transport done is also non-fatal
+            c.QUICHE_H3_ERR_FRAME_UNEXPECTED => return Error.FrameUnexpected,
+            c.QUICHE_H3_ERR_FRAME_ERROR => return Error.FrameError,
+            c.QUICHE_H3_ERR_MISSING_SETTINGS => return Error.MissingSettings,
+            // c.QUICHE_H3_ERR_GENERAL_PROTOCOL_ERROR => return Error.GeneralProtocolError, // Not available in C header
+            else => {
+                // Log unknown error code once for debugging
+                std.debug.print("[H3] Unknown error code: {d}\n", .{err});
+            },
+        }
+    }
+
+    // Config wrapper
+    pub const Config = struct {
+        ptr: *c.quiche_h3_config,
+
+        pub fn new() !h3.Config {
+            const ptr = c.quiche_h3_config_new() orelse return error.H3ConfigCreateFailed;
+            return h3.Config{ .ptr = ptr };
+        }
+
+        pub fn deinit(self: *h3.Config) void {
+            c.quiche_h3_config_free(self.ptr);
+        }
+
+        pub fn setMaxFieldSectionSize(self: *h3.Config, v: u64) void {
+            c.quiche_h3_config_set_max_field_section_size(self.ptr, v);
+        }
+
+        pub fn setQpackMaxTableCapacity(self: *h3.Config, v: u64) void {
+            c.quiche_h3_config_set_qpack_max_table_capacity(self.ptr, v);
+        }
+
+        pub fn setQpackBlockedStreams(self: *h3.Config, v: u64) void {
+            c.quiche_h3_config_set_qpack_blocked_streams(self.ptr, v);
+        }
+
+        pub fn enableExtendedConnect(self: *h3.Config, enabled: bool) void {
+            c.quiche_h3_config_enable_extended_connect(self.ptr, enabled);
+        }
+    };
+
+    // Connection wrapper  
+    pub const Connection = struct {
+        ptr: *c.quiche_h3_conn,
+
+        // Use parent module's Connection type explicitly
+        pub fn newWithTransport(quic_conn: *QuicConnection, config: *h3.Config) !h3.Connection {
+            const ptr = c.quiche_h3_conn_new_with_transport(quic_conn.ptr, config.ptr) orelse 
+                return error.H3ConnectionCreateFailed;
+            return h3.Connection{ .ptr = ptr };
+        }
+
+        pub fn deinit(self: *h3.Connection) void {
+            c.quiche_h3_conn_free(self.ptr);
+        }
+
+        pub fn poll(self: *h3.Connection, quic_conn: *QuicConnection) !PollResult {
+            var event: ?*c.quiche_h3_event = null;
+            const stream_id = c.quiche_h3_conn_poll(self.ptr, quic_conn.ptr, &event);
+            
+            if (stream_id < 0) {
+                try h3.mapError(@intCast(stream_id));
+                return error.PollFailed;
+            }
+
+            return PollResult{
+                .stream_id = @intCast(stream_id),
+                .event = event,
+            };
+        }
+
+        pub fn sendResponse(
+            self: *h3.Connection,
+            quic_conn: *QuicConnection,
+            stream_id: u64,
+            headers: []const Header,
+            fin: bool,
+        ) !void {
+            const res = c.quiche_h3_send_response(
+                self.ptr,
+                quic_conn.ptr,
+                stream_id,
+                @ptrCast(headers.ptr),
+                headers.len,
+                fin,
+            );
+            if (res < 0) {
+                try h3.mapError(res);
+                return error.SendResponseFailed;
+            }
+        }
+
+        pub fn sendBody(
+            self: *h3.Connection,
+            quic_conn: *QuicConnection,
+            stream_id: u64,
+            body: []const u8,
+            fin: bool,
+        ) !usize {
+            const res = c.quiche_h3_send_body(
+                self.ptr,
+                quic_conn.ptr,
+                stream_id,
+                body.ptr,
+                body.len,
+                fin,
+            );
+            if (res < 0) {
+                try h3.mapError(@intCast(res));
+                return error.SendBodyFailed;
+            }
+            return @intCast(res);
+        }
+
+        pub fn recvBody(
+            self: *h3.Connection,
+            quic_conn: *QuicConnection,
+            stream_id: u64,
+            out: []u8,
+        ) !usize {
+            const res = c.quiche_h3_recv_body(
+                self.ptr,
+                quic_conn.ptr,
+                stream_id,
+                out.ptr,
+                out.len,
+            );
+            if (res < 0) {
+                try h3.mapError(@intCast(res));
+                return error.RecvBodyFailed;
+            }
+            return @intCast(res);
+        }
+
+        pub const PollResult = struct {
+            stream_id: u64,
+            event: ?*c.quiche_h3_event,
+        };
+    };
+
+    // Event types
+    pub const EventType = enum(u32) {
+        Headers = 0,
+        Data = 1,
+        Finished = 2,
+        GoAway = 3,
+        Reset = 4,
+        PriorityUpdate = 5,
+    };
+
+    pub fn eventType(event: *c.quiche_h3_event) EventType {
+        return @enumFromInt(c.quiche_h3_event_type(event));
+    }
+
+    pub fn eventFree(event: *c.quiche_h3_event) void {
+        c.quiche_h3_event_free(event);
+    }
+
+    // Header struct matching C layout
+    pub const Header = extern struct {
+        name: [*]const u8,
+        name_len: usize,
+        value: [*]const u8,
+        value_len: usize,
+    };
+
+    // Callback for iterating headers
+    pub const HeaderCallback = *const fn (
+        name: [*c]u8,
+        name_len: usize,
+        value: [*c]u8,
+        value_len: usize,
+        argp: ?*anyopaque,
+    ) callconv(.c) c_int;
+
+    pub fn eventForEachHeader(
+        event: *c.quiche_h3_event,
+        cb: HeaderCallback,
+        argp: ?*anyopaque,
+    ) !void {
+        const res = c.quiche_h3_event_for_each_header(event, cb, argp);
+        if (res != 0) return error.HeaderIterationFailed;
+    }
+
+    pub fn eventHeadersHasMoreFrames(event: *c.quiche_h3_event) bool {
+        return c.quiche_h3_event_headers_has_more_frames(event);
+    }
+};

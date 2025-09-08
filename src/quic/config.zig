@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// QUIC server configuration with safe defaults for M2
+// QUIC server configuration with safe defaults for M3 (HTTP/3)
 pub const ServerConfig = struct {
     // Network
     bind_addr: []const u8 = "0.0.0.0",
@@ -11,7 +11,7 @@ pub const ServerConfig = struct {
     key_path: []const u8 = "third_party/quiche/quiche/examples/cert.key",
     verify_peer: bool = false, // Disable peer verification for testing
     
-    // QUIC Transport Parameters (safe defaults for M2)
+    // QUIC Transport Parameters (safe defaults for M3)
     idle_timeout_ms: u64 = 30_000, // 30 seconds
     initial_max_data: u64 = 2 * 1024 * 1024, // 2 MiB
     initial_max_stream_data_bidi_local: u64 = 1024 * 1024, // 1 MiB
@@ -19,14 +19,14 @@ pub const ServerConfig = struct {
     initial_max_stream_data_uni: u64 = 1024 * 1024, // 1 MiB
     initial_max_streams_bidi: u64 = 10,
     initial_max_streams_uni: u64 = 10,
-    max_recv_udp_payload_size: usize = 1350, // Conservative for M2
+    max_recv_udp_payload_size: usize = 1350, // Conservative for M3
     max_send_udp_payload_size: usize = 1350,
     
     // Features
-    disable_active_migration: bool = true, // Simplify for M2
+    disable_active_migration: bool = true, // Simplify for M3
     enable_pacing: bool = true, // Good default
     cc_algorithm: []const u8 = "cubic", // Standard choice
-    enable_dgram: bool = false, // Off for M2
+    enable_dgram: bool = false, // Off for M3 (M4 will enable)
     dgram_recv_queue_len: usize = 0,
     dgram_send_queue_len: usize = 0,
     grease: bool = true, // Improve interop
@@ -48,10 +48,10 @@ pub const ServerConfig = struct {
     },
     
     // Retry
-    enable_retry: bool = false, // Optional for M2
+    enable_retry: bool = false, // Optional for M3
     
     // Buffer sizes
-    recv_buffer_size: usize = 2048, // Good for M2, increase later
+    recv_buffer_size: usize = 2048, // Good for M3, increase later
     send_buffer_size: usize = 2048,
     
     pub fn validate(self: *const ServerConfig) !void {

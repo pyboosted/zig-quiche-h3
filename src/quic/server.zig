@@ -4,6 +4,7 @@ const connection = @import("connection");
 const config_mod = @import("config");
 const EventLoop = @import("event_loop").EventLoop;
 const udp = @import("udp");
+const h3 = @import("h3");
 
 const c = quiche.c;
 const posix = std.posix;
@@ -32,6 +33,9 @@ pub const QuicServer = struct {
     send_buf: [2048]u8 = undefined, // Buffer for sending packets
     conn_id_seed: [32]u8, // HMAC-SHA256 key for connection ID derivation (like Rust)
     timeout_timer_started: bool = false, // Track if periodic timer for checking connection timeouts is started
+    
+    // HTTP/3 configuration
+    h3_config: ?h3.H3Config = null,
     
     // Statistics
     connections_accepted: usize = 0,
@@ -106,6 +110,10 @@ pub const QuicServer = struct {
             .conn_id_seed = conn_id_seed,
         };
         
+        // Create H3 config
+        server.h3_config = try h3.H3Config.initWithDefaults();
+        errdefer if (server.h3_config) |*h| h.deinit();
+        
         // Enable debug logging if requested
         if (cfg.enable_debug_logging) {
             try quiche.enableDebugLogging(debugLog, &server.config);
@@ -116,7 +124,19 @@ pub const QuicServer = struct {
     
     pub fn deinit(self: *QuicServer) void {
         self.stop();
+        
+        // Clean up connections (including their H3 connections)
+        var it = self.connections.map.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.http3) |h3_ptr| {
+                const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
+                h3_conn.deinit();
+                self.allocator.destroy(h3_conn);
+            }
+        }
         self.connections.deinit();
+        
+        if (self.h3_config) |*h| h.deinit();
         self.quiche_config.deinit();
         self.event_loop.deinit();
         if (self.socket_v4) |*s| s.*.close();
@@ -348,11 +368,37 @@ pub const QuicServer = struct {
                 // Build complete message first, then print once
                 if (conn.?.conn.applicationProto()) |proto| {
                     std.debug.print("✓ Handshake complete! DCID: {s}, ALPN: {s}\n", .{ hex_dcid, proto });
+                    
+                    // Create H3 connection if ALPN is "h3"
+                    if (std.mem.eql(u8, proto, "h3") and conn.?.http3 == null) {
+                        if (self.h3_config) |*h3_cfg| {
+                            const h3_conn = try self.allocator.create(h3.H3Connection);
+                            h3_conn.* = try h3.H3Connection.newWithTransport(
+                                self.allocator,
+                                &conn.?.conn,
+                                h3_cfg,
+                            );
+                            conn.?.http3 = h3_conn;
+                            std.debug.print("✓ HTTP/3 connection created for DCID: {s}\n", .{hex_dcid});
+                        }
+                    } else if (!std.mem.eql(u8, proto, "h3")) {
+                        // Log when we're not using H3 (e.g., hq-interop)
+                        std.debug.print("  ALPN fallback: using {s} instead of h3\n", .{proto});
+                    }
                 } else {
                     std.debug.print("✓ Handshake complete! DCID: {s}\n", .{hex_dcid});
                 }
                 
                 conn.?.handshake_logged = true;
+            }
+            
+            // Process H3 events if H3 connection exists
+            if (conn.?.http3 != null) {
+                self.processH3(conn.?) catch |err| {
+                    if (err != quiche.h3.Error.StreamBlocked) {
+                        std.debug.print("H3 processing error: {}\n", .{err});
+                    }
+                };
             }
             
             // Drain egress after recv
@@ -410,7 +456,7 @@ pub const QuicServer = struct {
                 // Create persistent strings for qlog - they need to remain valid for the connection lifetime
                 const title = try self.allocator.dupeZ(u8, "quic-server");
                 errdefer self.allocator.free(title);
-                const desc = try self.allocator.dupeZ(u8, "Zig QUIC Server M2");
+                const desc = try self.allocator.dupeZ(u8, "Zig QUIC Server M3 - HTTP/3");
                 errdefer self.allocator.free(desc);
                 
                 if ((&q_conn).setQlogPath(p, title[0..title.len :0], desc[0..desc.len :0])) {
@@ -499,6 +545,74 @@ pub const QuicServer = struct {
         }
     }
     
+    fn processH3(self: *QuicServer, conn: *connection.Connection) !void {
+        const h3_ptr = conn.http3 orelse return;
+        const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
+        
+        while (true) {
+            var result = h3_conn.poll(&conn.conn) orelse break;
+            defer result.deinit();
+            
+            switch (result.event_type) {
+                .Headers => {
+                    // Collect headers
+                    const headers = try h3.collectHeaders(self.allocator, result.raw_event);
+                    defer h3.freeHeaders(self.allocator, headers);
+                    
+                    // Parse request info
+                    const req_info = h3.parseRequestHeaders(headers);
+                    
+                    std.debug.print("→ HTTP/3 request: {s} {s}\n", .{
+                        req_info.method orelse "?",
+                        req_info.path orelse "?",
+                    });
+                    
+                    // Prepare body and compute content-length
+                    const body = "Hello, HTTP/3!\n";
+                    var len_buf: [20]u8 = undefined;
+                    const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body.len}) catch unreachable;
+                    
+                    // Build response headers with careful lifetime management
+                    const response_headers = [_]quiche.h3.Header{
+                        .{ .name = ":status", .name_len = 7, .value = "200", .value_len = 3 },
+                        .{ .name = "server", .name_len = 6, .value = "zig-quiche-h3", .value_len = 13 },
+                        .{ .name = "content-type", .name_len = 12, .value = "text/plain", .value_len = 10 },
+                        .{ .name = "content-length", .name_len = 14, .value = len_str.ptr, .value_len = len_str.len },
+                    };
+                    
+                    // Send response (pass slice, not pointer to array)
+                    try h3_conn.sendResponse(&conn.conn, result.stream_id, response_headers[0..], false);
+                    
+                    // Send body
+                    // Note: For larger bodies in future, consider retry queue on StreamBlocked
+                    _ = try h3_conn.sendBody(&conn.conn, result.stream_id, body, true);
+                    
+                    std.debug.print("← Sent HTTP/3 response on stream {}\n", .{result.stream_id});
+                    
+                    // Check if there are more frames (e.g., request body)
+                    if (quiche.h3.eventHeadersHasMoreFrames(result.raw_event)) {
+                        // Client is sending a body, we'll receive it in subsequent Data events
+                        std.debug.print("  Request has body, will be received in Data events\n", .{});
+                    }
+                },
+                .Data => {
+                    // Drain body for M3 (ignore content)
+                    var buf: [1024]u8 = undefined;
+                    _ = h3_conn.recvBody(&conn.conn, result.stream_id, &buf) catch 0;
+                },
+                .Finished => {
+                    std.debug.print("  Stream {} finished\n", .{result.stream_id});
+                },
+                .GoAway, .Reset => {
+                    std.debug.print("  Stream {} closed ({})\n", .{ result.stream_id, result.event_type });
+                },
+                .PriorityUpdate => {
+                    // Log for telemetry
+                },
+            }
+        }
+    }
+    
     fn updateTimer(self: *QuicServer, conn: *connection.Connection, timeout_ms: u64) !void {
         _ = self;
         // Track the deadline for when this connection should timeout
@@ -531,6 +645,15 @@ pub const QuicServer = struct {
         var iter = self.connections.map.iterator();
         while (iter.next()) |entry| {
             const conn = entry.value_ptr.*;
+            
+            // Process H3 events if H3 connection exists (periodic processing)
+            if (conn.http3 != null) {
+                self.processH3(conn) catch |err| {
+                    if (err != quiche.h3.Error.StreamBlocked) {
+                        std.debug.print("H3 processing error in timer: {}\n", .{err});
+                    }
+                };
+            }
             
             // Check if this connection has timed out
             if (conn.timeout_deadline_ms <= now) {
@@ -569,6 +692,14 @@ pub const QuicServer = struct {
             stats.sent,
             stats.lost,
         });
+        
+        // Clean up H3 connection if it exists
+        if (conn.http3) |h3_ptr| {
+            const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
+            h3_conn.deinit();
+            self.allocator.destroy(h3_conn);
+            conn.http3 = null;
+        }
         
         // Remove from table and cleanup
         const key = conn.getKey();

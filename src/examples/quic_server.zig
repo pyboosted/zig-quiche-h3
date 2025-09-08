@@ -36,7 +36,7 @@ pub fn main() !void {
         }
     }
     
-    std.debug.print("\n=== QUIC Server (Milestone 2) ===\n", .{});
+    std.debug.print("\n=== QUIC Server (Milestone 3 - HTTP/3) ===\n", .{});
     std.debug.print("Port: {d}\n", .{port});
     std.debug.print("Cert: {s}\n", .{cert_path});
     std.debug.print("Key:  {s}\n", .{key_path});
@@ -54,8 +54,8 @@ pub fn main() !void {
         .key_path = key_path,
         .qlog_dir = qlog_dir,
         
-        // Use hq-interop for M2 testing
-        .alpn_protocols = &.{"hq-interop"},
+        // Prioritize h3 for M3, keep hq-interop for compatibility
+        .alpn_protocols = &.{ "h3", "hq-interop" },
         
         // Conservative settings for M2
         .idle_timeout_ms = 30_000,
@@ -90,7 +90,7 @@ fn printHelp() void {
         \\Test with quiche-client:
         \\  cd third_party/quiche
         \\  cargo run -p quiche --bin quiche-client -- \
-        \\    https://127.0.0.1:4433/ --no-verify --alpn hq-interop
+        \\    https://127.0.0.1:4433/ --no-verify --alpn h3
         \\
     , .{});
 }

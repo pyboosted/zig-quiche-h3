@@ -50,10 +50,16 @@ pub const Connection = struct {
     timer_handle: ?*TimerHandle = null,
     handshake_logged: bool = false,
     
+    // HTTP/3 connection (lazy-initialized)
+    http3: ?*anyopaque = null, // Will be *h3.H3Connection, using anyopaque to avoid circular deps
+    
     // Debug
     qlog_path: ?[]const u8 = null,
     
     pub fn deinit(self: *Connection, allocator: std.mem.Allocator) void {
+        // H3 connection cleanup happens in server's closeConnection() method
+        // where the h3 module is available for proper type casting
+        
         self.conn.deinit();
         if (self.qlog_path) |path| {
             allocator.free(path);
