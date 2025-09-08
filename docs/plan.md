@@ -11,12 +11,17 @@ Prerequisites
 - Build quiche with: `cargo build --release --features ffi`
 
 Milestone 0: Build Infrastructure (Day 1)
+Status: Completed — `zig build run` and `zig build test` print quiche version (0.24.6) ✓
 - Create `build.zig` linking `third_party/quiche/quiche/include` and `target/release/libquiche.a`; link `ev`.
 - Minimal Zig FFI wrapper for `quiche_version()`.
 - Optional: Export `zig_h3_version()` from a shared lib and call it from Bun via `dlopen` as a smoke test.
 - Test:
   - `zig build` or `zig build test` prints quiche version ✓
   - (Optional) Bun `dlopen` returns version string ✓
+
+Pre‑M1: Bun FFI Smoke Test (Completed)
+- Built shared library `libzigquicheh3` exporting `zig_h3_version()` (for Bun FFI).
+- Added `examples/bun/test.js`; verified output: "Quiche version from Bun: 0.24.6" ✓
 
 Milestone 1: Event + UDP Echo (Day 2–3)
 - Implement `EventLoop` abstraction and `EventBackend` enum { libev (default), epoll_raw, kqueue_raw, zig_io (future) }.
@@ -84,4 +89,3 @@ Notes
 - Default event backend: libev; epoll/kqueue backends are available via compile‑time flag; future `zig_io` backend when stable.
 - Spec clarifies C FFI realities: no H3 DATAGRAM event; WebTransport streams not exposed via C FFI.
 - quiche submodule pinned to 0.24.6.
-

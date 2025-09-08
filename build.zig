@@ -124,9 +124,46 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // Shared library for Bun FFI smoke tests: exports zig_h3_version()
+    const lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_mod.addIncludePath(b.path(quiche_include_dir));
+    const lib = b.addLibrary(.{ .name = "zigquicheh3", .root_module = lib_mod, .linkage = .dynamic });
+    if (use_system_quiche) {
+        lib.linkSystemLibrary("quiche");
+    } else {
+        lib.addObjectFile(quiche_lib_path);
+        const verify_quiche_lib = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
+        lib.step.dependOn(&verify_quiche_lib.step);
+    }
+    if (with_libev) lib.linkSystemLibrary("ev");
+    lib.linkLibC();
+    switch (target.result.os.tag) {
+        .linux => {
+            lib.linkSystemLibrary("stdc++");
+            lib.linkSystemLibrary("pthread");
+            lib.linkSystemLibrary("dl");
+        },
+        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
+            lib.linkSystemLibrary("c++");
+            lib.linkFramework("Security");
+            lib.linkFramework("CoreFoundation");
+        },
+        else => {},
+    }
+    if (link_ssl) {
+        lib.linkSystemLibrary("ssl");
+        lib.linkSystemLibrary("crypto");
+    }
+    b.installArtifact(lib);
+
     // Ensure we build quiche before compiling/linking, if requested.
     if (cargo_step) |c| {
         exe.step.dependOn(&c.step);
         unit_tests.step.dependOn(&c.step);
+        lib.step.dependOn(&c.step);
     }
 }
