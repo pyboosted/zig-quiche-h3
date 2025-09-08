@@ -10,6 +10,8 @@ pub fn build(b: *std.Build) void {
     const quiche_profile = b.option([]const u8, "quiche-profile", "Cargo profile for quiche: release|debug") orelse "release";
     const link_ssl = b.option(bool, "link-ssl", "Link libssl and libcrypto (for OpenSSL/quictls builds)") orelse false;
     const with_libev = b.option(bool, "with-libev", "Link libev system library") orelse false;
+    const libev_include_dir = b.option([]const u8, "libev-include", "Path to libev headers (dir containing ev.h)");
+    const libev_lib_dir = b.option([]const u8, "libev-lib", "Path to libev library directory (contains libev.dylib/.so)");
     const quiche_include_dir = b.option([]const u8, "quiche-include", "Path to quiche headers (quiche/include)") orelse "third_party/quiche/quiche/include";
 
     // Paths
@@ -54,7 +56,10 @@ pub fn build(b: *std.Build) void {
         exe.step.dependOn(&verify_quiche.step);
     }
 
-    if (with_libev) exe.linkSystemLibrary("ev");
+    if (with_libev) {
+        exe.linkSystemLibrary("ev");
+        if (libev_lib_dir) |libdir| exe.addLibraryPath(.{ .cwd_relative = libdir });
+    }
     exe.linkLibC();
 
     // Platform-specific C++ runtime and common deps for linking vendored BoringSSL objects.
@@ -100,7 +105,10 @@ pub fn build(b: *std.Build) void {
         const verify_quiche_test = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
         unit_tests.step.dependOn(&verify_quiche_test.step);
     }
-    if (with_libev) unit_tests.linkSystemLibrary("ev");
+    if (with_libev) {
+        unit_tests.linkSystemLibrary("ev");
+        if (libev_lib_dir) |libdir| unit_tests.addLibraryPath(.{ .cwd_relative = libdir });
+    }
     unit_tests.linkLibC();
     switch (target.result.os.tag) {
         .linux => {
@@ -139,7 +147,10 @@ pub fn build(b: *std.Build) void {
         const verify_quiche_lib = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
         lib.step.dependOn(&verify_quiche_lib.step);
     }
-    if (with_libev) lib.linkSystemLibrary("ev");
+    if (with_libev) {
+        lib.linkSystemLibrary("ev");
+        if (libev_lib_dir) |libdir| lib.addLibraryPath(.{ .cwd_relative = libdir });
+    }
     lib.linkLibC();
     switch (target.result.os.tag) {
         .linux => {
@@ -166,4 +177,47 @@ pub fn build(b: *std.Build) void {
         unit_tests.step.dependOn(&c.step);
         lib.step.dependOn(&c.step);
     }
+
+    // Milestone 1 demo: UDP echo server using libev event loop
+    
+    // Create event_loop module with proper include paths
+    const event_loop_mod = b.createModule(.{
+        .root_source_file = b.path("src/net/event_loop.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // Add libev include path to the module that needs it for @cImport
+    if (libev_include_dir) |inc| {
+        event_loop_mod.addIncludePath(.{ .cwd_relative = inc });
+    }
+    
+    // Create udp module
+    const udp_mod = b.createModule(.{
+        .root_source_file = b.path("src/net/udp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Create echo module and add imports
+    const echo_mod = b.createModule(.{
+        .root_source_file = b.path("src/examples/udp_echo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    echo_mod.addImport("event_loop", event_loop_mod);
+    echo_mod.addImport("udp", udp_mod);
+    
+    const echo = b.addExecutable(.{ .name = "udp-echo", .root_module = echo_mod });
+    // Link libev and libc
+    echo.linkLibC();
+    if (with_libev) {
+        echo.linkSystemLibrary("ev");
+        if (libev_lib_dir) |libdir| echo.addLibraryPath(.{ .cwd_relative = libdir });
+    }
+    // Install and run
+    b.installArtifact(echo);
+    const run_echo = b.addRunArtifact(echo);
+    if (b.args) |args| run_echo.addArgs(args);
+    const echo_step = b.step("echo", "Run UDP echo example (nc -u localhost 4433)");
+    echo_step.dependOn(&run_echo.step);
 }

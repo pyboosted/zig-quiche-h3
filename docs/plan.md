@@ -24,9 +24,26 @@ Pre‑M1: Bun FFI Smoke Test (Completed)
 - Added `examples/bun/test.js`; verified output: "Quiche version from Bun: 0.24.6" ✓
 
 Milestone 1: Event + UDP Echo (Day 2–3)
+Status: Completed ✓
 - Implement `EventLoop` abstraction and `EventBackend` enum { libev (default), epoll_raw, kqueue_raw, zig_io (future) }.
 - Integrate libev: UDP socket readability watcher + timer; simple UDP echo (no QUIC yet).
 - Test: `nc -u localhost 4433` echoes ✓
+
+Implementation Details:
+- Created `src/net/event_loop.zig` with libev backend supporting IO, timer, and signal watchers
+- Implemented `src/net/udp.zig` with atomic SOCK.NONBLOCK|SOCK.CLOEXEC flags for race-free socket creation
+- Added `bindAny()` helper for simplified dual-stack IPv6/IPv4 binding
+- UDP echo server (`src/examples/udp_echo.zig`) demonstrates:
+  - Non-blocking UDP with event-driven IO
+  - Periodic timer for packet statistics (1 sec interval)
+  - Signal handling (SIGINT/SIGTERM) with graceful shutdown
+  - Dual-stack binding with macOS compatibility
+- Performance optimizations:
+  - Atomic socket flags eliminate TOCTOU races
+  - Portable O_NONBLOCK using @bitOffsetOf(O, "NONBLOCK")
+  - Socket buffer tuning helpers for future optimization
+- Build: `zig build echo -Dwith-libev=true -Dlibev-include=$(brew --prefix libev)/include -Dlibev-lib=$(brew --prefix libev)/lib`
+- Verified: Echo functionality, timer accuracy, signal handling all working correctly
 
 Milestone 2: QUIC Handshake (Day 4–6)
 - TLS cert/key loading; `quiche_accept()`; connection table keyed by DCID/5‑tuple.
