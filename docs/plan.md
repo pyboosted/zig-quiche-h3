@@ -46,12 +46,55 @@ Implementation Details:
 - Verified: Echo functionality, timer accuracy, signal handling all working correctly
 
 Milestone 2: QUIC Handshake (Day 4–6)
+Status: Completed ✓
 - TLS cert/key loading; `quiche_accept()`; connection table keyed by DCID/5‑tuple.
 - Enable quiche debug logging + per-connection qlog (file per connection).
 - Optional: stateless retry support (configurable).
 - Test:
   - `apps/quiche-client` connects successfully ✓
   - qlogs generated and readable ✓
+
+Implementation Details:
+- Created full QUIC server architecture in `src/quic/`:
+  - `server.zig`: Main QuicServer with event loop integration, connection management
+  - `connection.zig`: Connection abstraction with state tracking and lifecycle
+  - `config.zig`: ServerConfig with TLS, ALPN, qlog, and transport parameters
+- FFI bindings in `src/ffi/quiche.zig`:
+  - Complete quiche API wrapper with error mapping
+  - Added PacketType enum constants for readable packet type checks
+  - Config, Connection, and Header abstractions
+- Key features implemented:
+  - TLS 1.3 certificate/key loading via quiche_config
+  - Connection table using DCID as primary key with HashMap
+  - Full handshake flow: Initial → Handshake → 1-RTT
+  - ALPN negotiation (hq-interop for testing)
+  - Dual-stack IPv6/IPv4 support with proper socket binding
+  - Timer-based connection timeout management
+  - Packet coalescing for efficient network usage
+- QLOG support:
+  - Per-connection QLOG files (JSON-SEQ format v0.3)
+  - Fixed memory leak: properly free title/desc strings after setQlogPath()
+  - Built quiche with "ffi,qlog" features enabled
+  - Configurable via --no-qlog command line flag
+- Event loop integration:
+  - libev IO watcher for UDP socket events
+  - Timer for connection timeout checks
+  - Non-blocking packet processing with backpressure handling
+- Connection lifecycle:
+  - Accept new connections on Initial packets only
+  - Version negotiation and unsupported version handling
+  - Proper cleanup on connection close or timeout
+  - Handshake completion detection and logging
+- Build configuration:
+  - Updated build.zig to enable qlog feature in quiche
+  - Link against libev for event loop support
+  - Proper include paths for quiche headers
+- Testing verified:
+  - quiche-client connects and completes handshake
+  - QLOG files generated with valid JSON-SEQ content
+  - Multiple concurrent connections handled correctly
+  - Memory leak fixed and verified
+  - Clean shutdown with proper resource cleanup
 
 Milestone 3: Basic HTTP/3 (Day 7–10)
 - Create H3 connection (`quiche_h3_conn_new_with_transport`) after QUIC established; poll events.

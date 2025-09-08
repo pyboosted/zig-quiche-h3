@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     // Optional build step to run Cargo for quiche staticlib
     var cargo_step: ?*std.Build.Step.Run = null;
     if (build_quiche and !use_system_quiche) {
-        const cargo = b.addSystemCommand(&.{ "cargo", "build", "-p", "quiche", "--features", "ffi" });
+        const cargo = b.addSystemCommand(&.{ "cargo", "build", "-p", "quiche", "--features", "ffi,qlog" });
         if (std.mem.eql(u8, quiche_profile, "release")) {
             cargo.addArg("--release");
         }
@@ -89,6 +89,122 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run the demo executable");
     run_step.dependOn(&run_cmd.step);
+    
+    // Create shared modules first (used by both M1 and M2)
+    // Event loop module with proper include paths
+    const event_loop_mod = b.createModule(.{
+        .root_source_file = b.path("src/net/event_loop.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // Add libev include path to the module that needs it for @cImport
+    if (libev_include_dir) |inc| {
+        event_loop_mod.addIncludePath(.{ .cwd_relative = inc });
+    }
+    
+    // UDP module
+    const udp_mod = b.createModule(.{
+        .root_source_file = b.path("src/net/udp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Milestone 2: QUIC Server
+    // Create modules for QUIC components
+    const quiche_ffi_mod = b.createModule(.{
+        .root_source_file = b.path("src/ffi/quiche.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    quiche_ffi_mod.addIncludePath(b.path(quiche_include_dir));
+    
+    const connection_mod = b.createModule(.{
+        .root_source_file = b.path("src/quic/connection.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    connection_mod.addImport("quiche", quiche_ffi_mod);
+    
+    const config_mod = b.createModule(.{
+        .root_source_file = b.path("src/quic/config.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const server_mod = b.createModule(.{
+        .root_source_file = b.path("src/quic/server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    server_mod.addImport("quiche", quiche_ffi_mod);
+    server_mod.addImport("connection", connection_mod);
+    server_mod.addImport("config", config_mod);
+    server_mod.addImport("event_loop", event_loop_mod);
+    server_mod.addImport("udp", udp_mod);
+    
+    // QUIC server executable
+    const quic_server_mod = b.createModule(.{
+        .root_source_file = b.path("src/examples/quic_server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    quic_server_mod.addImport("server", server_mod);
+    quic_server_mod.addImport("config", config_mod);
+    
+    const quic_server = b.addExecutable(.{
+        .name = "quic-server",
+        .root_module = quic_server_mod,
+    });
+    
+    // Link quiche and dependencies
+    if (use_system_quiche) {
+        quic_server.linkSystemLibrary("quiche");
+    } else {
+        quic_server.addObjectFile(quiche_lib_path);
+        const verify_quiche_server = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
+        quic_server.step.dependOn(&verify_quiche_server.step);
+    }
+    
+    // Link libev
+    if (with_libev) {
+        quic_server.linkSystemLibrary("ev");
+        if (libev_lib_dir) |libdir| quic_server.addLibraryPath(.{ .cwd_relative = libdir });
+    }
+    
+    quic_server.linkLibC();
+    
+    // Platform-specific dependencies
+    switch (target.result.os.tag) {
+        .linux => {
+            quic_server.linkSystemLibrary("stdc++");
+            quic_server.linkSystemLibrary("pthread");
+            quic_server.linkSystemLibrary("dl");
+        },
+        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
+            quic_server.linkSystemLibrary("c++");
+            quic_server.linkFramework("Security");
+            quic_server.linkFramework("CoreFoundation");
+        },
+        else => {},
+    }
+    
+    if (link_ssl) {
+        quic_server.linkSystemLibrary("ssl");
+        quic_server.linkSystemLibrary("crypto");
+    }
+    
+    // Ensure quiche is built first if needed
+    if (cargo_step) |c| {
+        quic_server.step.dependOn(&c.step);
+    }
+    
+    b.installArtifact(quic_server);
+    
+    // Run command for QUIC server
+    const run_quic_server = b.addRunArtifact(quic_server);
+    if (b.args) |args| run_quic_server.addArgs(args);
+    const quic_server_step = b.step("quic-server", "Run the QUIC server (Milestone 2)");
+    quic_server_step.dependOn(&run_quic_server.step);
 
     // Unit tests: run a test that prints quiche version
     const test_mod = b.createModule(.{
@@ -179,24 +295,6 @@ pub fn build(b: *std.Build) void {
     }
 
     // Milestone 1 demo: UDP echo server using libev event loop
-    
-    // Create event_loop module with proper include paths
-    const event_loop_mod = b.createModule(.{
-        .root_source_file = b.path("src/net/event_loop.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    // Add libev include path to the module that needs it for @cImport
-    if (libev_include_dir) |inc| {
-        event_loop_mod.addIncludePath(.{ .cwd_relative = inc });
-    }
-    
-    // Create udp module
-    const udp_mod = b.createModule(.{
-        .root_source_file = b.path("src/net/udp.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     
     // Create echo module and add imports
     const echo_mod = b.createModule(.{

@@ -2,6 +2,15 @@ const std = @import("std");
 
 pub const UdpSocket = struct {
     fd: std.posix.socket_t,
+    
+    pub fn close(self: *UdpSocket) void {
+        // Best-effort close; ignore errors.
+        // Set fd to -1 to prevent double-close if struct is copied
+        if (self.fd >= 0) {
+            std.posix.close(self.fd);
+            self.fd = -1;
+        }
+    }
 };
 
 pub fn setNonBlocking(fd: std.posix.socket_t, enable: bool) !void {
@@ -70,15 +79,6 @@ pub fn bindUdp6AnyDual(port: u16, nonblock: bool) !UdpSocket {
     };
     try posix.bind(fd, @ptrCast(&addr6), @sizeOf(posix.sockaddr.in6));
     return .{ .fd = fd };
-}
-
-pub fn close(self: *UdpSocket) void {
-    // Best-effort close; ignore errors.
-    // Set fd to -1 to prevent double-close if struct is copied
-    if (self.fd >= 0) {
-        std.posix.close(self.fd);
-        self.fd = -1;
-    }
 }
 
 /// Result of bindAny() containing both IPv6 and IPv4 sockets
