@@ -21,6 +21,7 @@ pub const Request = struct {
     arena: *std.heap.ArenaAllocator,
     body_buffer: std.ArrayList(u8),  // Bounded body buffer for M4
     body_complete: bool,
+    body_received_bytes: usize,      // Track bytes in streaming mode
     
     /// Initialize a new request with an arena allocator
     pub fn init(
@@ -55,6 +56,7 @@ pub const Request = struct {
             .arena = arena,
             .body_buffer = std.ArrayList(u8){},
             .body_complete = false,
+            .body_received_bytes = 0,
         };
     }
     
@@ -95,6 +97,23 @@ pub const Request = struct {
         }
         
         try self.body_buffer.appendSlice(allocator, data);
+    }
+    
+    /// Get current body size (for streaming mode tracking)
+    pub fn getBodySize(self: Request) usize {
+        // In streaming mode, return the counter
+        // In buffering mode, return buffer size
+        if (self.body_received_bytes > 0) {
+            return self.body_received_bytes;
+        }
+        return self.body_buffer.items.len;
+    }
+    
+    /// Add to body size tracker (for streaming mode)
+    pub fn addToBodySize(self: *Request, bytes: usize) void {
+        // In streaming mode, just increment the counter
+        // This avoids allocating memory for data we're not buffering
+        self.body_received_bytes += bytes;
     }
     
     /// Mark body as complete

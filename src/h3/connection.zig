@@ -52,13 +52,8 @@ pub const H3Connection = struct {
         headers: []const quiche.h3.Header,
         fin: bool,
     ) !void {
-        self.conn.sendResponse(quic_conn, stream_id, headers, fin) catch |err| {
-            if (err == quiche.h3.Error.StreamBlocked) {
-                // Will retry on next poll
-                return;
-            }
-            return err;
-        };
+        // Propagate all errors including StreamBlocked for proper retry handling
+        try self.conn.sendResponse(quic_conn, stream_id, headers, fin);
     }
     
     pub fn sendBody(

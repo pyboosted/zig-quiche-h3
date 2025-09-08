@@ -185,8 +185,67 @@ Implementation Details:
   - Memory efficient with arena cleanup
 
 Milestone 5: Streaming Bodies (Day 14–16)
+Status: Near Completion ✅ (missing upload endpoint for full completion)
 - Chunked read/write with backpressure; partial write handling (`Done` retry).
 - Test: upload/download 1 GiB with checksums; no leaks; backpressure observed ✓
+
+Implementation Details:
+- Created comprehensive streaming layer in `src/http/streaming.zig`:
+  - PartialResponse abstraction for resumable sends with three source types (memory/file/generator)
+  - BlockedStreams tracking for efficient backpressure management
+  - Chunk-based processing with configurable sizes (default 64KB)
+  - Zero-copy file streaming with pread for efficiency
+  - Generator-based streaming to avoid blocking the event loop
+- Extended Response API with streaming methods:
+  - `writeAll()` for small handlers with automatic retry on StreamBlocked
+  - `sendFile()` for zero-copy file streaming with MIME type detection
+  - `processPartialResponse()` for resuming blocked sends
+  - Proper FIN handling for stream completion
+- Server enhancements for streaming:
+  - `processWritableStreams()` method for resuming blocked streams
+  - Proper .Finished event handling (keeps state alive if response ongoing)
+  - Stream writability tracking with `streamWritable()` hints
+  - Memory-bounded request body tracking (counter, not ArrayList)
+- Example streaming handlers implemented:
+  - `/download/*`: File streaming with path traversal safety
+  - `/stream/1gb`: Generator-based 1GB test stream (no memory allocation)
+  - `/stream/test`: 10MB test with checksum validation
+- Critical fixes implemented:
+  - Fixed premature state cleanup on .Finished when response still streaming
+  - Memory-efficient body size tracking without allocation
+  - Defensive null setting after partial.deinit()
+  - All handlers use writeAll() to prevent truncation
+- Testing verified:
+  - 1GB downloads complete without memory exhaustion
+  - Backpressure properly handled with StreamBlocked/Done errors
+  - Multiple concurrent streams work correctly
+  - No premature state cleanup during streaming
+  - Stream capacity properly restored after backpressure
+
+Milestone 5+: Bun E2E Testing Environment (Day 16–17)
+Status: Planned
+- Comprehensive E2E testing framework using Bun orchestration + curl HTTP/3 client
+- Fast test runner with TypeScript support for modern testing experience
+- Reference: `docs/bun-testing-env.md` for complete framework design
+- Test categories:
+  - Basic HTTP/3: routes, headers, status codes, content types
+  - Streaming downloads: integrity checks, large files (1GB+)
+  - Streaming uploads: checksums, size validation, push-mode handling
+  - Backpressure testing: concurrent connections, partial writes
+- Implementation components:
+  - Server lifecycle helper (build, spawn, probe, cleanup)
+  - Random port selection to avoid conflicts in CI
+  - Readiness probing via curl HEAD requests
+  - Automatic server teardown on test completion
+- Benefits:
+  - Validates all M5 streaming features comprehensively
+  - Tests real HTTP/3 client behavior (not just unit tests)
+  - Fast iteration with clear, debuggable failures
+  - Hermetic tests suitable for CI/CD pipelines
+- Test:
+  - `bun test tests/e2e` runs full suite
+  - Individual test files for focused debugging
+  - QLOG disabled by default for performance, enabled on failure
 
 Milestone 6: QUIC DATAGRAM (Day 17–19)
 - Enable QUIC DATAGRAM; send/recv APIs; queue sizing and purge.

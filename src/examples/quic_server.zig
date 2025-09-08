@@ -93,6 +93,11 @@ fn registerRoutes(server: *QuicServer) !void {
     // Wildcard example
     try server.route(.GET, "/files/*", filesHandler);
     
+    // Streaming test endpoints (Milestone 5)
+    try server.route(.GET, "/download/*", downloadHandler);
+    try server.route(.GET, "/stream/1gb", stream1GBHandler);
+    try server.route(.GET, "/stream/test", streamTestHandler);
+    
     std.debug.print("Routes registered:\n", .{});
     std.debug.print("  GET  /\n", .{});
     std.debug.print("  GET  /api/users\n", .{});
@@ -100,6 +105,9 @@ fn registerRoutes(server: *QuicServer) !void {
     std.debug.print("  POST /api/users\n", .{});
     std.debug.print("  POST /api/echo\n", .{});
     std.debug.print("  GET  /files/*\n", .{});
+    std.debug.print("  GET  /download/* (file streaming)\n", .{});
+    std.debug.print("  GET  /stream/1gb (1GB test)\n", .{});
+    std.debug.print("  GET  /stream/test (streaming test)\n", .{});
     std.debug.print("\n", .{});
 }
 
@@ -124,7 +132,7 @@ fn indexHandler(req: *http.Request, res: *http.Response) !void {
     ;
     
     try res.header(http.Headers.ContentType, http.MimeTypes.TextHtml);
-    _ = try res.write(html);
+    try res.writeAll(html);
     try res.end(null);
 }
 
@@ -218,6 +226,122 @@ fn echoHandler(req: *http.Request, res: *http.Response) !void {
         };
         try res.jsonValue(response);
     }
+}
+
+// Streaming handlers for Milestone 5
+fn downloadHandler(req: *http.Request, res: *http.Response) !void {
+    const file_path = req.getParam("*") orelse "";
+    
+    // Build absolute path (safely, avoiding path traversal)
+    const allocator = req.arena.allocator();
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd);
+    
+    // Simple safety check - don't allow .. in path
+    if (std.mem.indexOf(u8, file_path, "..") != null) {
+        try res.jsonError(403, "Path traversal not allowed");
+        return;
+    }
+    
+    const full_path = try std.fs.path.join(allocator, &.{ cwd, file_path });
+    
+    // Try to send the file using zero-copy streaming
+    res.sendFile(full_path) catch |err| {
+        switch (err) {
+            error.FileNotFound => try res.jsonError(404, "File not found"),
+            error.AccessDenied => try res.jsonError(403, "Access denied"),
+            else => try res.jsonError(500, "Internal server error"),
+        }
+    };
+}
+
+// Context for 1GB generator
+const OneGBContext = struct {
+    pattern: []const u8,
+    total_written: usize,
+    total_size: usize,
+};
+
+fn generate1GB(ctx: *anyopaque, buf: []u8) anyerror!usize {
+    const context = @as(*OneGBContext, @ptrCast(@alignCast(ctx)));
+    
+    if (context.total_written >= context.total_size) {
+        return 0; // Done generating
+    }
+    
+    // Fill buffer with pattern
+    var written: usize = 0;
+    while (written < buf.len and context.total_written < context.total_size) {
+        const pattern_offset = context.total_written % context.pattern.len;
+        const to_copy = @min(
+            context.pattern.len - pattern_offset,
+            buf.len - written,
+            context.total_size - context.total_written
+        );
+        
+        @memcpy(buf[written..][0..to_copy], context.pattern[pattern_offset..][0..to_copy]);
+        written += to_copy;
+        context.total_written += to_copy;
+    }
+    
+    return written;
+}
+
+fn stream1GBHandler(req: *http.Request, res: *http.Response) !void {
+    const allocator = req.arena.allocator();
+    
+    // Create generator context
+    const ctx = try allocator.create(OneGBContext);
+    ctx.* = .{
+        .pattern = "0123456789ABCDEF",
+        .total_written = 0,
+        .total_size = 1024 * 1024 * 1024, // 1GB
+    };
+    
+    try res.header(http.Headers.ContentType, "application/octet-stream");
+    try res.header(http.Headers.ContentLength, "1073741824"); // 1GB
+    
+    // Use generator-based streaming to avoid blocking the event loop
+    res.partial_response = try http.streaming.PartialResponse.initGenerator(
+        allocator,
+        ctx,
+        generate1GB,
+        64 * 1024, // 64KB buffer
+        1024 * 1024 * 1024, // 1GB total
+        true // Send FIN when complete
+    );
+    
+    // Start the streaming - processWritableStreams will continue it
+    try res.processPartialResponse();
+}
+
+fn streamTestHandler(req: *http.Request, res: *http.Response) !void {
+    // Generate test data with checksum
+    const allocator = req.arena.allocator();
+    const test_size = 10 * 1024 * 1024; // 10MB
+    
+    // Generate predictable test data
+    const data = try allocator.alloc(u8, test_size);
+    for (data, 0..) |*byte, i| {
+        byte.* = @truncate(i % 256);
+    }
+    
+    // Calculate simple checksum
+    var checksum: u32 = 0;
+    for (data) |byte| {
+        checksum = checksum +% byte;
+    }
+    
+    // Send response with checksum header
+    try res.header(http.Headers.ContentType, "application/octet-stream");
+    var checksum_buf: [20]u8 = undefined;
+    const checksum_str = try std.fmt.bufPrint(&checksum_buf, "{d}", .{checksum});
+    try res.header("X-Checksum", checksum_str);
+    
+    // Use writeAll which handles backpressure properly
+    // If it returns StreamBlocked, the updated invokeHandler will handle it
+    try res.writeAll(data);
+    try res.end(null);
 }
 
 fn printHelp() void {

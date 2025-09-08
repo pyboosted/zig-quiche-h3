@@ -239,6 +239,32 @@ pub const Connection = struct {
         if (proto_len == 0) return null;
         return proto[0..proto_len];
     }
+    
+    pub fn streamCapacity(self: *Connection, stream_id: u64) !usize {
+        const res = c.quiche_conn_stream_capacity(self.ptr, stream_id);
+        if (res < 0) {
+            // Propagate the actual error instead of masking it
+            return mapError(@intCast(res));
+        }
+        return @intCast(res);
+    }
+    
+    pub fn streamWritableNext(self: *Connection) ?u64 {
+        const res = c.quiche_conn_stream_writable_next(self.ptr);
+        if (res < 0) return null;
+        return @intCast(res);
+    }
+    
+    pub fn streamWritable(self: *Connection, stream_id: u64, len: usize) !bool {
+        const res = c.quiche_conn_stream_writable(self.ptr, stream_id, len);
+        // Positive means writable, 0 means not writable, negative is error
+        if (res < 0) {
+            // Propagate the actual error instead of returning false
+            try mapError(@intCast(res));
+            return false; // Shouldn't reach here but needed for type safety
+        }
+        return res > 0;
+    }
 };
 
 // Header parsing

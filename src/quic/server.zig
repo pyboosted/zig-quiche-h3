@@ -30,6 +30,10 @@ const RequestState = struct {
     handler: http.Handler,
     body_complete: bool = false,
     handler_invoked: bool = false, // Track if handler was already called
+    
+    // Push-mode streaming callbacks
+    on_body_chunk: ?*const fn(req: *http.Request, chunk: []const u8) anyerror!void = null,
+    on_body_complete: ?*const fn(req: *http.Request) anyerror!void = null,
 };
 
 pub const QuicServer = struct {
@@ -436,6 +440,11 @@ pub const QuicServer = struct {
                 };
             }
             
+            // Process any streams that became writable after recv
+            self.processWritableStreams(conn.?) catch |err| {
+                std.debug.print("Error processing writable streams: {}\n", .{err});
+            };
+            
             // Drain egress after recv
             try self.drainEgress(conn.?);
             
@@ -685,6 +694,12 @@ pub const QuicServer = struct {
                             // For methods without body, invoke handler immediately
                             if (method == .GET or method == .HEAD or method == .DELETE) {
                                 self.invokeHandler(state) catch |err| {
+                                    // StreamBlocked is non-fatal - handler started streaming response
+                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                        // Keep state alive for processWritableStreams to resume
+                                        return;
+                                    }
+                                    // For other errors, send error response
                                     std.debug.print("Handler error: {}\n", .{err});
                                     self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 
                                         http.errorToStatus(err)) catch {};
@@ -720,17 +735,50 @@ pub const QuicServer = struct {
                         const received = h3_conn.recvBody(&conn.conn, result.stream_id, &buf) catch 0;
                         
                         if (received > 0) {
-                            // Add to body buffer (with size limit)
-                            state.request.appendBody(buf[0..received], self.config.max_request_body_size) catch |err| {
-                                if (err == error.PayloadTooLarge) {
+                            // Check if we're in streaming mode
+                            if (state.on_body_chunk) |on_chunk| {
+                                // Push-mode: call the streaming callback
+                                // Still enforce max body size by tracking total received
+                                const new_total = state.request.getBodySize() + received;
+                                if (new_total > self.config.max_request_body_size) {
                                     try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
                                     // Clean up state
                                     _ = self.stream_states.remove(result.stream_id);
                                     state.response.deinit();
                                     state.arena.deinit();
                                     self.allocator.destroy(state);
+                                    return;
                                 }
-                            };
+                                
+                                // Update body size for tracking
+                                state.request.addToBodySize(received);
+                                
+                                // Check size limit even in streaming mode
+                                if (state.request.getBodySize() > self.config.max_request_body_size) {
+                                    try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
+                                    // Clean up state
+                                    _ = self.stream_states.remove(result.stream_id);
+                                    state.response.deinit();
+                                    state.arena.deinit();
+                                    self.allocator.destroy(state);
+                                    return;
+                                }
+                                
+                                // Call the chunk callback
+                                try on_chunk(&state.request, buf[0..received]);
+                            } else {
+                                // Buffering mode: add to body buffer (with size limit)
+                                state.request.appendBody(buf[0..received], self.config.max_request_body_size) catch |err| {
+                                    if (err == error.PayloadTooLarge) {
+                                        try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
+                                        // Clean up state
+                                        _ = self.stream_states.remove(result.stream_id);
+                                        state.response.deinit();
+                                        state.arena.deinit();
+                                        self.allocator.destroy(state);
+                                    }
+                                };
+                            }
                         }
                     }
                 },
@@ -743,19 +791,38 @@ pub const QuicServer = struct {
                             state.body_complete = true;
                             state.request.setBodyComplete();
                             
-                            // Invoke handler with complete body
-                            self.invokeHandler(state) catch |err| {
-                                std.debug.print("Handler error: {}\n", .{err});
-                                self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id,
-                                    http.errorToStatus(err)) catch {};
-                            };
+                            // Check if we're in streaming mode with completion callback
+                            if (state.on_body_complete) |on_complete| {
+                                // Call the completion callback
+                                try on_complete(&state.request);
+                                // Don't invoke the regular handler - streaming mode handles its own response
+                            } else {
+                                // Buffering mode: invoke handler with complete body
+                                self.invokeHandler(state) catch |err| {
+                                    // StreamBlocked is non-fatal - handler started streaming response
+                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                        // Keep state alive for processWritableStreams to resume
+                                        return;
+                                    }
+                                    // For other errors, send error response
+                                    std.debug.print("Handler error: {}\n", .{err});
+                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id,
+                                        http.errorToStatus(err)) catch {};
+                                };
+                            }
                         }
                         
-                        // Clean up state
-                        _ = self.stream_states.remove(result.stream_id);
-                        state.response.deinit();
-                        state.arena.deinit();
-                        self.allocator.destroy(state);
+                        // Only clean up if response is truly complete
+                        if (state.response.isEnded() and state.response.partial_response == null) {
+                            // Response is complete, safe to clean up
+                            _ = self.stream_states.remove(result.stream_id);
+                            state.response.deinit();
+                            state.arena.deinit();
+                            self.allocator.destroy(state);
+                        } else {
+                            // Keep state alive for processWritableStreams to finish
+                            std.debug.print("  Keeping stream {} alive for ongoing response\n", .{result.stream_id});
+                        }
                     }
                 },
                 .GoAway, .Reset => {
@@ -783,12 +850,60 @@ pub const QuicServer = struct {
         }
         state.handler_invoked = true;
         
-        try state.handler(&state.request, &state.response);
+        // Call the handler and handle backpressure errors specially
+        state.handler(&state.request, &state.response) catch |err| {
+            // StreamBlocked errors are non-fatal - the handler is trying to send
+            // a large response and hit flow control. Keep the state alive so
+            // processWritableStreams can resume the send later.
+            if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                // Don't send error response or end the stream
+                // The partial response will be resumed by processWritableStreams
+                return;
+            }
+            // For other errors, propagate them normally
+            return err;
+        };
         
-        // Ensure response is ended
-        if (!state.response.isEnded()) {
+        // Only auto-end the response if there's no partial response pending
+        // If there is a partial response, let processWritableStreams handle completion
+        if (!state.response.isEnded() and state.response.partial_response == null) {
             try state.response.end(null);
         }
+    }
+    
+    fn processWritableStreams(self: *QuicServer, conn: *connection.Connection) !void {
+        // Process all writable streams
+        while (conn.conn.streamWritableNext()) |stream_id| {
+            // Check if this stream has a partial response waiting
+            if (self.stream_states.get(stream_id)) |state| {
+                if (state.response.partial_response != null) {
+                    // Try to resume sending the partial response
+                    state.response.processPartialResponse() catch |err| {
+                        if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                            // Stream is blocked again, will retry later
+                            continue;
+                        }
+                        // For other errors, clean up the stream state
+                        std.debug.print("Error processing partial response for stream {}: {}\n", .{ stream_id, err });
+                        state.response.deinit();
+                        state.arena.deinit();
+                        self.allocator.destroy(state);
+                        _ = self.stream_states.remove(stream_id);
+                    };
+                    
+                    // If response is complete, clean up
+                    if (state.response.isEnded() and state.response.partial_response == null) {
+                        state.response.deinit();
+                        state.arena.deinit();
+                        self.allocator.destroy(state);
+                        _ = self.stream_states.remove(stream_id);
+                    }
+                }
+            }
+        }
+        
+        // Drain egress after processing writable streams
+        try self.drainEgress(conn);
     }
     
     fn sendErrorResponse(
@@ -870,6 +985,11 @@ pub const QuicServer = struct {
                     if (err != quiche.h3.Error.StreamBlocked) {
                         std.debug.print("H3 processing error in timer: {}\n", .{err});
                     }
+                };
+                
+                // Periodically check for writable streams (retry blocked sends)
+                self.processWritableStreams(conn) catch |err| {
+                    std.debug.print("Error processing writable streams in timer: {}\n", .{err});
                 };
             }
             
