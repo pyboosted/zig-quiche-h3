@@ -47,6 +47,11 @@ pub const ServerConfig = struct {
         "http/0.9",    // HTTP/0.9
     },
     
+    // HTTP configuration limits
+    max_request_headers_size: usize = 16384,     // 16KB
+    max_request_body_size: usize = 10485760,     // 10MB
+    max_path_length: usize = 2048,
+    
     // Retry
     enable_retry: bool = false, // Optional for M3
     
@@ -70,6 +75,9 @@ pub const ServerConfig = struct {
         // Check buffer sizes
         if (self.recv_buffer_size < 1350) return error.RecvBufferTooSmall;
         if (self.send_buffer_size < 1350) return error.SendBufferTooSmall;
+        
+        // Validate debug log throttle
+        if (self.debug_log_throttle == 0) return error.InvalidDebugLogThrottle;
     }
     
     pub fn createQlogPath(self: *const ServerConfig, allocator: std.mem.Allocator, conn_id: []const u8) ![:0]u8 {
@@ -87,10 +95,14 @@ pub const ServerConfig = struct {
                 hex_len += 1;
             }
             
-            // Use allocPrint and manually null-terminate
-            const path = try std.fmt.allocPrint(allocator, "{s}/{s}.qlog\x00", .{ dir, hex_buf[0..hex_len] });
-            // Convert to null-terminated slice
-            return path[0..path.len - 1 :0];
+            // Use allocPrint to create the path
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}.qlog", .{ dir, hex_buf[0..hex_len] });
+            // Add null terminator for C interop
+            const path_z = try allocator.alloc(u8, path.len + 1);
+            @memcpy(path_z[0..path.len], path);
+            path_z[path.len] = 0;
+            allocator.free(path);
+            return path_z[0..path.len :0];
         }
         return error.QlogDisabled;
     }

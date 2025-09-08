@@ -62,7 +62,9 @@ pub const Connection = struct {
         
         self.conn.deinit();
         if (self.qlog_path) |path| {
-            allocator.free(path);
+            // Free the full allocation including null terminator
+            const full_path = path.ptr[0..path.len + 1];
+            allocator.free(full_path);
         }
     }
     
@@ -145,11 +147,7 @@ pub fn createConnection(
     const conn = try allocator.create(Connection);
     errdefer allocator.destroy(conn);
     
-    var owned_qlog_path: ?[]u8 = null;
-    if (qlog_path) |path| {
-        owned_qlog_path = try allocator.dupe(u8, path);
-    }
-    errdefer if (owned_qlog_path) |path| allocator.free(path);
+    // Take ownership of qlog_path directly (already allocated by caller)
     
     conn.* = .{
         .conn = q_conn,
@@ -166,7 +164,7 @@ pub fn createConnection(
         .dcid = undefined,
         .dcid_len = @intCast(dcid.len),
         .timeout_deadline_ms = 0,
-        .qlog_path = owned_qlog_path,
+        .qlog_path = qlog_path,
     };
     
     // Copy DCID

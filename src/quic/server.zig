@@ -5,6 +5,7 @@ const config_mod = @import("config");
 const EventLoop = @import("event_loop").EventLoop;
 const udp = @import("udp");
 const h3 = @import("h3");
+const http = @import("http");
 
 const c = quiche.c;
 const posix = std.posix;
@@ -15,10 +16,21 @@ var debug_counter = std.atomic.Value(u32).init(0);
 fn debugLog(line: [*c]const u8, argp: ?*anyopaque) callconv(.c) void {
     const count = debug_counter.fetchAdd(1, .monotonic);
     const cfg = @as(*const config_mod.ServerConfig, @ptrCast(@alignCast(argp orelse return)));
+    // debug_log_throttle is validated to be > 0 in config.validate()
     if (count % cfg.debug_log_throttle == 0) {
         std.debug.print("[QUICHE] {s}\n", .{line});
     }
 }
+
+// Request state for streaming bodies
+const RequestState = struct {
+    arena: std.heap.ArenaAllocator,
+    request: http.Request,
+    response: http.Response,
+    handler: http.Handler,
+    body_complete: bool = false,
+    handler_invoked: bool = false, // Track if handler was already called
+};
 
 pub const QuicServer = struct {
     allocator: std.mem.Allocator,
@@ -36,6 +48,10 @@ pub const QuicServer = struct {
     
     // HTTP/3 configuration
     h3_config: ?h3.H3Config = null,
+    
+    // HTTP routing
+    router: http.Router,
+    stream_states: std.AutoHashMap(u64, *RequestState),
     
     // Statistics
     connections_accepted: usize = 0,
@@ -108,6 +124,8 @@ pub const QuicServer = struct {
             .connections = connection.ConnectionTable.init(allocator),
             .event_loop = loop,
             .conn_id_seed = conn_id_seed,
+            .router = http.Router.init(allocator),
+            .stream_states = std.AutoHashMap(u64, *RequestState).init(allocator),
         };
         
         // Create H3 config
@@ -135,6 +153,18 @@ pub const QuicServer = struct {
             }
         }
         self.connections.deinit();
+        
+        // Clean up stream states
+        var stream_iter = self.stream_states.iterator();
+        while (stream_iter.next()) |entry| {
+            entry.value_ptr.*.response.deinit();
+            entry.value_ptr.*.arena.deinit();
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.stream_states.deinit();
+        
+        // Clean up router
+        self.router.deinit();
         
         if (self.h3_config) |*h| h.deinit();
         self.quiche_config.deinit();
@@ -184,6 +214,11 @@ pub const QuicServer = struct {
             // Note: libev will clean up timers when loop stops
             self.event_loop.stop();
         }
+    }
+    
+    /// Register a route with the HTTP router
+    pub fn route(self: *QuicServer, method: http.Method, pattern: []const u8, handler: http.Handler) !void {
+        try self.router.route(method, pattern, handler);
     }
     
     fn onUdpReadable(fd: posix.socket_t, _revents: u32, user_data: *anyopaque) void {
@@ -465,6 +500,7 @@ pub const QuicServer = struct {
                     // quiche copies the strings internally, so we can free them now
                     self.allocator.free(title);
                     self.allocator.free(desc);
+                    // Note: We keep 'p' allocated and pass ownership to the connection
                 } else {
                     // QLOG setup failed, clean up
                     self.allocator.free(p);
@@ -555,62 +591,244 @@ pub const QuicServer = struct {
             
             switch (result.event_type) {
                 .Headers => {
-                    // Collect headers
-                    const headers = try h3.collectHeaders(self.allocator, result.raw_event);
-                    defer h3.freeHeaders(self.allocator, headers);
+                    // Create request state with arena first
+                    const state = try self.allocator.create(RequestState);
+                    state.* = .{
+                        .arena = std.heap.ArenaAllocator.init(self.allocator),
+                        .request = undefined,
+                        .response = undefined,
+                        .handler = undefined,
+                        .body_complete = false,
+                        .handler_invoked = false,
+                    };
+                    errdefer {
+                        state.arena.deinit();
+                        self.allocator.destroy(state);
+                    }
+                    
+                    // Collect headers using arena allocator
+                    const arena_allocator = state.arena.allocator();
+                    const headers = try h3.collectHeaders(arena_allocator, result.raw_event);
+                    // No defer free - arena will handle it
                     
                     // Parse request info
                     const req_info = h3.parseRequestHeaders(headers);
                     
-                    std.debug.print("→ HTTP/3 request: {s} {s}\n", .{
-                        req_info.method orelse "?",
-                        req_info.path orelse "?",
-                    });
+                    // Validate required pseudo-headers
+                    if (req_info.method == null or req_info.path == null) {
+                        // Send 400 Bad Request
+                        try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 400);
+                        state.arena.deinit();
+                        self.allocator.destroy(state);
+                        continue;
+                    }
                     
-                    // Prepare body and compute content-length
-                    const body = "Hello, HTTP/3!\n";
-                    var len_buf: [20]u8 = undefined;
-                    const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body.len}) catch unreachable;
+                    const method_str = req_info.method.?;
+                    const path_raw = req_info.path.?;
                     
-                    // Build response headers with careful lifetime management
-                    const response_headers = [_]quiche.h3.Header{
-                        .{ .name = ":status", .name_len = 7, .value = "200", .value_len = 3 },
-                        .{ .name = "server", .name_len = 6, .value = "zig-quiche-h3", .value_len = 13 },
-                        .{ .name = "content-type", .name_len = 12, .value = "text/plain", .value_len = 10 },
-                        .{ .name = "content-length", .name_len = 14, .value = len_str.ptr, .value_len = len_str.len },
+                    std.debug.print("→ HTTP/3 request: {s} {s}\n", .{ method_str, path_raw });
+                    
+                    // Parse method
+                    const method = http.Method.fromString(method_str) orelse {
+                        // Unknown method
+                        try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 405);
+                        state.arena.deinit();
+                        self.allocator.destroy(state);
+                        continue;
                     };
                     
-                    // Send response (pass slice, not pointer to array)
-                    try h3_conn.sendResponse(&conn.conn, result.stream_id, response_headers[0..], false);
-                    
-                    // Send body
-                    // Note: For larger bodies in future, consider retry queue on StreamBlocked
-                    _ = try h3_conn.sendBody(&conn.conn, result.stream_id, body, true);
-                    
-                    std.debug.print("← Sent HTTP/3 response on stream {}\n", .{result.stream_id});
-                    
-                    // Check if there are more frames (e.g., request body)
-                    if (quiche.h3.eventHeadersHasMoreFrames(result.raw_event)) {
-                        // Client is sending a body, we'll receive it in subsequent Data events
-                        std.debug.print("  Request has body, will be received in Data events\n", .{});
+                    // Convert headers to our format - reuse arena-allocated headers
+                    const req_headers = try arena_allocator.alloc(http.Header, headers.len);
+                    for (headers, 0..) |h, i| {
+                        // Headers are already arena-allocated from collectHeaders, just reference them
+                        req_headers[i] = .{
+                            .name = h.name,
+                            .value = h.value,
+                        };
                     }
+                    
+                    // Initialize request
+                    state.request = try http.Request.init(
+                        &state.arena,
+                        method,
+                        path_raw,
+                        req_info.authority,
+                        req_headers,
+                        result.stream_id,
+                    );
+                    
+                    // Match route
+                    const match_result = try self.router.match(
+                        arena_allocator,
+                        method,
+                        state.request.path_decoded,
+                    );
+                    
+                    switch (match_result) {
+                        .Found => |found| {
+                            // Store extracted params
+                            state.request.params = found.params;
+                            state.handler = found.route.handler;
+                            
+                            // Initialize response
+                            state.response = http.Response.init(
+                                state.arena.allocator(),
+                                h3_conn,
+                                &conn.conn,
+                                result.stream_id,
+                                method == .HEAD,
+                            );
+                            
+                            // Store state
+                            try self.stream_states.put(result.stream_id, state);
+                            
+                            // For methods without body, invoke handler immediately
+                            if (method == .GET or method == .HEAD or method == .DELETE) {
+                                self.invokeHandler(state) catch |err| {
+                                    std.debug.print("Handler error: {}\n", .{err});
+                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 
+                                        http.errorToStatus(err)) catch {};
+                                };
+                            }
+                            // For methods with body, wait for Data events
+                        },
+                        .NotFound => {
+                            try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 404);
+                            state.arena.deinit();
+                            self.allocator.destroy(state);
+                        },
+                        .MethodNotAllowed => |not_allowed| {
+                            const allow = try http.Router.formatAllowHeader(
+                                self.allocator,
+                                not_allowed.allowed_methods,
+                            );
+                            defer self.allocator.free(allow);
+                            // Don't free allowed_methods - arena will handle it
+                            
+                            try self.sendErrorResponseWithAllow(h3_conn, &conn.conn, result.stream_id, 405, allow);
+                            state.arena.deinit();
+                            self.allocator.destroy(state);
+                        },
+                    }
+                    
+                    // Note: Body data (if any) will arrive in subsequent Data events
                 },
                 .Data => {
-                    // Drain body for M3 (ignore content)
-                    var buf: [1024]u8 = undefined;
-                    _ = h3_conn.recvBody(&conn.conn, result.stream_id, &buf) catch 0;
+                    // Handle body data
+                    if (self.stream_states.get(result.stream_id)) |state| {
+                        var buf: [8192]u8 = undefined;
+                        const received = h3_conn.recvBody(&conn.conn, result.stream_id, &buf) catch 0;
+                        
+                        if (received > 0) {
+                            // Add to body buffer (with size limit)
+                            state.request.appendBody(buf[0..received], self.config.max_request_body_size) catch |err| {
+                                if (err == error.PayloadTooLarge) {
+                                    try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
+                                    // Clean up state
+                                    _ = self.stream_states.remove(result.stream_id);
+                                    state.response.deinit();
+                                    state.arena.deinit();
+                                    self.allocator.destroy(state);
+                                }
+                            };
+                        }
+                    }
                 },
                 .Finished => {
                     std.debug.print("  Stream {} finished\n", .{result.stream_id});
+                    
+                    // If we have state and haven't invoked handler yet, do it now
+                    if (self.stream_states.get(result.stream_id)) |state| {
+                        if (!state.body_complete) {
+                            state.body_complete = true;
+                            state.request.setBodyComplete();
+                            
+                            // Invoke handler with complete body
+                            self.invokeHandler(state) catch |err| {
+                                std.debug.print("Handler error: {}\n", .{err});
+                                self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id,
+                                    http.errorToStatus(err)) catch {};
+                            };
+                        }
+                        
+                        // Clean up state
+                        _ = self.stream_states.remove(result.stream_id);
+                        state.response.deinit();
+                        state.arena.deinit();
+                        self.allocator.destroy(state);
+                    }
                 },
                 .GoAway, .Reset => {
                     std.debug.print("  Stream {} closed ({})\n", .{ result.stream_id, result.event_type });
+                    
+                    // Clean up state if exists
+                    if (self.stream_states.fetchRemove(result.stream_id)) |entry| {
+                        entry.value.response.deinit();
+                        entry.value.arena.deinit();
+                        self.allocator.destroy(entry.value);
+                    }
                 },
                 .PriorityUpdate => {
                     // Log for telemetry
                 },
             }
         }
+    }
+    
+    fn invokeHandler(self: *QuicServer, state: *RequestState) !void {
+        _ = self;
+        // Prevent double invocation
+        if (state.handler_invoked) {
+            return;
+        }
+        state.handler_invoked = true;
+        
+        try state.handler(&state.request, &state.response);
+        
+        // Ensure response is ended
+        if (!state.response.isEnded()) {
+            try state.response.end(null);
+        }
+    }
+    
+    fn sendErrorResponse(
+        self: *QuicServer,
+        h3_conn: *h3.H3Connection,
+        quic_conn: *quiche.Connection,
+        stream_id: u64,
+        status_code: u16,
+    ) !void {
+        _ = self;
+        var status_buf: [4]u8 = undefined;
+        const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{status_code});
+        
+        const headers = [_]quiche.h3.Header{
+            .{ .name = ":status", .name_len = 7, .value = status_str.ptr, .value_len = status_str.len },
+            .{ .name = "content-length", .name_len = 14, .value = "0", .value_len = 1 },
+        };
+        
+        try h3_conn.sendResponse(quic_conn, stream_id, headers[0..], true);
+    }
+    
+    fn sendErrorResponseWithAllow(
+        self: *QuicServer,
+        h3_conn: *h3.H3Connection,
+        quic_conn: *quiche.Connection,
+        stream_id: u64,
+        status_code: u16,
+        allow: []const u8,
+    ) !void {
+        _ = self;
+        var status_buf: [4]u8 = undefined;
+        const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{status_code});
+        
+        const headers = [_]quiche.h3.Header{
+            .{ .name = ":status", .name_len = 7, .value = status_str.ptr, .value_len = status_str.len },
+            .{ .name = "allow", .name_len = 5, .value = allow.ptr, .value_len = allow.len },
+            .{ .name = "content-length", .name_len = 14, .value = "0", .value_len = 1 },
+        };
+        
+        try h3_conn.sendResponse(quic_conn, stream_id, headers[0..], true);
     }
     
     fn updateTimer(self: *QuicServer, conn: *connection.Connection, timeout_ms: u64) !void {
@@ -686,12 +904,25 @@ pub const QuicServer = struct {
         var hex_buf: [40]u8 = undefined;
         const hex_dcid = connection.formatCid(conn.dcid[0..conn.dcid_len], &hex_buf) catch "???";
         
-        std.debug.print("Connection closed {s}: recv={d} sent={d} lost={d}\n", .{
-            hex_dcid,
-            stats.recv,
-            stats.sent,
-            stats.lost,
-        });
+        // Check for peer error details
+        if (conn.conn.peerError()) |peer_err| {
+            std.debug.print("Connection closed {s}: recv={d} sent={d} lost={d} peer_error={{app={}, code=0x{x}, reason=\"{s}\"}}\n", .{
+                hex_dcid,
+                stats.recv,
+                stats.sent,
+                stats.lost,
+                peer_err.is_app,
+                peer_err.error_code,
+                peer_err.reason,
+            });
+        } else {
+            std.debug.print("Connection closed {s}: recv={d} sent={d} lost={d}\n", .{
+                hex_dcid,
+                stats.recv,
+                stats.sent,
+                stats.lost,
+            });
+        }
         
         // Clean up H3 connection if it exists
         if (conn.http3) |h3_ptr| {

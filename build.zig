@@ -139,6 +139,15 @@ pub fn build(b: *std.Build) void {
     });
     h3_mod.addImport("quiche", quiche_ffi_mod);
     
+    // HTTP module for routing and request/response handling
+    const http_mod = b.createModule(.{
+        .root_source_file = b.path("src/http/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    http_mod.addImport("quiche", quiche_ffi_mod);
+    http_mod.addImport("h3", h3_mod);
+    
     const server_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/server.zig"),
         .target = target,
@@ -150,6 +159,7 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("event_loop", event_loop_mod);
     server_mod.addImport("udp", udp_mod);
     server_mod.addImport("h3", h3_mod);
+    server_mod.addImport("http", http_mod);
     
     // QUIC server executable
     const quic_server_mod = b.createModule(.{
@@ -159,6 +169,7 @@ pub fn build(b: *std.Build) void {
     });
     quic_server_mod.addImport("server", server_mod);
     quic_server_mod.addImport("config", config_mod);
+    quic_server_mod.addImport("http", http_mod);
     
     const quic_server = b.addExecutable(.{
         .name = "quic-server",

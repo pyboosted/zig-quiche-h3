@@ -206,7 +206,7 @@ pub const Connection = struct {
     pub fn peerError(self: *const Connection) ?struct { is_app: bool, error_code: u64, reason: []const u8 } {
         var is_app: bool = false;
         var error_code: u64 = 0;
-        var reason: [*c]u8 = undefined;
+        var reason: [*c]const u8 = undefined;
         var reason_len: usize = 0;
 
         if (!c.quiche_conn_peer_error(self.ptr, &is_app, &error_code, &reason, &reason_len)) {

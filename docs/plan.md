@@ -139,9 +139,50 @@ Implementation Details:
   - Connection cleanup without leaks
 
 Milestone 4: Dynamic Routing (Day 11–13)
+Status: Completed ✓
 - Route registration and pattern matching (`/api/users/:id`, `/files/*`).
 - Public Request/Response API (headers, status, body streaming surface started).
+- Type-safe JSON serialization using `std.json.Stringify.valueAlloc()`.
 - Test: `/api/users/:id` returns JSON; correct headers/status ✓
+
+Implementation Details:
+- Created HTTP abstraction layer in `src/http/`:
+  - `router.zig`: Path-based routing with parameter extraction (`:id` patterns)
+  - `request.zig`: Request object with headers, params, arena allocator
+  - `response.zig`: Response builder with status, headers, body methods
+  - `json.zig`: Type-safe JSON serialization using std.json API
+- Router features:
+  - Pattern matching for static paths and parameters (`:id`)
+  - Wildcard support (`/files/*`)
+  - Method-specific routing (GET, POST, etc.)
+  - Parameter extraction into request.params
+- Request/Response API:
+  - Request: method, path, headers, params, body access
+  - Response: chainable status(), header(), write(), end() methods
+  - Arena allocator per request for zero-cost cleanup
+- JSON serialization:
+  - `json.send()`: Serialize any Zig value to JSON response
+  - `jsonValue()` method on Response for structured data
+  - Uses `std.json.Stringify.valueAlloc()` (Zig 0.15.1 API)
+  - Minified output for bandwidth efficiency
+  - Proper charset specification in content-type header
+- Memory optimizations:
+  - Eliminated double header duplication in server.zig
+  - Headers directly referenced from arena-allocated memory
+  - Single allocation per JSON response using arena
+- Configuration validation:
+  - Added debug_log_throttle > 0 validation at startup
+  - Early error detection prevents runtime issues
+- Example handlers:
+  - `/api/users`: Returns JSON array of users
+  - `/api/users/:id`: Returns single user object with ID
+  - `/api/echo`: Echoes POST body back as JSON
+  - `/files/*`: Serves static files (future implementation)
+- Testing verified:
+  - JSON responses properly formatted and escaped
+  - Content-type includes charset=utf-8
+  - Dynamic routes with parameters working
+  - Memory efficient with arena cleanup
 
 Milestone 5: Streaming Bodies (Day 14–16)
 - Chunked read/write with backpressure; partial write handling (`Done` retry).
