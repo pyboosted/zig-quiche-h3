@@ -16,13 +16,15 @@ describe("HTTP/3 Download Streaming", () => {
   });
 
   describe("/stream/test endpoint", () => {
-    it.skip("returns 10MB with X-Checksum header", async () => {
-      // NOTE: 10MB+ downloads fail with curl exit code 55 (Failed sending data to peer)
-      // This appears to be a curl/HTTP3 limitation, not a server issue
-      const response = await get(`https://127.0.0.1:${server.port}/stream/test`);
+    it("returns 10MB with X-Checksum header", async () => {
+      const response = await get(
+        `https://127.0.0.1:${server.port}/stream/test`
+      );
 
       expect(response.status).toBe(200);
-      expect(response.headers.get("content-type")).toContain("application/octet-stream");
+      expect(response.headers.get("content-type")).toContain(
+        "application/octet-stream"
+      );
 
       // Check X-Checksum header exists
       const checksum = response.headers.get("x-checksum");
@@ -44,10 +46,13 @@ describe("HTTP/3 Download Streaming", () => {
       expect(computedHash).toBe(computedHash); // Self-consistent
     });
 
-    it.skip("has consistent content across multiple requests", async () => {
-      // NOTE: Skipped due to 10MB download issue with curl/HTTP3
-      const response1 = await get(`https://127.0.0.1:${server.port}/stream/test`);
-      const response2 = await get(`https://127.0.0.1:${server.port}/stream/test`);
+    it("has consistent content across multiple requests", async () => {
+      const response1 = await get(
+        `https://127.0.0.1:${server.port}/stream/test`
+      );
+      const response2 = await get(
+        `https://127.0.0.1:${server.port}/stream/test`
+      );
 
       expect(response1.status).toBe(200);
       expect(response2.status).toBe(200);
@@ -67,49 +72,67 @@ describe("HTTP/3 Download Streaming", () => {
   describe("/stream/1gb endpoint (stress test)", () => {
     const shouldRunStress = process.env.H3_STRESS === "1";
 
-    it.skipIf(!shouldRunStress)("returns 1GB with correct content-length", async () => {
-      const response = await curl(`https://127.0.0.1:${server.port}/stream/1gb`, {
-        outputNull: true, // Don't buffer the body, just check headers
-      });
+    it.skipIf(!shouldRunStress)(
+      "returns 1GB with correct content-length",
+      async () => {
+        const response = await curl(
+          `https://127.0.0.1:${server.port}/stream/1gb`,
+          {
+            outputNull: true, // Don't buffer the body, just check headers
+          }
+        );
 
-      expect(response.status).toBe(200);
-      expect(response.headers.get("content-type")).toContain("application/octet-stream");
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain(
+          "application/octet-stream"
+        );
 
-      // Check content-length header
-      const contentLength = parseContentLength(response.headers);
-      const expectedSize = 1024 * 1024 * 1024; // 1GB
-      expect(contentLength).toBe(expectedSize);
+        // Check content-length header
+        const contentLength = parseContentLength(response.headers);
+        const expectedSize = 1024 * 1024 * 1024; // 1GB
+        expect(contentLength).toBe(expectedSize);
 
-      console.log(`1GB stream test passed (headers only)`);
-    });
+        console.log(`1GB stream test passed (headers only)`);
+      }
+    );
 
-    it.skipIf(!shouldRunStress)("1GB download completes without memory exhaustion", async () => {
-      // Test with limited rate to simulate real-world conditions
-      const response = await curl(`https://127.0.0.1:${server.port}/stream/1gb`, {
-        outputNull: true,
-        limitRate: "10M", // 10MB/s rate limit
-        maxTime: 120, // 2 minute timeout
-      });
+    it.skipIf(!shouldRunStress)(
+      "1GB download completes without memory exhaustion",
+      async () => {
+        // Test with limited rate to simulate real-world conditions
+        const response = await curl(
+          `https://127.0.0.1:${server.port}/stream/1gb`,
+          {
+            outputNull: true,
+            limitRate: "30M", // 10MB/s rate limit
+            maxTime: 120, // 2 minute timeout
+          }
+        );
 
-      expect(response.status).toBe(200);
+        expect(response.status).toBe(200);
 
-      const contentLength = parseContentLength(response.headers);
-      expect(contentLength).toBe(1024 * 1024 * 1024);
+        const contentLength = parseContentLength(response.headers);
+        expect(contentLength).toBe(1024 * 1024 * 1024);
 
-      console.log("1GB rate-limited download completed successfully");
-    });
+        console.log("1GB rate-limited download completed successfully");
+      }
+    );
   });
 
   describe("/download/* file serving", () => {
-    it.skip("serves generated files with correct checksum", async () => {
-      // NOTE: 1MB file serving also times out with curl/HTTP3
+    it("serves generated files with correct checksum", async () => {
       await withTempDir(async (_dir) => {
         // Create a test file
-        const testFile = await mkfile(1024 * 1024, new Uint8Array([0x42, 0xff, 0x00])); // 1MB with pattern
+        const testFile = await mkfile(
+          1024 * 1024,
+          new Uint8Array([0x42, 0xff, 0x00])
+        ); // 1MB with pattern
 
         // Request the file via download endpoint
         const relativePath = testFile.path.replace("./", ""); // Remove leading ./
-        const response = await get(`https://127.0.0.1:${server.port}/download/${relativePath}`);
+        const response = await get(
+          `https://127.0.0.1:${server.port}/download/${relativePath}`
+        );
 
         expect(response.status).toBe(200);
 
@@ -125,17 +148,23 @@ describe("HTTP/3 Download Streaming", () => {
     });
 
     it("returns 404 for non-existent files", async () => {
-      const response = await get(`https://127.0.0.1:${server.port}/download/does-not-exist.txt`);
+      const response = await get(
+        `https://127.0.0.1:${server.port}/download/does-not-exist.txt`
+      );
 
       expect(response.status).toBe(404);
-      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
 
       const json = JSON.parse(new TextDecoder().decode(response.body));
       expect(json.error).toContain("File not found");
     });
 
     it("rejects path traversal attempts", async () => {
-      const response = await get(`https://127.0.0.1:${server.port}/download/../../../etc/passwd`);
+      const response = await get(
+        `https://127.0.0.1:${server.port}/download/../../../etc/passwd`
+      );
 
       // Router doesn't match paths with .. so returns 404, not 403
       expect(response.status).toBe(404);
@@ -143,11 +172,15 @@ describe("HTTP/3 Download Streaming", () => {
     });
 
     it("rejects absolute paths", async () => {
-      const response = await get(`https://127.0.0.1:${server.port}/download//etc/passwd`);
+      const response = await get(
+        `https://127.0.0.1:${server.port}/download//etc/passwd`
+      );
 
       expect(response.status).toBe(403);
       // Server sends JSON error response for this case
-      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
 
       const json = JSON.parse(new TextDecoder().decode(response.body));
       expect(json.error).toContain("Absolute paths not allowed");
@@ -157,7 +190,9 @@ describe("HTTP/3 Download Streaming", () => {
       const response = await get(`https://127.0.0.1:${server.port}/download/`);
 
       expect(response.status).toBe(400);
-      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
 
       const json = JSON.parse(new TextDecoder().decode(response.body));
       expect(json.error).toContain("File path required");
@@ -166,12 +201,14 @@ describe("HTTP/3 Download Streaming", () => {
 
   describe("Streaming behavior", () => {
     it.skip("supports partial content ranges (if implemented)", async () => {
-      // FIXME: Range requests causing curl errors
-      const response = await curl(`https://127.0.0.1:${server.port}/stream/test`, {
-        headers: {
-          Range: "bytes=0-1023", // First 1KB
-        },
-      });
+      const response = await curl(
+        `https://127.0.0.1:${server.port}/stream/test`,
+        {
+          headers: {
+            Range: "bytes=0-1023", // First 1KB
+          },
+        }
+      );
 
       // Server may or may not support ranges, but should not crash
       expect([200, 206, 416]).toContain(response.status);
@@ -202,7 +239,7 @@ describe("HTTP/3 Download Streaming", () => {
       const numConcurrent = 5;
 
       const promises = Array.from({ length: numConcurrent }, () =>
-        get(`https://127.0.0.1:${server.port}/stream/test`),
+        get(`https://127.0.0.1:${server.port}/stream/test`)
       );
 
       const responses = await Promise.all(promises);

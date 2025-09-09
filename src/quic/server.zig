@@ -129,7 +129,14 @@ pub const QuicServer = struct {
         // Set congestion control
         const cc_algo = try allocator.dupeZ(u8, cfg.cc_algorithm);
         defer allocator.free(cc_algo);
-        try q_cfg.setCcAlgorithmName(cc_algo);
+        if (q_cfg.setCcAlgorithmName(cc_algo)) |_| {
+            // ok
+        } else |err| {
+            std.debug.print("cc={s} unsupported ({any}); falling back to cubic\n", .{ cfg.cc_algorithm, err });
+            const fallback = try allocator.dupeZ(u8, "cubic");
+            defer allocator.free(fallback);
+            _ = q_cfg.setCcAlgorithmName(fallback) catch {};
+        }
 
         // Create event loop
         const loop = try EventLoop.initLibev(allocator);
@@ -321,6 +328,10 @@ pub const QuicServer = struct {
                 continue;
             };
 
+            // Track touched connections to drain once per conn
+            var touched: [udp.MAX_BATCH]*connection.Connection = undefined;
+            var touched_len: usize = 0;
+
             var i: usize = 0;
             while (i < nrecv) : (i += 1) {
                 const pkt_buf = bufs[i][0..views[i].len];
@@ -434,14 +445,6 @@ pub const QuicServer = struct {
                         // Log non-crypto errors (crypto errors are common during handshake)
                         std.debug.print("quiche_conn_recv failed: {}\n", .{err});
                     }
-
-                    // ALWAYS drain egress and update timer, even on errors
-                    // This is critical for the handshake to progress
-                    try self.drainEgress(conn.?);
-
-                    const timeout_ms = conn.?.conn.timeoutAsMillis();
-                    try self.updateTimer(conn.?, timeout_ms);
-
                     // Don't skip to next packet - fall through to check connection state
                 };
             }
@@ -478,28 +481,38 @@ pub const QuicServer = struct {
                 conn.?.handshake_logged = true;
             }
 
-            // Process H3 + writable + drain for this connection
-            if (conn.?.http3 != null) {
-                self.processH3(conn.?) catch |err| {
-                    if (err != quiche.h3.Error.StreamBlocked) {
-                        std.debug.print("H3 processing error: {}\n", .{err});
-                    }
+            // Record touched connection for post-batch processing (deduplicate crudely)
+            if (touched_len < touched.len) {
+                var seen = false;
+                var t: usize = 0;
+                while (t < touched_len) : (t += 1) {
+                    if (touched[t] == conn.?) { seen = true; break; }
+                }
+                if (!seen) { touched[touched_len] = conn.?; touched_len += 1; }
+            }
+            }
+
+            // After processing the batch, walk touched connections once
+            var k: usize = 0;
+            while (k < touched_len) : (k += 1) {
+                const cconn = touched[k];
+                if (cconn.http3 != null) {
+                    self.processH3(cconn) catch |err| {
+                        if (err != quiche.h3.Error.StreamBlocked) {
+                            std.debug.print("H3 processing error: {}\n", .{err});
+                        }
+                    };
+                }
+                self.processWritableStreams(cconn) catch |err| {
+                    std.debug.print("Error processing writable streams: {}\n", .{err});
                 };
+                try self.drainEgress(cconn);
+                const timeout_ms2 = cconn.conn.timeoutAsMillis();
+                try self.updateTimer(cconn, timeout_ms2);
+                if (cconn.conn.isClosed()) {
+                    self.closeConnection(cconn);
+                }
             }
-
-            self.processWritableStreams(conn.?) catch |err| {
-                std.debug.print("Error processing writable streams: {}\n", .{err});
-            };
-
-            try self.drainEgress(conn.?);
-
-            const timeout_ms = conn.?.conn.timeoutAsMillis();
-            try self.updateTimer(conn.?, timeout_ms);
-
-            if (conn.?.conn.isClosed()) {
-                self.closeConnection(conn.?);
-            }
-        }
     }
     }
 

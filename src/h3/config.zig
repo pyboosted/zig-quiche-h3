@@ -9,10 +9,12 @@ pub const H3Config = struct {
         var cfg = try quiche.h3.Config.new();
         errdefer cfg.deinit();
         
-        // Set safe defaults as specified
-        cfg.setMaxFieldSectionSize(16 * 1024);  // 16KiB - reasonable for most headers
-        cfg.setQpackMaxTableCapacity(0);        // Disabled - simpler for M3
-        cfg.setQpackBlockedStreams(0);          // No blocking - simpler for M3
+        // Set safe defaults
+        cfg.setMaxFieldSectionSize(16 * 1024);     // 16KiB - reasonable for most headers
+        // Enable QPACK dynamic table to improve header compression for many
+        // small responses. Values are modest and broadly compatible.
+        cfg.setQpackMaxTableCapacity(4096);        // 4 KiB dynamic table
+        cfg.setQpackBlockedStreams(32);            // allow up to 32 blocked streams
         cfg.enableExtendedConnect(false);       // Standard H3 for now
         
         return H3Config{ .config = cfg };

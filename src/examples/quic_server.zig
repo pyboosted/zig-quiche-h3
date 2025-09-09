@@ -4,6 +4,7 @@ const ServerConfig = @import("config").ServerConfig;
 const http = @import("http");
 
 var g_enable_progress_log: bool = false;
+var g_disable_hash: bool = false;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -22,6 +23,8 @@ pub fn main() !void {
     var cert_path: []const u8 = "third_party/quiche/quiche/examples/cert.crt";
     var key_path: []const u8 = "third_party/quiche/quiche/examples/cert.key";
     var qlog_dir: ?[]const u8 = "qlogs";
+    var cc_algo: []const u8 = "bbr2"; // default to bbr2 for perf experiments (falls back internally)
+    var enable_pacing: bool = true;   // enable pacing with BBR/BBR2
     
     // Simple argument parsing
     var i: usize = 1;
@@ -37,6 +40,13 @@ pub fn main() !void {
             key_path = args[i];
         } else if (std.mem.eql(u8, args[i], "--no-qlog")) {
             qlog_dir = null;
+        } else if (std.mem.eql(u8, args[i], "--cc") and i + 1 < args.len) {
+            i += 1;
+            cc_algo = args[i];
+        } else if (std.mem.eql(u8, args[i], "--pacing")) {
+            enable_pacing = true;
+        } else if (std.mem.eql(u8, args[i], "--no-pacing")) {
+            enable_pacing = false;
         } else if (std.mem.eql(u8, args[i], "--help")) {
             printHelp();
             return;
@@ -51,6 +61,32 @@ pub fn main() !void {
         std.debug.print("Qlog: {s}/\n", .{dir});
     } else {
         std.debug.print("Qlog: disabled\n", .{});
+    }
+    std.debug.print("CC:   {s}\n", .{cc_algo});
+    std.debug.print("Pacing: {s}\n\n", .{if (enable_pacing) "on" else "off"});
+    
+    // Check for chunk size configuration
+    const chunk_kb_str = std.process.getEnvVarOwned(allocator, "H3_CHUNK_KB") catch null;
+    defer if (chunk_kb_str) |c| allocator.free(c);
+    
+    if (chunk_kb_str) |chunk_str| {
+        const chunk_kb = std.fmt.parseInt(usize, chunk_str, 10) catch 256;
+        const chunk_bytes = chunk_kb * 1024;
+        http.streaming.setDefaultChunkSize(chunk_bytes);
+        std.debug.print("Chunk: {d} KiB (H3_CHUNK_KB={s})\n", .{ chunk_kb, chunk_str });
+    } else {
+        std.debug.print("Chunk: {d} KiB\n", .{http.streaming.getDefaultChunkSize() / 1024});
+    }
+    
+    // Check if hashing is disabled
+    const disable_hash = std.process.getEnvVarOwned(allocator, "H3_NO_HASH") catch null;
+    defer if (disable_hash) |d| allocator.free(d);
+    g_disable_hash = if (disable_hash) |d| std.mem.eql(u8, d, "1") else false;
+    
+    if (g_disable_hash) {
+        std.debug.print("SHA-256: disabled (H3_NO_HASH=1)\n\n", .{});
+    } else {
+        std.debug.print("SHA-256: enabled\n", .{});
     }
     std.debug.print("\n", .{});
     
@@ -75,7 +111,8 @@ pub fn main() !void {
         // Disable quiche's internal debug logging by default for performance
         .enable_debug_logging = false,
         .debug_log_throttle = 100,
-        .enable_pacing = false, // loopback: allow sender to run fast
+        .enable_pacing = enable_pacing,
+        .cc_algorithm = cc_algo,
     };
     
     // Create and run server
@@ -348,11 +385,12 @@ fn stream1GBHandler(req: *http.Request, res: *http.Response) !void {
     try res.header(http.Headers.ContentLength, "1073741824"); // 1GB
     
     // Use generator-based streaming to avoid blocking the event loop
+    const chunk_sz = http.streaming.getDefaultChunkSize();
     res.partial_response = try http.streaming.PartialResponse.initGenerator(
         allocator,
         ctx,
         generate1GB,
-        64 * 1024, // 64KB buffer
+        chunk_sz,
         1024 * 1024 * 1024, // 1GB total
         true // Send FIN when complete
     );
@@ -399,6 +437,7 @@ const UploadContext = struct {
     hasher: std.crypto.hash.sha2.Sha256,
     bytes_received: usize,
     start_time: i64,
+    compute_hash: bool,
 };
 
 fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) !void {
@@ -412,6 +451,7 @@ fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) !void {
         .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
         .bytes_received = 0,
         .start_time = std.time.milliTimestamp(),
+        .compute_hash = !g_disable_hash,
     };
     
     // Store context in request's user_data field
@@ -435,8 +475,10 @@ fn uploadStreamOnChunk(req: *http.Request, res: *http.Response, chunk: []const u
         return;
     };
     
-    // Update SHA-256 hash
-    ctx.hasher.update(chunk);
+    // Update SHA-256 hash only if enabled
+    if (ctx.compute_hash) {
+        ctx.hasher.update(chunk);
+    }
     ctx.bytes_received += chunk.len;
     
     // Optional progress log every MB when enabled
@@ -456,15 +498,21 @@ fn uploadStreamOnComplete(req: *http.Request, res: *http.Response) !void {
         return;
     };
     
-    // Compute final hash using Zig 0.15 API
-    var hash: [32]u8 = undefined;
-    ctx.hasher.final(&hash);
     const elapsed_ms = std.time.milliTimestamp() - ctx.start_time;
     
-    // Format hash as hex string
-    var hash_hex: [64]u8 = undefined;
-    for (&hash, 0..) |byte, i| {
-        _ = try std.fmt.bufPrint(hash_hex[i*2..][0..2], "{x:0>2}", .{byte});
+    // Compute final hash if enabled
+    var hash_hex_buf: [64]u8 = undefined;
+    var hash_hex: []const u8 = "disabled";
+    
+    if (ctx.compute_hash) {
+        var hash: [32]u8 = undefined;
+        ctx.hasher.final(&hash);
+        
+        // Format hash as hex string
+        for (&hash, 0..) |byte, i| {
+            _ = try std.fmt.bufPrint(hash_hex_buf[i*2..][0..2], "{x:0>2}", .{byte});
+        }
+        hash_hex = &hash_hex_buf;
     }
     
     // Send response with upload stats
@@ -475,7 +523,7 @@ fn uploadStreamOnComplete(req: *http.Request, res: *http.Response) !void {
         throughput_mbps: f64,
     }{
         .bytes_received = ctx.bytes_received,
-        .sha256 = &hash_hex,
+        .sha256 = hash_hex,
         .elapsed_ms = elapsed_ms,
         .throughput_mbps = if (elapsed_ms > 0) 
             @as(f64, @floatFromInt(ctx.bytes_received)) * 8.0 / (@as(f64, @floatFromInt(elapsed_ms)) * 1000.0)
@@ -537,6 +585,9 @@ fn printHelp() void {
         \\  --cert <path>    Certificate file path
         \\  --key <path>     Private key file path
         \\  --no-qlog        Disable qlog output
+        \\  --cc <algo>      Congestion control: cubic|reno|bbr|bbr2 (default: bbr2)
+        \\  --pacing         Enable pacing (default)
+        \\  --no-pacing      Disable pacing
         \\  --help           Show this help message
         \\
         \\Test with quiche-client:

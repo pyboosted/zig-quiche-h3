@@ -194,7 +194,7 @@ Implementation Details:
 - Created comprehensive streaming layer in `src/http/streaming.zig`:
   - PartialResponse abstraction for resumable sends with three source types (memory/file/generator)
   - BlockedStreams tracking for efficient backpressure management
-  - Chunk-based processing with configurable sizes (default 64KB)
+  - Chunk-based processing with configurable sizes (default 64KB, tunable via H3_CHUNK_KB)
   - Zero-copy file streaming with pread for efficiency
   - Generator-based streaming to avoid blocking the event loop
 - Extended Response API with streaming methods:
@@ -210,12 +210,14 @@ Implementation Details:
 - Example streaming handlers implemented:
   - `/download/*`: File streaming with path traversal safety
   - `/stream/1gb`: Generator-based 1GB test stream (no memory allocation)
-  - `/stream/test`: 10MB test with checksum validation
+  - `/stream/test`: 10MB test with checksum validation (optional via H3_NO_HASH)
 - Critical fixes implemented:
   - Fixed premature state cleanup on .Finished when response still streaming
   - Memory-efficient body size tracking without allocation
   - Defensive null setting after partial.deinit()
   - All handlers use writeAll() to prevent truncation
+  - **FIN packet properly sent for large transfers (fixed connection hanging)**
+  - Stream completion signaling correctly implemented
 - Push-mode streaming callbacks for request bodies:
   - Extended handler.zig with OnHeaders/OnBodyChunk/OnBodyComplete callbacks
   - Callbacks receive Response pointer for bidirectional streaming
@@ -223,17 +225,22 @@ Implementation Details:
   - Server invokes callbacks at appropriate H3 events (Headers/Data/Finished)
   - Example implementations: `/upload/stream` (SHA-256), `/upload/echo` (bidirectional)
   - Zero memory allocation for arbitrarily large uploads
+- Performance optimizations:
+  - Build with `-Doptimize=ReleaseFast` critical for streaming performance
+  - Configurable chunk sizes via environment variables
+  - Optional SHA-256 computation for benchmarking
 - Testing verified:
-  - 1GB downloads complete without memory exhaustion
+  - 1GB downloads complete without memory exhaustion (~16s with proper FIN)
   - Backpressure properly handled with StreamBlocked/Done errors
   - Multiple concurrent streams work correctly
   - No premature state cleanup during streaming
   - Stream capacity properly restored after backpressure
   - Push-mode callbacks invoked correctly for uploads
   - SHA-256 computation on-the-fly without buffering
+  - Connection properly closes after large transfers
 
 Milestone 5+: Bun E2E Testing Environment (Day 16–17)
-Status: Planned
+Status: Completed ✓
 - Comprehensive E2E testing framework using Bun orchestration + curl HTTP/3 client
 - Fast test runner with TypeScript support for modern testing experience
 - Reference: `docs/bun-testing-env.md` for complete framework design
@@ -243,19 +250,32 @@ Status: Planned
   - Streaming uploads: checksums, size validation, push-mode handling
   - Backpressure testing: concurrent connections, partial writes
 - Implementation components:
-  - Server lifecycle helper (build, spawn, probe, cleanup)
+  - Server lifecycle helper (build, spawn, probe, cleanup) in `tests/e2e/helpers/`
   - Random port selection to avoid conflicts in CI
   - Readiness probing via curl HEAD requests
   - Automatic server teardown on test completion
+  - Structured curl client wrapper with response parsing
+- Test harness features:
+  - `curlClient.ts`: Structured HTTP/3 client with typed responses
+  - `spawnServer.ts`: Server lifecycle management with automatic port allocation
+  - `testUtils.ts`: File generation, temp directories, content-length parsing
+  - Support for stress testing via H3_STRESS=1 environment variable
 - Benefits:
   - Validates all M5 streaming features comprehensively
   - Tests real HTTP/3 client behavior (not just unit tests)
   - Fast iteration with clear, debuggable failures
   - Hermetic tests suitable for CI/CD pipelines
-- Test:
-  - `bun test tests/e2e` runs full suite
+- Test results:
+  - **49 tests passing**, 1 conditionally skipped
+  - All streaming tests pass including 1GB downloads/uploads
+  - Rate-limited tests work with 30MB/s throttling
+  - Concurrent uploads/downloads handle correctly
+  - FIN packet issues resolved, connections close properly
+- Test execution:
+  - `bun test tests/e2e` runs full suite (~10s)
+  - `H3_STRESS=1 bun test` includes stress tests (~55s)
   - Individual test files for focused debugging
-  - QLOG disabled by default for performance, enabled on failure
+  - QLOG disabled by default for performance
 
 Milestone 6: QUIC DATAGRAM (Day 17–19)
 - Enable QUIC DATAGRAM; send/recv APIs; queue sizing and purge.

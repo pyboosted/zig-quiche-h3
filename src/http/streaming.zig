@@ -8,6 +8,20 @@ pub const StreamingConfig = struct {
     read_buffer_size: usize = 128 * 1024,  // 128KB read buffer
 };
 
+// Global default chunk size; configurable at runtime by the app.
+var default_chunk_size: usize = 256 * 1024;
+
+pub fn setDefaultChunkSize(bytes: usize) void {
+    // Clamp to a sane range (4 KiB .. 4 MiB)
+    const min_sz: usize = 4 * 1024;
+    const max_sz: usize = 4 * 1024 * 1024;
+    default_chunk_size = if (bytes < min_sz) min_sz else if (bytes > max_sz) max_sz else bytes;
+}
+
+pub fn getDefaultChunkSize() usize {
+    return default_chunk_size;
+}
+
 /// Tracks partial response state for resumable sends
 pub const PartialResponse = struct {
     body_source: BodySource,        // Where data comes from
@@ -57,7 +71,7 @@ pub const PartialResponse = struct {
             .total_size = data.len,
             .fin_on_complete = fin_on_complete,
             .allocator = allocator,
-            .config = .{}, // Use default config
+            .config = .{ .chunk_size = default_chunk_size },
         };
         return self;
     }
@@ -86,7 +100,7 @@ pub const PartialResponse = struct {
             .total_size = file_size,
             .fin_on_complete = fin_on_complete,
             .allocator = allocator,
-            .config = .{}, // Use default config
+            .config = .{ .chunk_size = default_chunk_size },
         };
         return self;
     }
@@ -117,7 +131,7 @@ pub const PartialResponse = struct {
             .total_size = total_size,
             .fin_on_complete = fin_on_complete,
             .allocator = allocator,
-            .config = .{}, // Use default config
+            .config = .{ .chunk_size = default_chunk_size },
         };
         return self;
     }
@@ -144,17 +158,26 @@ pub const PartialResponse = struct {
         switch (self.body_source) {
             .memory => |*m| {
                 const remaining = m.data[self.written..];
+                if (remaining.len == 0) {
+                    return .{ .data = "", .is_final = true };
+                }
                 // Cap chunk size for memory sources to smooth pacing
                 const chunk_size = @min(remaining.len, self.config.chunk_size);
-                const chunk = remaining[0..chunk_size];
-                const is_final = chunk.len == 0;
-                return .{ .data = chunk, .is_final = is_final };
+                const is_final = chunk_size == remaining.len; // last chunk will carry FIN
+                return .{ .data = remaining[0..chunk_size], .is_final = is_final };
             },
             .file => |*f| {
                 // Return unsent portion of current buffer if any
                 if (f.buf_sent < f.buf_len) {
                     const remaining = f.buffer[f.buf_sent..f.buf_len];
-                    return .{ .data = remaining, .is_final = false };
+                    // If we've already read the last bytes from the file (offset
+                    // has reached total_size), this buffer represents the tail
+                    // of the file. Mark it as final so the last DATA carries FIN.
+                    const is_final = if (self.total_size) |total|
+                        f.offset >= total
+                    else
+                        false;
+                    return .{ .data = remaining, .is_final = is_final };
                 }
                 
                 // Buffer fully sent, read next chunk

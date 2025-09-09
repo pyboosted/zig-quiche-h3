@@ -393,12 +393,13 @@ pub const Response = struct {
             try self.header(Headers.ContentType, MimeTypes.ApplicationOctetStream);
         }
         
-        // Create partial response for file
+        // Create partial response for file (use global default chunk size)
+        const chunk_sz = streaming.getDefaultChunkSize();
         self.partial_response = try streaming.PartialResponse.initFile(
             self.allocator,
             file,
             stat.size,
-            128 * 1024, // 128KB buffer
+            chunk_sz,
             true // Send FIN when complete
         );
         
@@ -481,9 +482,28 @@ pub const Response = struct {
             }
         }
         
-        // Complete - clean up
+        // Complete - ensure FIN is transmitted. For generator sources with a known
+        // total size, the loop may exit exactly at total without producing a
+        // zero-length final chunk, so we must explicitly send an empty FIN.
         if (partial.fin_on_complete) {
-            self.ended = true;
+            // For generator sources (which may never mark a non-empty chunk as
+            // final), explicitly send a zero-length FIN when total completes.
+            switch (partial.body_source) {
+                .generator => {
+                    _ = self.h3_conn.sendBody(self.quic_conn, self.stream_id, "", true) catch |err| {
+                        if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                            _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                            return; // retry later
+                        }
+                        return err;
+                    };
+                    self.ended = true;
+                },
+                else => {
+                    // Memory/file paths set FIN on the last non-empty chunk.
+                    self.ended = true;
+                },
+            }
         }
         partial.deinit();
         self.partial_response = null;
