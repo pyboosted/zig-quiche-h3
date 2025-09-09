@@ -49,7 +49,7 @@ pub const ServerConfig = struct {
     
     // HTTP configuration limits
     max_request_headers_size: usize = 16384,     // 16KB
-    max_request_body_size: usize = 10485760,     // 10MB
+    max_request_body_size: usize = 104857600,    // 100MB (increased for testing)
     max_path_length: usize = 2048,
     
     // Retry

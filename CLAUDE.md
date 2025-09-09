@@ -140,3 +140,4 @@ pub fn newFunction(param: *Connection) !ReturnType {
 - ArrayList: unmanaged, requires `std.ArrayList(T){}` init
 - Pass allocator to ArrayList methods: `list.append(allocator, item)`
 - Use `@bitOffsetOf` for portable flag detection
+- Do not skip tests ever, until i ask directly

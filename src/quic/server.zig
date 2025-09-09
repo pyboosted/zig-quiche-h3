@@ -31,14 +31,14 @@ const RequestState = struct {
     body_complete: bool = false,
     handler_invoked: bool = false, // Track if handler was already called
     is_streaming: bool = false,
-    
+
     // User data for streaming handlers to store context
     user_data: ?*anyopaque = null,
-    
+
     // Push-mode streaming callbacks (include Response pointer for bidirectional streaming)
-    on_headers: ?*const fn(req: *http.Request, res: *http.Response) anyerror!void = null,
-    on_body_chunk: ?*const fn(req: *http.Request, res: *http.Response, chunk: []const u8) anyerror!void = null,
-    on_body_complete: ?*const fn(req: *http.Request, res: *http.Response) anyerror!void = null,
+    on_headers: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
+    on_body_chunk: ?*const fn (req: *http.Request, res: *http.Response, chunk: []const u8) anyerror!void = null,
+    on_body_complete: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
 };
 
 pub const QuicServer = struct {
@@ -54,44 +54,61 @@ pub const QuicServer = struct {
     send_buf: [2048]u8 = undefined, // Buffer for sending packets
     conn_id_seed: [32]u8, // HMAC-SHA256 key for connection ID derivation (like Rust)
     timeout_timer_started: bool = false, // Track if periodic timer for checking connection timeouts is started
-    
+
     // HTTP/3 configuration
     h3_config: ?h3.H3Config = null,
-    
+
     // HTTP routing
     router: http.Router,
-    stream_states: std.AutoHashMap(u64, *RequestState),
-    
+    // Track per-connection stream state using a composite key so
+    // simultaneous connections with the same stream_id (e.g., 0)
+    // don't collide.
+    stream_states: std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80),
+
     // Statistics
     connections_accepted: usize = 0,
     packets_received: usize = 0,
     packets_sent: usize = 0,
-    
+
+    // Type definitions for stream state tracking
+    const StreamKey = struct { conn: *connection.Connection, stream_id: u64 };
+    const StreamKeyContext = struct {
+        pub fn hash(_: StreamKeyContext, key: StreamKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(std.mem.asBytes(&key.conn));
+            h.update(std.mem.asBytes(&key.stream_id));
+            return h.final();
+        }
+        pub fn eql(_: StreamKeyContext, a: StreamKey, b: StreamKey) bool {
+            return a.conn == b.conn and a.stream_id == b.stream_id;
+        }
+    };
+
     pub fn init(allocator: std.mem.Allocator, cfg: config_mod.ServerConfig) !*QuicServer {
         // Validate config
         try cfg.validate();
-        
+
         // Create qlog directory if needed
         try cfg.ensureQlogDir();
-        
+
         // Create quiche config
         var q_cfg = try quiche.Config.new(quiche.PROTOCOL_VERSION);
         errdefer q_cfg.deinit();
-        
+
         // Load TLS certificates
         const cert_path = try allocator.dupeZ(u8, cfg.cert_path);
         defer allocator.free(cert_path);
         const key_path = try allocator.dupeZ(u8, cfg.key_path);
         defer allocator.free(key_path);
-        
+
         try q_cfg.loadCertChainFromPemFile(cert_path);
         try q_cfg.loadPrivKeyFromPemFile(key_path);
-        
+
         // Set ALPN protocols with proper wire format
         const alpn_wire = try quiche.encodeAlpn(allocator, cfg.alpn_protocols);
         defer allocator.free(alpn_wire);
         try q_cfg.setApplicationProtos(alpn_wire);
-        
+
         // Configure transport parameters
         q_cfg.setMaxIdleTimeout(cfg.idle_timeout_ms);
         q_cfg.setInitialMaxData(cfg.initial_max_data);
@@ -102,30 +119,30 @@ pub const QuicServer = struct {
         q_cfg.setInitialMaxStreamsUni(cfg.initial_max_streams_uni);
         q_cfg.setMaxRecvUdpPayloadSize(cfg.max_recv_udp_payload_size);
         q_cfg.setMaxSendUdpPayloadSize(cfg.max_send_udp_payload_size);
-        
+
         // Features
         q_cfg.setDisableActiveMigration(cfg.disable_active_migration);
         q_cfg.enablePacing(cfg.enable_pacing);
         q_cfg.enableDgram(cfg.enable_dgram, cfg.dgram_recv_queue_len, cfg.dgram_send_queue_len);
         q_cfg.grease(cfg.grease);
-        
+
         // Set congestion control
         const cc_algo = try allocator.dupeZ(u8, cfg.cc_algorithm);
         defer allocator.free(cc_algo);
         try q_cfg.setCcAlgorithmName(cc_algo);
-        
+
         // Create event loop
         const loop = try EventLoop.initLibev(allocator);
         errdefer loop.deinit();
-        
+
         // Create server
         const server = try allocator.create(QuicServer);
         errdefer allocator.destroy(server);
-        
+
         // Generate random HMAC seed for connection ID derivation
         var conn_id_seed: [32]u8 = undefined;
         std.crypto.random.bytes(&conn_id_seed);
-        
+
         server.* = .{
             .allocator = allocator,
             .config = cfg,
@@ -134,24 +151,24 @@ pub const QuicServer = struct {
             .event_loop = loop,
             .conn_id_seed = conn_id_seed,
             .router = http.Router.init(allocator),
-            .stream_states = std.AutoHashMap(u64, *RequestState).init(allocator),
+            .stream_states = std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80).init(allocator),
         };
-        
+
         // Create H3 config
         server.h3_config = try h3.H3Config.initWithDefaults();
         errdefer if (server.h3_config) |*h| h.deinit();
-        
+
         // Enable debug logging if requested
         if (cfg.enable_debug_logging) {
             try quiche.enableDebugLogging(debugLog, &server.config);
         }
-        
+
         return server;
     }
-    
+
     pub fn deinit(self: *QuicServer) void {
         self.stop();
-        
+
         // Clean up connections (including their H3 connections)
         var it = self.connections.map.iterator();
         while (it.next()) |entry| {
@@ -162,7 +179,7 @@ pub const QuicServer = struct {
             }
         }
         self.connections.deinit();
-        
+
         // Clean up stream states
         var stream_iter = self.stream_states.iterator();
         while (stream_iter.next()) |entry| {
@@ -171,10 +188,10 @@ pub const QuicServer = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.stream_states.deinit();
-        
+
         // Clean up router
         self.router.deinit();
-        
+
         if (self.h3_config) |*h| h.deinit();
         self.quiche_config.deinit();
         self.event_loop.deinit();
@@ -182,54 +199,59 @@ pub const QuicServer = struct {
         if (self.socket_v6) |*s| s.*.close();
         self.allocator.destroy(self);
     }
-    
+
     pub fn bind(self: *QuicServer) !void {
         // Try to bind both IPv6 and IPv4
         const sockets = udp.bindAny(self.config.bind_port, true);
         if (!sockets.hasAny()) return error.FailedToBind;
-        
+
         if (sockets.v6) |sock| {
             self.socket_v6 = sock;
+            // Enlarge socket buffers for high-throughput scenarios
+            udp.setRecvBufferSize(sock.fd, 16 * 1024 * 1024) catch {};
+            udp.setSendBufferSize(sock.fd, 16 * 1024 * 1024) catch {};
             try self.event_loop.addUdpIo(sock.fd, onUdpReadable, self);
             std.debug.print("QUIC server bound to [::]:{d}\n", .{self.config.bind_port});
         }
-        
+
         if (sockets.v4) |sock| {
             self.socket_v4 = sock;
+            udp.setRecvBufferSize(sock.fd, 16 * 1024 * 1024) catch {};
+            udp.setSendBufferSize(sock.fd, 16 * 1024 * 1024) catch {};
             try self.event_loop.addUdpIo(sock.fd, onUdpReadable, self);
             std.debug.print("QUIC server bound to 0.0.0.0:{d}\n", .{self.config.bind_port});
         }
-        
+
         // Start periodic timer for checking connection timeouts (50ms interval)
         try self.event_loop.addTimer(0.05, 0.05, onTimeoutTimer, self);
         self.timeout_timer_started = true;
     }
-    
+
     pub fn run(self: *QuicServer) !void {
         self.running.store(true, .release);
-        
+
         // Add signal handlers for graceful shutdown
         try self.event_loop.addSigint(onSignal, self);
         try self.event_loop.addSigterm(onSignal, self);
-        
+
         std.debug.print("QUIC server running (quiche {s})\n", .{quiche.version()});
         std.debug.print("Test with: cargo run -p quiche --bin quiche-client -- https://127.0.0.1:{d}/ --no-verify --alpn hq-interop\n", .{self.config.bind_port});
-        
+
         self.event_loop.run();
     }
-    
+
     pub fn stop(self: *QuicServer) void {
         if (self.running.swap(false, .acq_rel)) {
             // Note: libev will clean up timers when loop stops
             self.event_loop.stop();
         }
     }
-    
+
     /// Register a route with the HTTP router
     pub fn route(self: *QuicServer, method: http.Method, pattern: []const u8, handler: http.Handler) !void {
         try self.router.route(method, pattern, handler);
     }
-    
+
     /// Register a streaming route with push-mode callbacks
     pub fn routeStreaming(
         self: *QuicServer,
@@ -247,7 +269,7 @@ pub const QuicServer = struct {
             .on_body_complete = callbacks.on_body_complete,
         });
     }
-    
+
     fn onUdpReadable(fd: posix.socket_t, _revents: u32, user_data: *anyopaque) void {
         _ = _revents;
         const self: *QuicServer = @ptrCast(@alignCast(user_data));
@@ -255,43 +277,56 @@ pub const QuicServer = struct {
             std.debug.print("Error processing packets: {}\n", .{err});
         };
     }
-    
+
     fn onTimeoutTimer(user_data: *anyopaque) void {
         const self: *QuicServer = @ptrCast(@alignCast(user_data));
         self.checkTimeouts() catch |err| {
             std.debug.print("Error checking timeouts: {}\n", .{err});
         };
     }
-    
+
     // Derive connection ID using HMAC-SHA256 (like Rust implementation)
     fn deriveConnId(self: *const QuicServer, dcid: []const u8) [16]u8 {
         var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&self.conn_id_seed);
         hmac.update(dcid);
         var hash: [32]u8 = undefined;
         hmac.final(&hash);
-        
+
         // Take first 16 bytes of HMAC output as connection ID
         var conn_id: [16]u8 = undefined;
         @memcpy(&conn_id, hash[0..16]);
         return conn_id;
     }
-    
+
     fn processPackets(self: *QuicServer, fd: posix.socket_t) !void {
-        var buf: [2048]u8 = undefined; // Good size for M2
-        
-        // Loop until EWOULDBLOCK
+        // Batch receive to reduce syscall overhead
+        var bufs: [udp.MAX_BATCH][2048]u8 = undefined;
+        var views: [udp.MAX_BATCH]udp.RecvView = undefined;
+
         while (true) {
-            var peer_addr: posix.sockaddr.storage = undefined;
-            var peer_addr_len: posix.socklen_t = @sizeOf(@TypeOf(peer_addr));
-            
-            const n = posix.recvfrom(fd, &buf, 0, @ptrCast(&peer_addr), &peer_addr_len) catch |err| {
-                if (err == error.WouldBlock) break;
-                std.debug.print("recvfrom error: {}\n", .{err});
+            // Prepare slices for this batch
+            var slices: [udp.MAX_BATCH][]u8 = undefined;
+            for (&slices, 0..) |*s, i| s.* = bufs[i][0..];
+
+            const nrecv = try udp.recvBatch(fd, slices[0..], views[0..]);
+            if (nrecv == 0) break; // WouldBlock or no data
+
+            self.packets_received += nrecv;
+
+            // Get local address once per batch (used for recv_info.to)
+            var local_addr: posix.sockaddr.storage = undefined;
+            var local_addr_len: posix.socklen_t = @sizeOf(@TypeOf(local_addr));
+            _ = posix.getsockname(fd, @ptrCast(&local_addr), &local_addr_len) catch {
+                // Failed to get local address; skip this batch
                 continue;
             };
-            
-            self.packets_received += 1;
-            
+
+            var i: usize = 0;
+            while (i < nrecv) : (i += 1) {
+                const pkt_buf = bufs[i][0..views[i].len];
+                var peer_addr = views[i].addr;
+                const peer_addr_len = views[i].addr_len;
+
             // Parse QUIC header
             var dcid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
             var scid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
@@ -301,9 +336,9 @@ pub const QuicServer = struct {
             var pkt_type: u8 = 0;
             var token: [256]u8 = undefined;
             var token_len: usize = token.len;
-            
+
             quiche.headerInfo(
-                buf[0..n],
+                pkt_buf,
                 self.local_conn_id_len,
                 &version,
                 &pkt_type,
@@ -317,23 +352,23 @@ pub const QuicServer = struct {
                 // Failed to parse packet header, skip
                 continue;
             };
-            
+
             // First, try to look up connection by the DCID as-is
             // This handles subsequent packets where client uses our SCID as DCID
             var key_dcid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
             @memcpy(key_dcid[0..dcid_len], dcid[0..dcid_len]);
-            
+
             var key = connection.ConnectionKey{
                 .dcid = key_dcid,
                 .dcid_len = @intCast(dcid_len),
                 .family = @as(*const posix.sockaddr, @ptrCast(&peer_addr)).family,
             };
-            
+
             var conn = self.connections.get(key);
-            
+
             // Derive connection ID using HMAC (like Rust)
             const derived_conn_id = self.deriveConnId(dcid[0..dcid_len]);
-            
+
             // If not found by DCID, try HMAC-derived ID (for first Initial packet)
             if (conn == null) {
                 @memcpy(key_dcid[0..16], &derived_conn_id);
@@ -344,9 +379,9 @@ pub const QuicServer = struct {
                 };
                 conn = self.connections.get(key);
             }
-            
+
             const is_new_conn = (conn == null);
-            
+
             if (is_new_conn) {
                 // Only create new connections for Initial packets (type 1)
                 // Other packet types should have an existing connection
@@ -354,7 +389,7 @@ pub const QuicServer = struct {
                     // Not an Initial packet but no connection found - drop it
                     continue;
                 }
-                
+
                 // Check if version is supported BEFORE creating connection
                 if (!quiche.versionIsSupported(version)) {
                     // Send version negotiation packet
@@ -365,72 +400,61 @@ pub const QuicServer = struct {
                     ) catch {
                         continue;
                     };
-                    
+
                     _ = posix.sendto(fd, self.send_buf[0..vneg_len], 0, @ptrCast(&peer_addr), peer_addr_len) catch {};
                     continue; // Don't create connection for unsupported versions
                 }
-                
+
                 // Only create connection for supported versions
                 conn = try self.acceptConnection(
                     &peer_addr,
                     peer_addr_len,
                     dcid[0..dcid_len],
-                    derived_conn_id,  // Use HMAC-derived ID as our SCID
+                    derived_conn_id, // Use HMAC-derived ID as our SCID
                     fd,
-                    buf[0..n],  // Pass the initial packet
+                    pkt_buf, // Pass the initial packet
                 );
                 if (conn == null) continue;
-                
-                // Initial packet was already processed in acceptConnection, skip to drain
-                try self.drainEgress(conn.?);
-                const timeout_ms = conn.?.conn.timeoutAsMillis();
-                try self.updateTimer(conn.?, timeout_ms);
-                continue;
+
+                // Initial packet was already processed in acceptConnection
+                // Fall through to process H3 and writable streams
+            } else {
+                // Process packet with existing connection
+                const recv_info = c.quiche_recv_info{
+                    .from = @ptrCast(&peer_addr),
+                    .from_len = peer_addr_len,
+                    .to = @ptrCast(&local_addr),
+                    .to_len = local_addr_len,
+                };
+
+                _ = conn.?.conn.recv(pkt_buf, &recv_info) catch |err| {
+                    if (err == error.Done) {
+                        // This is normal - just means no more data to process
+                    } else if (err != error.CryptoFail) {
+                        // Log non-crypto errors (crypto errors are common during handshake)
+                        std.debug.print("quiche_conn_recv failed: {}\n", .{err});
+                    }
+
+                    // ALWAYS drain egress and update timer, even on errors
+                    // This is critical for the handshake to progress
+                    try self.drainEgress(conn.?);
+
+                    const timeout_ms = conn.?.conn.timeoutAsMillis();
+                    try self.updateTimer(conn.?, timeout_ms);
+
+                    // Don't skip to next packet - fall through to check connection state
+                };
             }
-            
-            // Get local address for recv_info.to (critical!)
-            var local_addr: posix.sockaddr.storage = undefined;
-            var local_addr_len: posix.socklen_t = @sizeOf(@TypeOf(local_addr));
-            _ = posix.getsockname(fd, @ptrCast(&local_addr), &local_addr_len) catch {
-                // Failed to get local address
-                continue;
-            };
-            
-            // Process packet with quiche
-            const recv_info = c.quiche_recv_info{
-                .from = @ptrCast(&peer_addr),
-                .from_len = peer_addr_len,
-                .to = @ptrCast(&local_addr),
-                .to_len = local_addr_len,
-            };
-            
-            _ = conn.?.conn.recv(buf[0..n], &recv_info) catch |err| {
-                if (err == error.Done) {
-                    // This is normal - just means no more data to process
-                } else if (err != error.CryptoFail) {
-                    // Log non-crypto errors (crypto errors are common during handshake)
-                    std.debug.print("quiche_conn_recv failed: {}\n", .{err});
-                }
-                
-                // ALWAYS drain egress and update timer, even on errors
-                // This is critical for the handshake to progress
-                try self.drainEgress(conn.?);
-                
-                const timeout_ms = conn.?.conn.timeoutAsMillis();
-                try self.updateTimer(conn.?, timeout_ms);
-                
-                // Don't skip to next packet - fall through to check connection state
-            };
-            
+
             // Check if handshake completed
             if (conn.?.conn.isEstablished() and !conn.?.handshake_logged) {
                 var hex_buf: [40]u8 = undefined;
                 const hex_dcid = try connection.formatCid(dcid[0..dcid_len], &hex_buf);
-                
+
                 // Build complete message first, then print once
                 if (conn.?.conn.applicationProto()) |proto| {
                     std.debug.print("✓ Handshake complete! DCID: {s}, ALPN: {s}\n", .{ hex_dcid, proto });
-                    
+
                     // Create H3 connection if ALPN is "h3"
                     if (std.mem.eql(u8, proto, "h3") and conn.?.http3 == null) {
                         if (self.h3_config) |*h3_cfg| {
@@ -450,11 +474,11 @@ pub const QuicServer = struct {
                 } else {
                     std.debug.print("✓ Handshake complete! DCID: {s}\n", .{hex_dcid});
                 }
-                
+
                 conn.?.handshake_logged = true;
             }
-            
-            // Process H3 events if H3 connection exists
+
+            // Process H3 + writable + drain for this connection
             if (conn.?.http3 != null) {
                 self.processH3(conn.?) catch |err| {
                     if (err != quiche.h3.Error.StreamBlocked) {
@@ -462,45 +486,42 @@ pub const QuicServer = struct {
                     }
                 };
             }
-            
-            // Process any streams that became writable after recv
+
             self.processWritableStreams(conn.?) catch |err| {
                 std.debug.print("Error processing writable streams: {}\n", .{err});
             };
-            
-            // Drain egress after recv
+
             try self.drainEgress(conn.?);
-            
-            // Update timer
+
             const timeout_ms = conn.?.conn.timeoutAsMillis();
             try self.updateTimer(conn.?, timeout_ms);
-            
-            // Check if closed
+
             if (conn.?.conn.isClosed()) {
                 self.closeConnection(conn.?);
             }
         }
     }
-    
+    }
+
     fn acceptConnection(
         self: *QuicServer,
         peer_addr: *const posix.sockaddr.storage,
         peer_addr_len: posix.socklen_t,
         dcid: []const u8,
-        scid: [16]u8,  // Use the HMAC-derived ID as our SCID
+        scid: [16]u8, // Use the HMAC-derived ID as our SCID
         fd: posix.socket_t,
-        initial_packet: []const u8,  // Add the initial packet to process
+        initial_packet: []const u8, // Add the initial packet to process
     ) !?*connection.Connection {
         // Use provided SCID (HMAC-derived) instead of generating random one
         const new_scid = scid;
-        
+
         // Get local address
         var local_addr: posix.sockaddr.storage = undefined;
         var local_addr_len: posix.socklen_t = @sizeOf(@TypeOf(local_addr));
         _ = posix.getsockname(fd, @ptrCast(&local_addr), &local_addr_len) catch {
             return null;
         };
-        
+
         // Accept with quiche
         var q_conn = quiche.accept(
             &new_scid,
@@ -514,7 +535,7 @@ pub const QuicServer = struct {
             std.debug.print("quiche_accept failed: {}\n", .{err});
             return null;
         };
-        
+
         // Set up qlog immediately
         var qlog_path: ?[]u8 = null;
         if (self.config.qlog_dir != null) {
@@ -525,7 +546,7 @@ pub const QuicServer = struct {
                 errdefer self.allocator.free(title);
                 const desc = try self.allocator.dupeZ(u8, "Zig QUIC Server M3 - HTTP/3");
                 errdefer self.allocator.free(desc);
-                
+
                 if ((&q_conn).setQlogPath(p, title[0..title.len :0], desc[0..desc.len :0])) {
                     qlog_path = p;
                     std.debug.print("QLOG enabled: {s}\n", .{p});
@@ -542,7 +563,7 @@ pub const QuicServer = struct {
                 }
             }
         }
-        
+
         // Create connection object
         const conn = try connection.createConnection(
             self.allocator,
@@ -555,72 +576,85 @@ pub const QuicServer = struct {
             fd,
             qlog_path,
         );
-        
+
         // Add to table
         try self.connections.put(conn);
         self.connections_accepted += 1;
-        
+
         // CRITICAL: Process the initial packet immediately after accept!
         // This is what the Rust implementation does - call recv() right after accept()
         const recv_info = c.quiche_recv_info{
-            .from = @constCast(@ptrCast(peer_addr)),
+            .from = @ptrCast(@constCast(peer_addr)),
             .from_len = peer_addr_len,
             .to = @ptrCast(&local_addr),
             .to_len = local_addr_len,
         };
-        
+
         // recv needs a mutable buffer, so we need to copy
         var packet_buf: [2048]u8 = undefined;
         const packet_len = @min(initial_packet.len, packet_buf.len);
         @memcpy(packet_buf[0..packet_len], initial_packet[0..packet_len]);
-        
+
         _ = conn.conn.recv(packet_buf[0..packet_len], &recv_info) catch {
             // Don't fail connection creation - let it continue
             return conn;
         };
-        
+
         return conn;
     }
-    
+
     fn drainEgress(self: *QuicServer, conn: *connection.Connection) !void {
-        var out: [2048]u8 = undefined;
-        
+        // Batch up to udp.MAX_BATCH packets per flush
+        var out_bufs: [udp.MAX_BATCH][2048]u8 = undefined;
+        var send_views: [udp.MAX_BATCH]udp.SendView = undefined;
+        var count: usize = 0;
+
         while (true) {
             var send_info: c.quiche_send_info = undefined;
-            
-            const written = conn.conn.send(&out, &send_info) catch |err| {
+
+            const written = conn.conn.send(&out_bufs[count], &send_info) catch |err| {
                 if (err == error.Done) break;
                 return err;
             };
-            
-            // Send packet to the address specified by quiche (important for path migration)
-            // Use send_info.to if provided (to_len > 0), otherwise fall back to peer_addr
-            const dest_addr = if (send_info.to_len > 0) @as(*const posix.sockaddr, @ptrCast(&send_info.to)) else @as(*const posix.sockaddr, @ptrCast(&conn.peer_addr));
-            const dest_len = if (send_info.to_len > 0) send_info.to_len else conn.peer_addr_len;
-            
-            _ = posix.sendto(
-                conn.socket_fd,
-                out[0..written],
-                0,
-                dest_addr,
-                dest_len,
-            ) catch {
-                // sendto failed, continue with next packet
-                continue;
+
+            // Select destination address (path-aware)
+            const dest_ptr = if (send_info.to_len > 0)
+                @as(*const posix.sockaddr, @ptrCast(&send_info.to))
+            else
+                @as(*const posix.sockaddr, @ptrCast(&conn.peer_addr));
+            const dest_len: posix.socklen_t = if (send_info.to_len > 0) send_info.to_len else conn.peer_addr_len;
+
+            // Copy dest addr into view storage
+            var st: posix.sockaddr.storage = undefined;
+            const copy_len = @min(@as(usize, dest_len), @sizeOf(posix.sockaddr.storage));
+            @memcpy(@as([*]u8, @ptrCast(&st))[0..copy_len], @as([*]const u8, @ptrCast(dest_ptr))[0..copy_len]);
+
+            send_views[count] = .{
+                .data = out_bufs[count][0..written],
+                .addr = st,
+                .addr_len = dest_len,
             };
-            
-            self.packets_sent += 1;
+            count += 1;
+
+            if (count == udp.MAX_BATCH) {
+                self.packets_sent += try udp.sendBatch(conn.socket_fd, send_views[0..count]);
+                count = 0;
+            }
+        }
+
+        if (count > 0) {
+            self.packets_sent += try udp.sendBatch(conn.socket_fd, send_views[0..count]);
         }
     }
-    
+
     fn processH3(self: *QuicServer, conn: *connection.Connection) !void {
         const h3_ptr = conn.http3 orelse return;
         const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
-        
+
         while (true) {
             var result = h3_conn.poll(&conn.conn) orelse break;
             defer result.deinit();
-            
+
             switch (result.event_type) {
                 .Headers => {
                     // Create request state with arena first
@@ -637,15 +671,15 @@ pub const QuicServer = struct {
                         state.arena.deinit();
                         self.allocator.destroy(state);
                     }
-                    
+
                     // Collect headers using arena allocator
                     const arena_allocator = state.arena.allocator();
                     const headers = try h3.collectHeaders(arena_allocator, result.raw_event);
                     // No defer free - arena will handle it
-                    
+
                     // Parse request info
                     const req_info = h3.parseRequestHeaders(headers);
-                    
+
                     // Validate required pseudo-headers
                     if (req_info.method == null or req_info.path == null) {
                         // Send 400 Bad Request
@@ -654,12 +688,12 @@ pub const QuicServer = struct {
                         self.allocator.destroy(state);
                         continue;
                     }
-                    
+
                     const method_str = req_info.method.?;
                     const path_raw = req_info.path.?;
-                    
+
                     std.debug.print("→ HTTP/3 request: {s} {s}\n", .{ method_str, path_raw });
-                    
+
                     // Parse method
                     const method = http.Method.fromString(method_str) orelse {
                         // Unknown method
@@ -668,7 +702,7 @@ pub const QuicServer = struct {
                         self.allocator.destroy(state);
                         continue;
                     };
-                    
+
                     // Convert headers to our format - reuse arena-allocated headers
                     const req_headers = try arena_allocator.alloc(http.Header, headers.len);
                     for (headers, 0..) |h, i| {
@@ -678,7 +712,7 @@ pub const QuicServer = struct {
                             .value = h.value,
                         };
                     }
-                    
+
                     // Initialize request
                     state.request = try http.Request.init(
                         &state.arena,
@@ -688,17 +722,17 @@ pub const QuicServer = struct {
                         req_headers,
                         result.stream_id,
                     );
-                    
+
                     // Link request's user_data to state's user_data for streaming handlers
                     state.request.user_data = state.user_data;
-                    
+
                     // Match route
                     const match_result = try self.router.match(
                         arena_allocator,
                         method,
                         state.request.path_decoded,
                     );
-                    
+
                     switch (match_result) {
                         .Found => |found| {
                             // Store extracted params
@@ -713,7 +747,7 @@ pub const QuicServer = struct {
                             } else {
                                 state.handler = found.route.handler;
                             }
-                            
+
                             // Initialize response
                             state.response = http.Response.init(
                                 state.arena.allocator(),
@@ -722,10 +756,10 @@ pub const QuicServer = struct {
                                 result.stream_id,
                                 method == .HEAD,
                             );
-                            
-                            // Store state
-                            try self.stream_states.put(result.stream_id, state);
-                            
+
+                            // Store state (keyed by connection + stream id)
+                            try self.stream_states.put(.{ .conn = conn, .stream_id = result.stream_id }, state);
+
                             // Handle immediate invocation based on route type
                             if (state.is_streaming) {
                                 // For streaming routes, call on_headers immediately if present
@@ -736,8 +770,7 @@ pub const QuicServer = struct {
                                             return;
                                         }
                                         std.debug.print("onHeaders error: {}\n", .{err});
-                                        self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id,
-                                            http.errorToStatus(err)) catch {};
+                                        self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, http.errorToStatus(err)) catch {};
                                     };
                                     // Sync user_data back to state after callback
                                     state.user_data = state.request.user_data;
@@ -747,15 +780,14 @@ pub const QuicServer = struct {
                                 // Regular handler: invoke immediately for methods without body
                                 if (method == .GET or method == .HEAD or method == .DELETE) {
                                     self.invokeHandler(state) catch |err| {
-                                        // StreamBlocked is non-fatal - handler started streaming response
-                                        if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                        // Backpressure-like conditions are non-fatal
+                                        if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
                                             // Keep state alive for processWritableStreams to resume
                                             return;
                                         }
                                         // For other errors, send error response
                                         std.debug.print("Handler error: {}\n", .{err});
-                                        self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 
-                                            http.errorToStatus(err)) catch {};
+                                        self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, http.errorToStatus(err)) catch {};
                                     };
                                 }
                                 // For methods with body, wait for Data events
@@ -773,77 +805,70 @@ pub const QuicServer = struct {
                             );
                             defer self.allocator.free(allow);
                             // Don't free allowed_methods - arena will handle it
-                            
+
                             try self.sendErrorResponseWithAllow(h3_conn, &conn.conn, result.stream_id, 405, allow);
                             state.arena.deinit();
                             self.allocator.destroy(state);
                         },
                     }
-                    
+
                     // Note: Body data (if any) will arrive in subsequent Data events
                 },
                 .Data => {
-                    // Handle body data
-                    if (self.stream_states.get(result.stream_id)) |state| {
-                        var buf: [8192]u8 = undefined;
-                        const received = h3_conn.recvBody(&conn.conn, result.stream_id, &buf) catch 0;
-                        
-                        if (received > 0) {
+                    // Handle body data (drain all available data for this event)
+                    if (self.stream_states.get(.{ .conn = conn, .stream_id = result.stream_id })) |state| {
+                        var buf: [64 * 1024]u8 = undefined;
+                        while (true) {
+                            const received = h3_conn.recvBody(&conn.conn, result.stream_id, &buf) catch |err| {
+                                if (err == quiche.h3.Error.Done) break; // no more data now
+                                // Unexpected error while reading body
+                                std.debug.print("recvBody error on stream {}: {}\n", .{ result.stream_id, err });
+                                break;
+                            };
+
+                            if (received == 0) break;
+
                             // Check if we're in streaming mode
                             if (state.on_body_chunk) |on_chunk| {
                                 // Push-mode: call the streaming callback
-                                // Still enforce max body size by tracking total received
                                 const new_total = state.request.getBodySize() + received;
                                 if (new_total > self.config.max_request_body_size) {
                                     try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
                                     // Clean up state
-                                    _ = self.stream_states.remove(result.stream_id);
+                                    _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
                                     state.response.deinit();
                                     state.arena.deinit();
                                     self.allocator.destroy(state);
                                     return;
                                 }
-                                
+
                                 // Update body size for tracking
                                 state.request.addToBodySize(received);
-                                
-                                // Check size limit even in streaming mode
-                                if (state.request.getBodySize() > self.config.max_request_body_size) {
-                                    try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
-                                    // Clean up state
-                                    _ = self.stream_states.remove(result.stream_id);
+
+                                // Call the chunk callback with response
+                                on_chunk(&state.request, &state.response, buf[0..received]) catch |err| {
+                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                                        // Non-fatal backpressure; keep state
+                                        return;
+                                    }
+                                    const status = http.errorToStatus(err);
+                                    try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, status);
+                                    _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
                                     state.response.deinit();
                                     state.arena.deinit();
                                     self.allocator.destroy(state);
                                     return;
-                                }
-                                
-                                // Call the chunk callback with response
-                                on_chunk(&state.request, &state.response, buf[0..received]) catch |err| {
-                                    // StreamBlocked is non-fatal for streaming
-                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
-                                        // Keep state alive for processWritableStreams
-                                        return;
-                                    }
-                                    // Map error to HTTP status
-                                    const status = http.errorToStatus(err);
-                                    try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, status);
-                                    // Clean up state
-                                    _ = self.stream_states.remove(result.stream_id);
-                                    state.response.deinit();
-                                    state.arena.deinit();
-                                    self.allocator.destroy(state);
                                 };
                             } else {
                                 // Buffering mode: add to body buffer (with size limit)
                                 state.request.appendBody(buf[0..received], self.config.max_request_body_size) catch |err| {
                                     if (err == error.PayloadTooLarge) {
                                         try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
-                                        // Clean up state
-                                        _ = self.stream_states.remove(result.stream_id);
+                                        _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
                                         state.response.deinit();
                                         state.arena.deinit();
                                         self.allocator.destroy(state);
+                                        return;
                                     }
                                 };
                             }
@@ -852,47 +877,45 @@ pub const QuicServer = struct {
                 },
                 .Finished => {
                     std.debug.print("  Stream {} finished\n", .{result.stream_id});
-                    
+
                     // If we have state and haven't invoked handler yet, do it now
-                    if (self.stream_states.get(result.stream_id)) |state| {
+                    if (self.stream_states.get(.{ .conn = conn, .stream_id = result.stream_id })) |state| {
                         if (!state.body_complete) {
                             state.body_complete = true;
                             state.request.setBodyComplete();
-                            
+
                             // Check if we're in streaming mode with completion callback
                             if (state.on_body_complete) |on_complete| {
                                 // Call the completion callback with response
                                 on_complete(&state.request, &state.response) catch |err| {
-                                    // StreamBlocked is non-fatal
-                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                    // Backpressure-like conditions are non-fatal
+                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
                                         // Keep state alive for processWritableStreams
                                         return;
                                     }
                                     std.debug.print("onBodyComplete error: {}\n", .{err});
-                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id,
-                                        http.errorToStatus(err)) catch {};
+                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, http.errorToStatus(err)) catch {};
                                 };
                                 // Don't invoke the regular handler - streaming mode handles its own response
                             } else {
                                 // Buffering mode: invoke handler with complete body
                                 self.invokeHandler(state) catch |err| {
-                                    // StreamBlocked is non-fatal - handler started streaming response
-                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                    // Backpressure-like conditions are non-fatal - handler started streaming response
+                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
                                         // Keep state alive for processWritableStreams to resume
                                         return;
                                     }
                                     // For other errors, send error response
                                     std.debug.print("Handler error: {}\n", .{err});
-                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id,
-                                        http.errorToStatus(err)) catch {};
+                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, http.errorToStatus(err)) catch {};
                                 };
                             }
                         }
-                        
+
                         // Only clean up if response is truly complete
                         if (state.response.isEnded() and state.response.partial_response == null) {
                             // Response is complete, safe to clean up
-                            _ = self.stream_states.remove(result.stream_id);
+                            _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
                             state.response.deinit();
                             state.arena.deinit();
                             self.allocator.destroy(state);
@@ -904,9 +927,9 @@ pub const QuicServer = struct {
                 },
                 .GoAway, .Reset => {
                     std.debug.print("  Stream {} closed ({})\n", .{ result.stream_id, result.event_type });
-                    
+
                     // Clean up state if exists
-                    if (self.stream_states.fetchRemove(result.stream_id)) |entry| {
+                    if (self.stream_states.fetchRemove(.{ .conn = conn, .stream_id = result.stream_id })) |entry| {
                         entry.value.response.deinit();
                         entry.value.arena.deinit();
                         self.allocator.destroy(entry.value);
@@ -918,7 +941,7 @@ pub const QuicServer = struct {
             }
         }
     }
-    
+
     fn invokeHandler(self: *QuicServer, state: *RequestState) !void {
         _ = self;
         // Prevent double invocation
@@ -926,13 +949,13 @@ pub const QuicServer = struct {
             return;
         }
         state.handler_invoked = true;
-        
+
         // Call the handler and handle backpressure errors specially
         state.handler(&state.request, &state.response) catch |err| {
-            // StreamBlocked errors are non-fatal - the handler is trying to send
+            // Backpressure-like conditions are non-fatal - the handler is trying to send
             // a large response and hit flow control. Keep the state alive so
             // processWritableStreams can resume the send later.
-            if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+            if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
                 // Don't send error response or end the stream
                 // The partial response will be resumed by processWritableStreams
                 return;
@@ -940,23 +963,23 @@ pub const QuicServer = struct {
             // For other errors, propagate them normally
             return err;
         };
-        
+
         // Only auto-end the response if there's no partial response pending
         // If there is a partial response, let processWritableStreams handle completion
         if (!state.response.isEnded() and state.response.partial_response == null) {
             try state.response.end(null);
         }
     }
-    
+
     fn processWritableStreams(self: *QuicServer, conn: *connection.Connection) !void {
         // Process all writable streams
         while (conn.conn.streamWritableNext()) |stream_id| {
             // Check if this stream has a partial response waiting
-            if (self.stream_states.get(stream_id)) |state| {
+            if (self.stream_states.get(.{ .conn = conn, .stream_id = stream_id })) |state| {
                 if (state.response.partial_response != null) {
                     // Try to resume sending the partial response
                     state.response.processPartialResponse() catch |err| {
-                        if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                        if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
                             // Stream is blocked again, will retry later
                             continue;
                         }
@@ -965,24 +988,31 @@ pub const QuicServer = struct {
                         state.response.deinit();
                         state.arena.deinit();
                         self.allocator.destroy(state);
-                        _ = self.stream_states.remove(stream_id);
+                        _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                     };
-                    
+
                     // If response is complete, clean up
                     if (state.response.isEnded() and state.response.partial_response == null) {
                         state.response.deinit();
                         state.arena.deinit();
                         self.allocator.destroy(state);
-                        _ = self.stream_states.remove(stream_id);
+                        _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                     }
                 }
             }
         }
-        
+
         // Drain egress after processing writable streams
         try self.drainEgress(conn);
+
+        // Refresh the connection's idle timeout based on quiche's timer.
+        // Large transfers that progress via send-only paths (writable hints)
+        // must still bump the deadline, otherwise the periodic timer may
+        // close the connection around the idle_timeout_ms boundary.
+        const timeout_ms = conn.conn.timeoutAsMillis();
+        try self.updateTimer(conn, timeout_ms);
     }
-    
+
     fn sendErrorResponse(
         self: *QuicServer,
         h3_conn: *h3.H3Connection,
@@ -993,15 +1023,15 @@ pub const QuicServer = struct {
         _ = self;
         var status_buf: [4]u8 = undefined;
         const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{status_code});
-        
+
         const headers = [_]quiche.h3.Header{
             .{ .name = ":status", .name_len = 7, .value = status_str.ptr, .value_len = status_str.len },
             .{ .name = "content-length", .name_len = 14, .value = "0", .value_len = 1 },
         };
-        
+
         try h3_conn.sendResponse(quic_conn, stream_id, headers[0..], true);
     }
-    
+
     fn sendErrorResponseWithAllow(
         self: *QuicServer,
         h3_conn: *h3.H3Connection,
@@ -1013,21 +1043,21 @@ pub const QuicServer = struct {
         _ = self;
         var status_buf: [4]u8 = undefined;
         const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{status_code});
-        
+
         const headers = [_]quiche.h3.Header{
             .{ .name = ":status", .name_len = 7, .value = status_str.ptr, .value_len = status_str.len },
             .{ .name = "allow", .name_len = 5, .value = allow.ptr, .value_len = allow.len },
             .{ .name = "content-length", .name_len = 14, .value = "0", .value_len = 1 },
         };
-        
+
         try h3_conn.sendResponse(quic_conn, stream_id, headers[0..], true);
     }
-    
+
     fn updateTimer(self: *QuicServer, conn: *connection.Connection, timeout_ms: u64) !void {
         _ = self;
         // Track the deadline for when this connection should timeout
         const now = std.time.milliTimestamp();
-        
+
         // Handle special case where timeout_ms is maxInt or very large (no timeout or error)
         // This can happen when connections have errors like UnknownVersion
         // quiche's timeout_as_millis() returns u64::MAX when there's no timeout needed
@@ -1039,23 +1069,23 @@ pub const QuicServer = struct {
             conn.timeout_deadline_ms = now + 3_600_000;
             return;
         }
-        
+
         // Now we know timeout_ms fits in i64, cast safely
         const timeout_i64: i64 = @intCast(timeout_ms);
         conn.timeout_deadline_ms = now +% timeout_i64; // Use wrapping add for safety
     }
-    
+
     fn checkTimeouts(self: *QuicServer) !void {
         const now = std.time.milliTimestamp();
-        
+
         // Collect connections that have timed out
         var timed_out = std.ArrayList(*connection.Connection){};
         defer timed_out.deinit(self.allocator);
-        
+
         var iter = self.connections.map.iterator();
         while (iter.next()) |entry| {
             const conn = entry.value_ptr.*;
-            
+
             // Process H3 events if H3 connection exists (periodic processing)
             if (conn.http3 != null) {
                 self.processH3(conn) catch |err| {
@@ -1063,44 +1093,65 @@ pub const QuicServer = struct {
                         std.debug.print("H3 processing error in timer: {}\n", .{err});
                     }
                 };
-                
+
                 // Periodically check for writable streams (retry blocked sends)
                 self.processWritableStreams(conn) catch |err| {
                     std.debug.print("Error processing writable streams in timer: {}\n", .{err});
                 };
             }
-            
+
             // Check if this connection has timed out
             if (conn.timeout_deadline_ms <= now) {
                 try timed_out.append(self.allocator, conn);
             }
         }
-        
+
         // Process timeouts for collected connections
         for (timed_out.items) |conn| {
             self.onTimeout(conn);
         }
     }
-    
+
     fn onTimeout(self: *QuicServer, conn: *connection.Connection) void {
         conn.conn.onTimeout();
-        
+
         // Drain egress after timeout using the connection's socket
         self.drainEgress(conn) catch {};
-        
+
         if (conn.conn.isClosed()) {
             self.closeConnection(conn);
         }
     }
-    
+
     fn closeConnection(self: *QuicServer, conn: *connection.Connection) void {
+        // Clean up any pending stream states for this connection first
+        var to_remove = std.ArrayList(StreamKey){};
+        defer to_remove.deinit(self.allocator);
+        {
+            var it = self.stream_states.iterator();
+            while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (key.conn == conn) {
+                    // Copy key for removal after iteration
+                    to_remove.append(self.allocator, key) catch {};
+                }
+            }
+        }
+        for (to_remove.items) |k| {
+            if (self.stream_states.fetchRemove(k)) |kv| {
+                kv.value.response.deinit();
+                kv.value.arena.deinit();
+                self.allocator.destroy(kv.value);
+            }
+        }
+
         // Log stats
         var stats: c.quiche_stats = undefined;
         conn.conn.stats(&stats);
-        
+
         var hex_buf: [40]u8 = undefined;
         const hex_dcid = connection.formatCid(conn.dcid[0..conn.dcid_len], &hex_buf) catch "???";
-        
+
         // Check for peer error details
         if (conn.conn.peerError()) |peer_err| {
             std.debug.print("Connection closed {s}: recv={d} sent={d} lost={d} peer_error={{app={}, code=0x{x}, reason=\"{s}\"}}\n", .{
@@ -1120,7 +1171,7 @@ pub const QuicServer = struct {
                 stats.lost,
             });
         }
-        
+
         // Clean up H3 connection if it exists
         if (conn.http3) |h3_ptr| {
             const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
@@ -1128,7 +1179,7 @@ pub const QuicServer = struct {
             self.allocator.destroy(h3_conn);
             conn.http3 = null;
         }
-        
+
         // Remove from table and cleanup
         const key = conn.getKey();
         if (self.connections.remove(key)) |removed| {
@@ -1136,19 +1187,19 @@ pub const QuicServer = struct {
             self.allocator.destroy(removed);
         }
     }
-    
+
     fn onSignal(signum: c_int, user_data: *anyopaque) void {
         const self: *QuicServer = @ptrCast(@alignCast(user_data));
         const sig_name = if (signum == posix.SIG.INT) "SIGINT" else "SIGTERM";
         std.debug.print("\n{s} received, shutting down...\n", .{sig_name});
-        
+
         // Print final stats
         std.debug.print("Stats: connections={d}, packets_in={d}, packets_out={d}\n", .{
             self.connections_accepted,
             self.packets_received,
             self.packets_sent,
         });
-        
+
         self.stop();
     }
 };

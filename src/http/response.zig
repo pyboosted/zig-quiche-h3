@@ -92,20 +92,38 @@ pub const Response = struct {
             return error.ResponseEnded;
         }
         
-        // Send headers if not yet sent
-        if (!self.headers_sent) {
-            try self.sendHeaders(false);
-        }
-        
         // HEAD requests should not have a body
         if (self.is_head_request) {
             return data.len; // Pretend we wrote it
         }
         
+        // Send headers if not yet sent. If headers are temporarily blocked,
+        // queue the entire body as a partial so it can be sent once headers
+        // are accepted, and signal backpressure to the caller.
+        if (!self.headers_sent) {
+            self.sendHeaders(false) catch |err| {
+                if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                    _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                    if (self.partial_response == null) {
+                        const data_copy = try self.allocator.dupe(u8, data);
+                        self.partial_response = try streaming.PartialResponse.initMemory(
+                            self.allocator,
+                            data_copy,
+                            true,
+                        );
+                    }
+                    return error.StreamBlocked;
+                }
+                return err;
+            };
+        }
+        
         // Send body data
         const written = self.h3_conn.sendBody(self.quic_conn, self.stream_id, data, false) catch |err| {
-            if (err == quiche.h3.Error.StreamBlocked) {
-                // Stream is blocked, return 0 to indicate retry needed
+            if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                // Stream is blocked; register interest for any future capacity.
+                // Passing 0 means "notify when any amount is writable".
+                _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
                 return 0;
             }
             return err;
@@ -120,24 +138,32 @@ pub const Response = struct {
             return error.ResponseEnded;
         }
         
-        // Send headers if not yet sent
-        if (!self.headers_sent) {
-            try self.sendHeaders(false);
-        }
-        
         // HEAD requests should not have a body
         if (self.is_head_request) {
             return;
+        }
+        
+        // Send headers if not yet sent. If blocked, keep placeholder partial
+        // created by sendHeaders() and return backpressure; the queued partial
+        // will be processed when writable.
+        if (!self.headers_sent) {
+            self.sendHeaders(false) catch |err| {
+                if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                    _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                    return; // processPartialResponse will retry later
+                }
+                return err;
+            };
         }
         
         var written: usize = 0;
         while (written < data.len) {
             const remaining = data[written..];
             const n = self.h3_conn.sendBody(self.quic_conn, self.stream_id, remaining, false) catch |err| {
-                if (err == quiche.h3.Error.StreamBlocked) {
-                    // Arm writability hint for efficient retry
-                    _ = self.quic_conn.streamWritable(self.stream_id, remaining.len) catch {};
-                    
+                if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                    // Arm writability hint for any capacity (0 = any).
+                    _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+
                     // Create partial response to resume later
                     if (self.partial_response == null) {
                         // Duplicate the remaining data since we need to own it
@@ -145,7 +171,7 @@ pub const Response = struct {
                         self.partial_response = try streaming.PartialResponse.initMemory(
                             self.allocator,
                             data_copy,
-                            false
+                            true
                         );
                     }
                     return error.StreamBlocked;
@@ -154,16 +180,16 @@ pub const Response = struct {
             };
             
             if (n == 0) {
-                // Stream is blocked, arm writability hint
-                _ = self.quic_conn.streamWritable(self.stream_id, remaining.len) catch {};
-                
+                // Stream is blocked, arm writability hint for any capacity
+                _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+
                 // Save state for retry
                 if (self.partial_response == null) {
                     const data_copy = try self.allocator.dupe(u8, remaining);
                     self.partial_response = try streaming.PartialResponse.initMemory(
                         self.allocator,
                         data_copy,
-                        false
+                        true
                     );
                 }
                 return error.StreamBlocked;
@@ -181,22 +207,25 @@ pub const Response = struct {
         
         // Send headers if not yet sent
         if (!self.headers_sent) {
-            try self.sendHeaders(data == null or data.?.len == 0);
+            // For HEAD requests, always send FIN with headers
+            try self.sendHeaders(self.is_head_request or data == null or data.?.len == 0);
         }
         
         // Send final body chunk if provided
         if (data) |final_data| {
             if (final_data.len > 0 and !self.is_head_request) {
-                _ = self.h3_conn.sendBody(self.quic_conn, self.stream_id, final_data, true) catch |err| {
-                    if (err == quiche.h3.Error.StreamBlocked) {
-                        // For final send, we can't retry, so this is an error
-                        return error.StreamBlocked;
-                    }
-                    return err;
-                };
+            _ = self.h3_conn.sendBody(self.quic_conn, self.stream_id, final_data, true) catch |err| {
+                if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                    // Register interest so processWritableStreams can finish FIN later.
+                    _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                    return error.StreamBlocked;
+                }
+                return err;
+            };
             }
-        } else if (!self.is_head_request) {
+        } else {
             // Send empty body with fin=true to close the stream
+            // For HEAD requests, this ensures the stream is properly closed
             _ = try self.h3_conn.sendBody(self.quic_conn, self.stream_id, "", true);
         }
         
@@ -300,8 +329,21 @@ pub const Response = struct {
             final_headers.items,
             fin and self.is_head_request, // For HEAD, headers are the full response
         ) catch |err| {
-            // Don't mark headers as sent if blocked - will retry later
-            if (err == quiche.h3.Error.StreamBlocked) {
+            // Don't mark headers as sent if blocked - will retry later.
+            if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                // Arm writability hint for any future capacity.
+                _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                // Ensure there's a partial response placeholder so the server's
+                // processWritableStreams() path will revisit this stream and call
+                // processPartialResponse(), which re-attempts sendHeaders().
+                if (self.partial_response == null) {
+                    const empty = try self.allocator.alloc(u8, 0);
+                    self.partial_response = try streaming.PartialResponse.initMemory(
+                        self.allocator,
+                        empty,
+                        false
+                    );
+                }
                 return err;
             }
             return err;
@@ -368,19 +410,21 @@ pub const Response = struct {
     pub fn processPartialResponse(self: *Response) !void {
         const partial = self.partial_response orelse return;
         
-        // Send headers if not yet sent
-        if (!self.headers_sent) {
-            try self.sendHeaders(false);
-        }
-        
         // HEAD requests should not have body
         if (self.is_head_request) {
-            if (partial.fin_on_complete) {
-                self.ended = true;
+            // Send headers with FIN if not yet sent
+            if (!self.headers_sent) {
+                try self.sendHeaders(true);
             }
+            self.ended = true;
             partial.deinit();
             self.partial_response = null;
             return;
+        }
+        
+        // Send headers if not yet sent
+        if (!self.headers_sent) {
+            try self.sendHeaders(false);
         }
         
         // Get next chunk and try to send it
@@ -395,8 +439,8 @@ pub const Response = struct {
                     "",
                     true
                 ) catch |err| {
-                    if (err == quiche.h3.Error.StreamBlocked) {
-                        // Arm writability hint for final send
+                    if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                        // Arm writability hint for final send (any capacity)
                         _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
                         return; // Will retry later
                     }
@@ -414,17 +458,17 @@ pub const Response = struct {
                 chunk.data,
                 chunk.is_final and partial.fin_on_complete
             ) catch |err| {
-                if (err == quiche.h3.Error.StreamBlocked) {
-                    // Arm writability hint
-                    _ = self.quic_conn.streamWritable(self.stream_id, chunk.data.len) catch {};
+                if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                    // Arm writability hint (any capacity)
+                    _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
                     return; // Will retry when stream becomes writable
                 }
                 return err;
             };
             
             if (written == 0) {
-                // Stream blocked, arm writability hint
-                _ = self.quic_conn.streamWritable(self.stream_id, chunk.data.len) catch {};
+                // Stream blocked, arm writability hint for any capacity
+                _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
                 // Will retry later
                 return;
             }

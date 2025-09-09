@@ -145,9 +145,26 @@ pub const Router = struct {
             if (matched) {
                 try path_matches.append(temp_allocator, r);
                 
-                // Check if this route matches the method
+                // Check if this route matches the method exactly
                 if (r.method == method) {
                     // Found a match with correct method
+                    if (best_match == null or r.pattern.specificity_score > best_match.?.pattern.specificity_score) {
+                        // Clean up previous best params
+                        if (best_params) |*bp| {
+                            var iter = bp.iterator();
+                            while (iter.next()) |entry| {
+                                temp_allocator.free(entry.value_ptr.*);
+                            }
+                            bp.deinit(temp_allocator);
+                        }
+                        
+                        best_match = r;
+                        best_params = params;
+                        params = std.StringHashMapUnmanaged([]const u8){}; // Create new empty to avoid double-free
+                    }
+                }
+                // HEAD fallback: if we're looking for HEAD and this is a GET route
+                else if (method == .HEAD and r.method == .GET) {
                     if (best_match == null or r.pattern.specificity_score > best_match.?.pattern.specificity_score) {
                         // Clean up previous best params
                         if (best_params) |*bp| {

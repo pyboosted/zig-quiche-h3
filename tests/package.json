@@ -1,0 +1,35 @@
+{
+  "name": "zig-quiche-h3-tests",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "End-to-end tests for zig-quiche-h3 HTTP/3 server",
+  "scripts": {
+    "test": "bun test e2e --timeout 60000",
+    "test:stress": "H3_STRESS=1 bun test e2e --timeout 600000",
+    "test:qlog": "H3_QLOG=1 bun test e2e/qlog",
+    "test:ci": "bun test e2e/basic e2e/streaming --timeout 120000",
+    "build": "zig build -Dwith-libev=true -Dquiche-profile=release",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check --write",
+    "lint:ci": "biome ci",
+    "format": "biome format --write",
+    "check": "bun run typecheck && bun run lint"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.2.3",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "keywords": [
+    "quic",
+    "http3",
+    "zig",
+    "testing",
+    "e2e"
+  ],
+  "author": "",
+  "license": "MIT"
+}

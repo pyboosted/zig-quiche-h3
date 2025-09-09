@@ -3,11 +3,17 @@ const QuicServer = @import("server").QuicServer;
 const ServerConfig = @import("config").ServerConfig;
 const http = @import("http");
 
+var g_enable_progress_log: bool = false;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    
+    // Enable verbose app-level logs only when H3_DEBUG is set (keeps perf high by default)
+    if (std.process.getEnvVarOwned(allocator, "H3_DEBUG")) |_| {
+        g_enable_progress_log = true;
+    } else |_| {}
+
     // Parse command line arguments
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -51,22 +57,25 @@ pub fn main() !void {
     // Create server configuration
     const config = ServerConfig{
         .bind_port = port,
+        .bind_addr = "127.0.0.1", // Bind to loopback for tests/sandbox
         .cert_path = cert_path,
         .key_path = key_path,
         .qlog_dir = qlog_dir,
-        
+
         // Prioritize h3 for M3, keep hq-interop for compatibility
         .alpn_protocols = &.{ "h3", "hq-interop" },
-        
-        // Conservative settings for M2
-        .idle_timeout_ms = 30_000,
-        .initial_max_data = 2 * 1024 * 1024,
-        .initial_max_streams_bidi = 10,
-        .initial_max_streams_uni = 10,
-        
-        // Enable debug logging
-        .enable_debug_logging = true,
-        .debug_log_throttle = 100, // Less verbose
+
+        // Tuned for local perf tests: increase flow control to reduce update churn
+        .idle_timeout_ms = 120_000,
+        .initial_max_data = 64 * 1024 * 1024, // aggregate recv window
+        .initial_max_stream_data_bidi_remote = 8 * 1024 * 1024, // peer→us per-stream for uploads
+        .initial_max_streams_bidi = 64,
+        .initial_max_streams_uni = 64,
+
+        // Disable quiche's internal debug logging by default for performance
+        .enable_debug_logging = false,
+        .debug_log_throttle = 100,
+        .enable_pacing = false, // loopback: allow sender to run fast
     };
     
     // Create and run server
@@ -251,9 +260,32 @@ fn downloadHandler(req: *http.Request, res: *http.Response) !void {
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
     
-    // Simple safety check - don't allow .. in path
+    // Enhanced safety checks
+    // 1. Check for double slash in raw path (absolute path attempt)
+    // The router collapses empty segments, so /download//etc/passwd becomes /download/etc/passwd
+    // We need to check the raw decoded path to detect this
+    if (req.path_decoded.len >= 11 and 
+        std.mem.startsWith(u8, req.path_decoded, "/download/") and 
+        req.path_decoded[10] == '/') {
+        try res.jsonError(403, "Absolute paths not allowed");
+        return;
+    }
+    
+    // 2. Don't allow .. in path (path traversal)
     if (std.mem.indexOf(u8, file_path, "..") != null) {
         try res.jsonError(403, "Path traversal not allowed");
+        return;
+    }
+    
+    // 3. Don't allow absolute paths (in case wildcard captures one)
+    if (std.fs.path.isAbsolute(file_path)) {
+        try res.jsonError(403, "Absolute paths not allowed");
+        return;
+    }
+    
+    // 4. Don't allow empty path
+    if (file_path.len == 0) {
+        try res.jsonError(400, "File path required");
         return;
     }
     
@@ -346,8 +378,9 @@ fn streamTestHandler(req: *http.Request, res: *http.Response) !void {
         checksum = checksum +% byte;
     }
     
-    // Send response with checksum header
+    // Send response with checksum header and content length
     try res.header(http.Headers.ContentType, "application/octet-stream");
+    try res.header(http.Headers.ContentLength, "10485760"); // 10MB exactly
     var checksum_buf: [20]u8 = undefined;
     const checksum_str = try std.fmt.bufPrint(&checksum_buf, "{d}", .{checksum});
     try res.header("X-Checksum", checksum_str);
@@ -406,9 +439,11 @@ fn uploadStreamOnChunk(req: *http.Request, res: *http.Response, chunk: []const u
     ctx.hasher.update(chunk);
     ctx.bytes_received += chunk.len;
     
-    // Log progress every MB
-    if (ctx.bytes_received % (1024 * 1024) == 0) {
-        std.debug.print("Upload progress: {} MB\n", .{ctx.bytes_received / (1024 * 1024)});
+    // Optional progress log every MB when enabled
+    if (g_enable_progress_log) {
+        if (ctx.bytes_received % (1024 * 1024) == 0) {
+            std.debug.print("Upload progress: {} MB\n", .{ctx.bytes_received / (1024 * 1024)});
+        }
     }
 }
 
