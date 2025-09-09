@@ -328,14 +328,144 @@ fn downloadHandler(req: *http.Request, res: *http.Response) !void {
     
     const full_path = try std.fs.path.join(allocator, &.{ cwd, file_path });
     
-    // Try to send the file using zero-copy streaming
-    res.sendFile(full_path) catch |err| {
+    // Open file and get size
+    const file = std.fs.openFileAbsolute(full_path, .{}) catch |err| {
         switch (err) {
-            error.FileNotFound => try res.jsonError(404, "File not found"),
-            error.AccessDenied => try res.jsonError(403, "Access denied"),
-            else => try res.jsonError(500, "Internal server error"),
+            error.FileNotFound => {
+                try res.jsonError(404, "File not found");
+                return;
+            },
+            error.AccessDenied => {
+                try res.jsonError(403, "Access denied");
+                return;
+            },
+            else => {
+                try res.jsonError(500, "Internal server error");
+                return;
+            },
         }
     };
+    errdefer file.close();
+    
+    const stat = try file.stat();
+    const file_size = stat.size;
+    
+    // Always advertise range support for files
+    try res.setAcceptRangesBytes();
+    
+    // Check for Range header
+    const range_header = req.getHeader(http.Headers.Range);
+    
+    if (range_header) |range_str| {
+        // Parse the range request
+        const range_spec = http.range.parseRange(range_str, file_size) catch |err| {
+            // Handle range errors according to RFC 7233
+            switch (err) {
+                error.Unsatisfiable => {
+                    // Return 416 Range Not Satisfiable
+                    try res.status(@intFromEnum(http.Status.RangeNotSatisfiable));
+                    try res.setContentRangeUnsatisfied(file_size); // RFC 7233: "bytes */size"
+                    try res.header(http.Headers.ContentLength, "0"); // Must be 0 for 416
+                    try res.end(null);
+                    file.close();
+                    return;
+                },
+                error.MultiRange => {
+                    // Multi-range not supported in v1, ignore and send full file
+                    // Fall through to normal file serving
+                },
+                error.NonBytesUnit, error.Malformed => {
+                    // Ignore invalid ranges and send full file
+                    // Fall through to normal file serving  
+                },
+            }
+            
+            // For ignored errors, serve the full file
+            try sendFullFile(res, file, file_size, full_path);
+            return;
+        };
+        
+        // Valid range - send partial content
+        try res.status(@intFromEnum(http.Status.PartialContent)); // Partial Content
+        try res.setContentRange(range_spec.start, range_spec.end, file_size);
+        
+        // Set content-length for the range
+        const range_length = range_spec.end - range_spec.start + 1;
+        try res.setContentLength(range_length);
+        
+        // Set content type
+        try setContentTypeFromPath(res, full_path);
+        
+        // For HEAD requests, just send headers
+        if (res.is_head_request) {
+            try res.end(null);
+            file.close();
+            return;
+        }
+        
+        // Create partial response for the range
+        const chunk_sz = http.streaming.getDefaultChunkSize();
+        res.partial_response = try http.streaming.PartialResponse.initFileRange(
+            res.allocator, // Use response allocator consistently
+            file,
+            file_size,
+            @intCast(range_spec.start), // Convert u64 to usize
+            @intCast(range_spec.end),   // Convert u64 to usize
+            chunk_sz,
+            true // Send FIN when complete
+        );
+        
+        // Start processing the partial response
+        try res.processPartialResponse();
+    } else {
+        // No range header - send full file
+        try sendFullFile(res, file, file_size, full_path);
+    }
+}
+
+// Helper to send full file
+fn sendFullFile(res: *http.Response, file: std.fs.File, file_size: u64, full_path: []const u8) !void {
+    // Set content-length header
+    try res.setContentLength(file_size);
+    
+    // Set content type
+    try setContentTypeFromPath(res, full_path);
+    
+    // For HEAD requests, just send headers
+    if (res.is_head_request) {
+        try res.end(null);
+        file.close();
+        return;
+    }
+    
+    // Create partial response for full file
+    const chunk_sz = http.streaming.getDefaultChunkSize();
+    res.partial_response = try http.streaming.PartialResponse.initFile(
+        res.allocator,
+        file,
+        file_size,
+        chunk_sz,
+        true // Send FIN when complete
+    );
+    
+    // Start processing the partial response
+    try res.processPartialResponse();
+}
+
+// Helper to set content type based on file extension
+fn setContentTypeFromPath(res: *http.Response, file_path: []const u8) !void {
+    const ext = std.fs.path.extension(file_path);
+    if (std.mem.eql(u8, ext, ".html")) {
+        try res.header(http.Headers.ContentType, http.MimeTypes.TextHtml);
+    } else if (std.mem.eql(u8, ext, ".css")) {
+        try res.header(http.Headers.ContentType, http.MimeTypes.TextCss);
+    } else if (std.mem.eql(u8, ext, ".js")) {
+        try res.header(http.Headers.ContentType, http.MimeTypes.TextJavascript);
+    } else if (std.mem.eql(u8, ext, ".json")) {
+        try res.header(http.Headers.ContentType, http.MimeTypes.ApplicationJson);
+    } else {
+        try res.header(http.Headers.ContentType, http.MimeTypes.ApplicationOctetStream);
+    }
 }
 
 // Context for 1GB generator

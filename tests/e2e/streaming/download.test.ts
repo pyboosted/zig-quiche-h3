@@ -200,7 +200,7 @@ describe("HTTP/3 Download Streaming", () => {
   });
 
   describe("Streaming behavior", () => {
-    it.skip("supports partial content ranges (if implemented)", async () => {
+    it("supports partial content ranges (if implemented)", async () => {
       const response = await curl(
         `https://127.0.0.1:${server.port}/stream/test`,
         {

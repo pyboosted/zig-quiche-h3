@@ -277,7 +277,25 @@ Status: Completed ✓
   - Individual test files for focused debugging
   - QLOG disabled by default for performance
 
-Milestone 6: QUIC DATAGRAM (Day 17–19)
+Milestone 5.5: HTTP Range Requests (Day 17–18)
+Status: Completed ✓
+- RFC 7233 compliant byte-range support for resumable downloads ✓
+- Single-range implementation for files and known-size responses ✓
+- Parser with typed errors for precise policy decisions ✓
+- Integration with existing PartialResponse streaming ✓
+- Test:
+  - Range parser unit tests with boundary cases ✓
+  - 206 Partial Content with Content-Range headers ✓
+  - 416 Range Not Satisfiable for invalid ranges ✓
+  - HEAD request parity with GET ✓
+  - curl --range E2E tests via Bun ✓
+- Implementation completed with all review feedback addressed:
+  - Fixed 416 Content-Range format to "bytes */size" per RFC 7233
+  - Added Content-Length: 0 for 416 responses
+  - Fixed type conversions and header constant usage
+  - Created comprehensive E2E test suite (18 tests)
+
+Milestone 6: QUIC DATAGRAM (Day 19–21)
 - Enable QUIC DATAGRAM; send/recv APIs; queue sizing and purge.
 - Test: QUIC datagram echo endpoint; disabled-path returns error ✓
 

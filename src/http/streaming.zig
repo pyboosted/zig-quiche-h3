@@ -47,6 +47,7 @@ pub const PartialResponse = struct {
         offset: usize,              // Current file read position
         buf_len: usize,             // Valid data length in buffer
         buf_sent: usize,            // Bytes sent from current buffer
+        end_exclusive: usize,       // Ending offset for ranges (exclusive)
     };
     
     pub const GeneratorSource = struct {
@@ -95,6 +96,7 @@ pub const PartialResponse = struct {
                 .offset = 0,
                 .buf_len = 0,
                 .buf_sent = 0,
+                .end_exclusive = file_size,
             }},
             .written = 0,
             .total_size = file_size,
@@ -136,6 +138,43 @@ pub const PartialResponse = struct {
         return self;
     }
     
+    /// Initialize a partial response for file range
+    pub fn initFileRange(
+        allocator: std.mem.Allocator,
+        file: std.fs.File,
+        file_size: usize,
+        start: usize,
+        end_inclusive: usize,
+        buffer_size: usize,
+        fin_on_complete: bool,
+    ) !*PartialResponse {
+        // Validate range
+        if (start > end_inclusive or end_inclusive >= file_size) {
+            return error.InvalidRange;
+        }
+        
+        const buffer = try allocator.alloc(u8, buffer_size);
+        errdefer allocator.free(buffer);
+        
+        const self = try allocator.create(PartialResponse);
+        self.* = .{
+            .body_source = .{ .file = .{
+                .file = file,
+                .buffer = buffer,
+                .offset = start,
+                .buf_len = 0,
+                .buf_sent = 0,
+                .end_exclusive = end_inclusive + 1,
+            }},
+            .written = 0,
+            .total_size = end_inclusive - start + 1,
+            .fin_on_complete = fin_on_complete,
+            .allocator = allocator,
+            .config = .{ .chunk_size = default_chunk_size },
+        };
+        return self;
+    }
+    
     /// Clean up resources
     pub fn deinit(self: *PartialResponse) void {
         switch (self.body_source) {
@@ -163,25 +202,28 @@ pub const PartialResponse = struct {
                 }
                 // Cap chunk size for memory sources to smooth pacing
                 const chunk_size = @min(remaining.len, self.config.chunk_size);
-                const is_final = chunk_size == remaining.len; // last chunk will carry FIN
+                // is_final = true only for the very last chunk (no more data remaining)
+                const is_final = chunk_size == remaining.len;
                 return .{ .data = remaining[0..chunk_size], .is_final = is_final };
             },
             .file => |*f| {
                 // Return unsent portion of current buffer if any
                 if (f.buf_sent < f.buf_len) {
                     const remaining = f.buffer[f.buf_sent..f.buf_len];
-                    // If we've already read the last bytes from the file (offset
-                    // has reached total_size), this buffer represents the tail
-                    // of the file. Mark it as final so the last DATA carries FIN.
-                    const is_final = if (self.total_size) |total|
-                        f.offset >= total
-                    else
-                        false;
+                    // For ranges: is_final = true only if we've read up to end_exclusive
+                    // This ensures FIN is sent with the last chunk of the range
+                    const is_final = (f.offset >= f.end_exclusive);
                     return .{ .data = remaining, .is_final = is_final };
                 }
                 
                 // Buffer fully sent, read next chunk
-                const read = try f.file.pread(f.buffer, f.offset);
+                // For ranges, limit read to not exceed end_exclusive
+                const max_read = @min(f.buffer.len, f.end_exclusive -| f.offset);
+                if (max_read == 0) {
+                    return .{ .data = "", .is_final = true };
+                }
+                
+                const read = try f.file.pread(f.buffer[0..max_read], f.offset);
                 if (read == 0) {
                     return .{ .data = "", .is_final = true };
                 }
@@ -191,7 +233,10 @@ pub const PartialResponse = struct {
                 f.buf_sent = 0;
                 f.offset += read;
                 
-                const is_final = (self.total_size != null and f.offset >= self.total_size.?);
+                // is_final = true when we've read the last chunk up to end_exclusive
+                // This correctly handles both full-file (end_exclusive = file_size)
+                // and partial ranges (end_exclusive = range_end + 1)
+                const is_final = (f.offset >= f.end_exclusive);
                 return .{ .data = f.buffer[0..read], .is_final = is_final };
             },
             .generator => |*g| {

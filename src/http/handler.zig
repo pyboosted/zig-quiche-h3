@@ -199,6 +199,9 @@ pub const Headers = struct {
     pub const UserAgent = "user-agent";
     pub const Vary = "vary";
     pub const WWWAuthenticate = "www-authenticate";
+    pub const Range = "range";
+    pub const AcceptRanges = "accept-ranges";
+    pub const ContentRange = "content-range";
 };
 
 /// Common MIME types

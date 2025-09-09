@@ -34,13 +34,13 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
 
   // Build server arguments
   const args = [
-    "../zig-out/bin/quic-server", // Relative to tests/ directory
+    "../../zig-out/bin/quic-server", // Relative to tests/e2e/ directory
     "--port",
     port.toString(),
     "--cert",
-    "../third_party/quiche/quiche/examples/cert.crt",
+    "../../third_party/quiche/quiche/examples/cert.crt",
     "--key",
-    "../third_party/quiche/quiche/examples/cert.key",
+    "../../third_party/quiche/quiche/examples/cert.key",
   ];
 
   // QLOG configuration
@@ -166,7 +166,7 @@ export async function withServer<T>(
 export async function checkServerBinary(): Promise<boolean> {
   try {
     const proc = spawn({
-      cmd: ["../zig-out/bin/quic-server", "--help"],
+      cmd: ["../../zig-out/bin/quic-server", "--help"],
       stdout: "pipe",
       stderr: "pipe",
       cwd: "./",

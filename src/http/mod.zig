@@ -7,6 +7,7 @@ pub const response = @import("response.zig");
 pub const router = @import("router.zig");
 pub const json = @import("json.zig");
 pub const streaming = @import("streaming.zig");
+pub const range = @import("range.zig");
 
 // Re-export commonly used types at the module level
 pub const Router = router.Router;

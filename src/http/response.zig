@@ -237,9 +237,7 @@ pub const Response = struct {
         try self.header(Headers.ContentType, "application/json; charset=utf-8");
         
         // Add content-length if known
-        var len_buf: [20]u8 = undefined;
-        const len_str = try std.fmt.bufPrint(&len_buf, "{d}", .{json_str.len});
-        try self.header(Headers.ContentLength, len_str);
+        try self.setContentLength(json_str.len);
         
         // Use writeAll for proper handling of partial writes
         try self.writeAll(json_str);
@@ -277,6 +275,34 @@ pub const Response = struct {
         try self.status(code);
         try self.header(Headers.Location, location);
         try self.end(null);
+    }
+    
+    /// Set Accept-Ranges: bytes header to indicate range support
+    pub fn setAcceptRangesBytes(self: *Response) !void {
+        try self.header(Headers.AcceptRanges, "bytes");
+    }
+    
+    /// Set Content-Range header for partial content responses (206)
+    /// Format: "bytes start-end/size" where start and end are inclusive
+    pub fn setContentRange(self: *Response, start: u64, end_offset: u64, total_size: u64) !void {
+        var buf: [100]u8 = undefined;
+        const range_str = try std.fmt.bufPrint(&buf, "bytes {d}-{d}/{d}", .{ start, end_offset, total_size });
+        try self.header(Headers.ContentRange, range_str);
+    }
+    
+    /// Set Content-Range header for unsatisfiable range responses (416)
+    /// Format: "bytes */size" per RFC 7233 section 4.2
+    pub fn setContentRangeUnsatisfied(self: *Response, total_size: u64) !void {
+        var buf: [100]u8 = undefined;
+        const range_str = try std.fmt.bufPrint(&buf, "bytes */{d}", .{total_size});
+        try self.header(Headers.ContentRange, range_str);
+    }
+    
+    /// Set Content-Length header with a numeric value
+    pub fn setContentLength(self: *Response, length: u64) !void {
+        var buf: [32]u8 = undefined;
+        const len_str = try std.fmt.bufPrint(&buf, "{d}", .{length});
+        try self.header(Headers.ContentLength, len_str);
     }
     
     /// Helper to send accumulated headers
@@ -375,9 +401,7 @@ pub const Response = struct {
         const stat = try file.stat();
         
         // Set content-length header
-        var len_buf: [20]u8 = undefined;
-        const len_str = try std.fmt.bufPrint(&len_buf, "{d}", .{stat.size});
-        try self.header(Headers.ContentLength, len_str);
+        try self.setContentLength(stat.size);
         
         // Detect content type from extension
         const ext = std.fs.path.extension(file_path);
