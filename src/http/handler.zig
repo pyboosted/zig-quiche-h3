@@ -7,6 +7,12 @@ const Response = @import("response.zig").Response;
 /// HTTP handler function type
 pub const Handler = *const fn (*Request, *Response) anyerror!void;
 
+/// Streaming callback types for push-mode request body handling
+/// These callbacks receive Response pointer for bidirectional streaming
+pub const OnHeaders = *const fn (req: *Request, res: *Response) anyerror!void;
+pub const OnBodyChunk = *const fn (req: *Request, res: *Response, chunk: []const u8) anyerror!void;
+pub const OnBodyComplete = *const fn (req: *Request, res: *Response) anyerror!void;
+
 /// HTTP methods
 pub const Method = enum {
     GET,

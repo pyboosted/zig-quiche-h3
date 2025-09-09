@@ -20,5 +20,10 @@ pub const MimeTypes = handler.MimeTypes;
 pub const Header = request.Header;
 pub const MatchResult = router.MatchResult;
 
+// Streaming callback types
+pub const OnHeaders = handler.OnHeaders;
+pub const OnBodyChunk = handler.OnBodyChunk;
+pub const OnBodyComplete = handler.OnBodyComplete;
+
 // Utility functions
 pub const errorToStatus = handler.errorToStatus;

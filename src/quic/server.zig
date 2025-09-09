@@ -30,10 +30,15 @@ const RequestState = struct {
     handler: http.Handler,
     body_complete: bool = false,
     handler_invoked: bool = false, // Track if handler was already called
+    is_streaming: bool = false,
     
-    // Push-mode streaming callbacks
-    on_body_chunk: ?*const fn(req: *http.Request, chunk: []const u8) anyerror!void = null,
-    on_body_complete: ?*const fn(req: *http.Request) anyerror!void = null,
+    // User data for streaming handlers to store context
+    user_data: ?*anyopaque = null,
+    
+    // Push-mode streaming callbacks (include Response pointer for bidirectional streaming)
+    on_headers: ?*const fn(req: *http.Request, res: *http.Response) anyerror!void = null,
+    on_body_chunk: ?*const fn(req: *http.Request, res: *http.Response, chunk: []const u8) anyerror!void = null,
+    on_body_complete: ?*const fn(req: *http.Request, res: *http.Response) anyerror!void = null,
 };
 
 pub const QuicServer = struct {
@@ -223,6 +228,24 @@ pub const QuicServer = struct {
     /// Register a route with the HTTP router
     pub fn route(self: *QuicServer, method: http.Method, pattern: []const u8, handler: http.Handler) !void {
         try self.router.route(method, pattern, handler);
+    }
+    
+    /// Register a streaming route with push-mode callbacks
+    pub fn routeStreaming(
+        self: *QuicServer,
+        method: http.Method,
+        pattern: []const u8,
+        callbacks: struct {
+            on_headers: ?http.OnHeaders = null,
+            on_body_chunk: ?http.OnBodyChunk = null,
+            on_body_complete: ?http.OnBodyComplete = null,
+        },
+    ) !void {
+        try self.router.routeStreaming(method, pattern, .{
+            .on_headers = callbacks.on_headers,
+            .on_body_chunk = callbacks.on_body_chunk,
+            .on_body_complete = callbacks.on_body_complete,
+        });
     }
     
     fn onUdpReadable(fd: posix.socket_t, _revents: u32, user_data: *anyopaque) void {
@@ -666,6 +689,9 @@ pub const QuicServer = struct {
                         result.stream_id,
                     );
                     
+                    // Link request's user_data to state's user_data for streaming handlers
+                    state.request.user_data = state.user_data;
+                    
                     // Match route
                     const match_result = try self.router.match(
                         arena_allocator,
@@ -677,7 +703,16 @@ pub const QuicServer = struct {
                         .Found => |found| {
                             // Store extracted params
                             state.request.params = found.params;
-                            state.handler = found.route.handler;
+                            // Copy handler or streaming callbacks from route
+                            if (found.route.is_streaming) {
+                                state.is_streaming = true;
+                                state.handler = undefined; // Won't be used
+                                state.on_headers = found.route.on_headers;
+                                state.on_body_chunk = found.route.on_body_chunk;
+                                state.on_body_complete = found.route.on_body_complete;
+                            } else {
+                                state.handler = found.route.handler;
+                            }
                             
                             // Initialize response
                             state.response = http.Response.init(
@@ -691,21 +726,40 @@ pub const QuicServer = struct {
                             // Store state
                             try self.stream_states.put(result.stream_id, state);
                             
-                            // For methods without body, invoke handler immediately
-                            if (method == .GET or method == .HEAD or method == .DELETE) {
-                                self.invokeHandler(state) catch |err| {
-                                    // StreamBlocked is non-fatal - handler started streaming response
-                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
-                                        // Keep state alive for processWritableStreams to resume
-                                        return;
-                                    }
-                                    // For other errors, send error response
-                                    std.debug.print("Handler error: {}\n", .{err});
-                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 
-                                        http.errorToStatus(err)) catch {};
-                                };
+                            // Handle immediate invocation based on route type
+                            if (state.is_streaming) {
+                                // For streaming routes, call on_headers immediately if present
+                                if (state.on_headers) |on_headers| {
+                                    on_headers(&state.request, &state.response) catch |err| {
+                                        // StreamBlocked is non-fatal
+                                        if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                            return;
+                                        }
+                                        std.debug.print("onHeaders error: {}\n", .{err});
+                                        self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id,
+                                            http.errorToStatus(err)) catch {};
+                                    };
+                                    // Sync user_data back to state after callback
+                                    state.user_data = state.request.user_data;
+                                }
+                                // For methods with body, wait for Data events to call on_body_chunk
+                            } else {
+                                // Regular handler: invoke immediately for methods without body
+                                if (method == .GET or method == .HEAD or method == .DELETE) {
+                                    self.invokeHandler(state) catch |err| {
+                                        // StreamBlocked is non-fatal - handler started streaming response
+                                        if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                            // Keep state alive for processWritableStreams to resume
+                                            return;
+                                        }
+                                        // For other errors, send error response
+                                        std.debug.print("Handler error: {}\n", .{err});
+                                        self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 
+                                            http.errorToStatus(err)) catch {};
+                                    };
+                                }
+                                // For methods with body, wait for Data events
                             }
-                            // For methods with body, wait for Data events
                         },
                         .NotFound => {
                             try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 404);
@@ -764,8 +818,22 @@ pub const QuicServer = struct {
                                     return;
                                 }
                                 
-                                // Call the chunk callback
-                                try on_chunk(&state.request, buf[0..received]);
+                                // Call the chunk callback with response
+                                on_chunk(&state.request, &state.response, buf[0..received]) catch |err| {
+                                    // StreamBlocked is non-fatal for streaming
+                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                        // Keep state alive for processWritableStreams
+                                        return;
+                                    }
+                                    // Map error to HTTP status
+                                    const status = http.errorToStatus(err);
+                                    try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, status);
+                                    // Clean up state
+                                    _ = self.stream_states.remove(result.stream_id);
+                                    state.response.deinit();
+                                    state.arena.deinit();
+                                    self.allocator.destroy(state);
+                                };
                             } else {
                                 // Buffering mode: add to body buffer (with size limit)
                                 state.request.appendBody(buf[0..received], self.config.max_request_body_size) catch |err| {
@@ -793,8 +861,17 @@ pub const QuicServer = struct {
                             
                             // Check if we're in streaming mode with completion callback
                             if (state.on_body_complete) |on_complete| {
-                                // Call the completion callback
-                                try on_complete(&state.request);
+                                // Call the completion callback with response
+                                on_complete(&state.request, &state.response) catch |err| {
+                                    // StreamBlocked is non-fatal
+                                    if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked) {
+                                        // Keep state alive for processWritableStreams
+                                        return;
+                                    }
+                                    std.debug.print("onBodyComplete error: {}\n", .{err});
+                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id,
+                                        http.errorToStatus(err)) catch {};
+                                };
                                 // Don't invoke the regular handler - streaming mode handles its own response
                             } else {
                                 // Buffering mode: invoke handler with complete body

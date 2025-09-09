@@ -185,8 +185,9 @@ Implementation Details:
   - Memory efficient with arena cleanup
 
 Milestone 5: Streaming Bodies (Day 14–16)
-Status: Near Completion ✅ (missing upload endpoint for full completion)
+Status: Completed ✓
 - Chunked read/write with backpressure; partial write handling (`Done` retry).
+- Push-mode callbacks for streaming request bodies without buffering.
 - Test: upload/download 1 GiB with checksums; no leaks; backpressure observed ✓
 
 Implementation Details:
@@ -215,12 +216,21 @@ Implementation Details:
   - Memory-efficient body size tracking without allocation
   - Defensive null setting after partial.deinit()
   - All handlers use writeAll() to prevent truncation
+- Push-mode streaming callbacks for request bodies:
+  - Extended handler.zig with OnHeaders/OnBodyChunk/OnBodyComplete callbacks
+  - Callbacks receive Response pointer for bidirectional streaming
+  - Router support via routeStreaming() method for registering callbacks
+  - Server invokes callbacks at appropriate H3 events (Headers/Data/Finished)
+  - Example implementations: `/upload/stream` (SHA-256), `/upload/echo` (bidirectional)
+  - Zero memory allocation for arbitrarily large uploads
 - Testing verified:
   - 1GB downloads complete without memory exhaustion
   - Backpressure properly handled with StreamBlocked/Done errors
   - Multiple concurrent streams work correctly
   - No premature state cleanup during streaming
   - Stream capacity properly restored after backpressure
+  - Push-mode callbacks invoked correctly for uploads
+  - SHA-256 computation on-the-fly without buffering
 
 Milestone 5+: Bun E2E Testing Environment (Day 16–17)
 Status: Planned

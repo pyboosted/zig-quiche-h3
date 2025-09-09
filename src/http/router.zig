@@ -1,7 +1,11 @@
 const std = @import("std");
 const pattern = @import("pattern.zig");
-const Method = @import("handler.zig").Method;
-const Handler = @import("handler.zig").Handler;
+const handler_mod = @import("handler.zig");
+const Method = handler_mod.Method;
+const Handler = handler_mod.Handler;
+const OnHeaders = handler_mod.OnHeaders;
+const OnBodyChunk = handler_mod.OnBodyChunk;
+const OnBodyComplete = handler_mod.OnBodyComplete;
 
 /// A single route with its compiled pattern and handler
 pub const Route = struct {
@@ -9,6 +13,12 @@ pub const Route = struct {
     handler: Handler,
     method: Method,
     raw_pattern: []const u8, // Keep for debugging
+    
+    // Streaming fields for push-mode request body handling
+    is_streaming: bool = false,
+    on_headers: ?OnHeaders = null,
+    on_body_chunk: ?OnBodyChunk = null,
+    on_body_complete: ?OnBodyComplete = null,
 };
 
 /// Result of route matching
@@ -58,6 +68,45 @@ pub const Router = struct {
             .handler = handler,
             .method = method,
             .raw_pattern = raw,
+        });
+        
+        // Sort routes by specificity (higher score first)
+        std.mem.sort(Route, self.routes.items, {}, compareRoutes);
+    }
+    
+    /// Register a streaming route with push-mode callbacks
+    /// Callbacks are invoked as request body data arrives:
+    /// - on_headers: Called when headers are complete (can send early response)
+    /// - on_body_chunk: Called for each chunk of body data
+    /// - on_body_complete: Called when body is fully received
+    pub fn routeStreaming(
+        self: *Router,
+        method: Method,
+        route_pattern: []const u8,
+        callbacks: struct {
+            on_headers: ?OnHeaders = null,
+            on_body_chunk: ?OnBodyChunk = null,
+            on_body_complete: ?OnBodyComplete = null,
+        },
+    ) !void {
+        // Compile the pattern
+        var compiled = try pattern.compile(self.allocator, route_pattern);
+        errdefer compiled.deinit();
+        
+        // Store the raw pattern for debugging
+        const raw = try self.allocator.dupe(u8, route_pattern);
+        errdefer self.allocator.free(raw);
+        
+        // Create streaming route (handler is a placeholder, won't be called)
+        try self.routes.append(self.allocator, Route{
+            .pattern = compiled,
+            .handler = undefined, // Not used for streaming routes
+            .method = method,
+            .raw_pattern = raw,
+            .is_streaming = true,
+            .on_headers = callbacks.on_headers,
+            .on_body_chunk = callbacks.on_body_chunk,
+            .on_body_complete = callbacks.on_body_complete,
         });
         
         // Sort routes by specificity (higher score first)

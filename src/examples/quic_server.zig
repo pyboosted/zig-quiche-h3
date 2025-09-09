@@ -98,6 +98,18 @@ fn registerRoutes(server: *QuicServer) !void {
     try server.route(.GET, "/stream/1gb", stream1GBHandler);
     try server.route(.GET, "/stream/test", streamTestHandler);
     
+    // Upload streaming endpoints (M5 - push-mode callbacks)
+    try server.routeStreaming(.POST, "/upload/stream", .{
+        .on_headers = uploadStreamOnHeaders,
+        .on_body_chunk = uploadStreamOnChunk,
+        .on_body_complete = uploadStreamOnComplete,
+    });
+    try server.routeStreaming(.POST, "/upload/echo", .{
+        .on_headers = uploadEchoOnHeaders,
+        .on_body_chunk = uploadEchoOnChunk,
+        .on_body_complete = uploadEchoOnComplete,
+    });
+    
     std.debug.print("Routes registered:\n", .{});
     std.debug.print("  GET  /\n", .{});
     std.debug.print("  GET  /api/users\n", .{});
@@ -108,6 +120,8 @@ fn registerRoutes(server: *QuicServer) !void {
     std.debug.print("  GET  /download/* (file streaming)\n", .{});
     std.debug.print("  GET  /stream/1gb (1GB test)\n", .{});
     std.debug.print("  GET  /stream/test (streaming test)\n", .{});
+    std.debug.print("  POST /upload/stream (streaming upload with SHA-256)\n", .{});
+    std.debug.print("  POST /upload/echo (bidirectional echo)\n", .{});
     std.debug.print("\n", .{});
 }
 
@@ -341,6 +355,141 @@ fn streamTestHandler(req: *http.Request, res: *http.Response) !void {
     // Use writeAll which handles backpressure properly
     // If it returns StreamBlocked, the updated invokeHandler will handle it
     try res.writeAll(data);
+    try res.end(null);
+}
+
+// Upload streaming handlers - demonstrate push-mode callbacks
+// These process uploads without buffering entire request
+
+// Context for tracking upload state
+const UploadContext = struct {
+    hasher: std.crypto.hash.sha2.Sha256,
+    bytes_received: usize,
+    start_time: i64,
+};
+
+fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) !void {
+    _ = res; // Response not used in headers callback for this handler
+    // Called when headers complete - can send early response or validate
+    const content_length = req.contentLength();
+    
+    // Allocate context for tracking upload
+    const ctx = try req.arena.allocator().create(UploadContext);
+    ctx.* = .{
+        .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+        .bytes_received = 0,
+        .start_time = std.time.milliTimestamp(),
+    };
+    
+    // Store context in request's user_data field
+    req.user_data = @ptrCast(ctx);
+    
+    if (content_length) |len| {
+        std.debug.print("Upload starting: {} bytes expected\n", .{len});
+    } else {
+        std.debug.print("Upload starting: chunked transfer\n", .{});
+    }
+}
+
+fn uploadStreamOnChunk(req: *http.Request, res: *http.Response, chunk: []const u8) !void {
+    _ = res; // Not sending response during chunks
+    
+    // Retrieve context from user_data
+    const ctx = if (req.user_data) |ptr|
+        @as(*UploadContext, @ptrCast(@alignCast(ptr)))
+    else {
+        std.debug.print("Missing upload context in chunk handler\n", .{});
+        return;
+    };
+    
+    // Update SHA-256 hash
+    ctx.hasher.update(chunk);
+    ctx.bytes_received += chunk.len;
+    
+    // Log progress every MB
+    if (ctx.bytes_received % (1024 * 1024) == 0) {
+        std.debug.print("Upload progress: {} MB\n", .{ctx.bytes_received / (1024 * 1024)});
+    }
+}
+
+fn uploadStreamOnComplete(req: *http.Request, res: *http.Response) !void {
+    // Retrieve and finalize context from user_data
+    const ctx = if (req.user_data) |ptr|
+        @as(*UploadContext, @ptrCast(@alignCast(ptr)))
+    else {
+        try res.jsonError(500, "Missing upload context");
+        return;
+    };
+    
+    // Compute final hash using Zig 0.15 API
+    var hash: [32]u8 = undefined;
+    ctx.hasher.final(&hash);
+    const elapsed_ms = std.time.milliTimestamp() - ctx.start_time;
+    
+    // Format hash as hex string
+    var hash_hex: [64]u8 = undefined;
+    for (&hash, 0..) |byte, i| {
+        _ = try std.fmt.bufPrint(hash_hex[i*2..][0..2], "{x:0>2}", .{byte});
+    }
+    
+    // Send response with upload stats
+    const response = struct {
+        bytes_received: usize,
+        sha256: []const u8,
+        elapsed_ms: i64,
+        throughput_mbps: f64,
+    }{
+        .bytes_received = ctx.bytes_received,
+        .sha256 = &hash_hex,
+        .elapsed_ms = elapsed_ms,
+        .throughput_mbps = if (elapsed_ms > 0) 
+            @as(f64, @floatFromInt(ctx.bytes_received)) * 8.0 / (@as(f64, @floatFromInt(elapsed_ms)) * 1000.0)
+        else 
+            0.0,
+    };
+    
+    try res.jsonValue(response);
+    
+    std.debug.print("Upload complete: {} bytes, SHA-256: {s}\n", .{ctx.bytes_received, hash_hex});
+}
+
+// Echo upload handlers - demonstrate bidirectional streaming
+fn uploadEchoOnHeaders(req: *http.Request, res: *http.Response) !void {
+    _ = req;
+    
+    // Start response immediately - bidirectional streaming
+    try res.status(200);
+    try res.header(http.Headers.ContentType, "text/plain");
+    try res.header("X-Echo-Mode", "streaming");
+    
+    // Don't call end() - keep stream open for writing chunks
+}
+
+fn uploadEchoOnChunk(req: *http.Request, res: *http.Response, chunk: []const u8) !void {
+    _ = req;
+    
+    // Echo each chunk back immediately
+    // This demonstrates bidirectional streaming - response before request completes
+    res.writeAll(chunk) catch |err| switch (err) {
+        error.StreamBlocked => {
+            // Backpressure - data queued for later transmission via PartialResponse
+            std.debug.print("Echo backpressure, data queued for retry\n", .{});
+        },
+        else => return err,
+    };
+}
+
+fn uploadEchoOnComplete(req: *http.Request, res: *http.Response) !void {
+    _ = req;
+    
+    // Send final chunk and close stream
+    res.writeAll("\n--- Upload Complete ---\n") catch |err| switch (err) {
+        error.StreamBlocked => {
+            // Backpressure on final message - data queued for retry
+            std.debug.print("Final message blocked, queued for retry\n", .{});
+        },
+        else => return err,
+    };
     try res.end(null);
 }
 

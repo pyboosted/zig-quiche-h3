@@ -22,6 +22,7 @@ pub const Request = struct {
     body_buffer: std.ArrayList(u8),  // Bounded body buffer for M4
     body_complete: bool,
     body_received_bytes: usize,      // Track bytes in streaming mode
+    user_data: ?*anyopaque = null,   // User context for streaming handlers
     
     /// Initialize a new request with an arena allocator
     pub fn init(
@@ -57,6 +58,7 @@ pub const Request = struct {
             .body_buffer = std.ArrayList(u8){},
             .body_complete = false,
             .body_received_bytes = 0,
+            .user_data = null,
         };
     }
     
