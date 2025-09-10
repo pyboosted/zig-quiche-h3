@@ -243,8 +243,9 @@ pub const Connection = struct {
     pub fn streamCapacity(self: *Connection, stream_id: u64) !usize {
         const res = c.quiche_conn_stream_capacity(self.ptr, stream_id);
         if (res < 0) {
-            // Propagate the actual error instead of masking it
-            return mapError(@intCast(res));
+            // Try to map the error, but return specific error for unmapped negatives
+            try mapError(@intCast(res));
+            return QuicheError.InvalidState; // Fallback for unmapped errors
         }
         return @intCast(res);
     }
@@ -264,6 +265,82 @@ pub const Connection = struct {
             return false; // Shouldn't reach here but needed for type safety
         }
         return res > 0;
+    }
+
+    // -------- QUIC DATAGRAM (RFC 9221) wrappers --------
+    pub fn dgramMaxWritableLen(self: *const Connection) ?usize {
+        const res = c.quiche_conn_dgram_max_writable_len(self.ptr);
+        if (res == c.QUICHE_ERR_DONE) return null;
+        if (res < 0) return null; // treat unexpected negatives as no-space
+        return @intCast(res);
+    }
+
+    pub fn dgramRecvFrontLen(self: *const Connection) ?usize {
+        const res = c.quiche_conn_dgram_recv_front_len(self.ptr);
+        if (res == c.QUICHE_ERR_DONE) return null;
+        if (res < 0) return null;
+        return @intCast(res);
+    }
+
+    pub fn dgramRecv(self: *Connection, out: []u8) !usize {
+        const res = c.quiche_conn_dgram_recv(self.ptr, out.ptr, out.len);
+        if (res == c.QUICHE_ERR_DONE) return QuicheError.Done;
+        if (res < 0) {
+            try mapError(@intCast(res));
+            return error.RecvFailed;
+        }
+        return @intCast(res);
+    }
+
+    pub fn dgramSend(self: *Connection, buf: []const u8) !usize {
+        const res = c.quiche_conn_dgram_send(self.ptr, buf.ptr, buf.len);
+        if (res == c.QUICHE_ERR_DONE) return QuicheError.Done;
+        if (res < 0) {
+            try mapError(@intCast(res));
+            return error.SendFailed;
+        }
+        return @intCast(res);
+    }
+
+    pub fn dgramRecvQueueLen(self: *const Connection) usize {
+        const v = c.quiche_conn_dgram_recv_queue_len(self.ptr);
+        return if (v > 0) @intCast(v) else 0;
+    }
+
+    pub fn dgramRecvQueueByteSize(self: *const Connection) usize {
+        const v = c.quiche_conn_dgram_recv_queue_byte_size(self.ptr);
+        return if (v > 0) @intCast(v) else 0;
+    }
+
+    pub fn dgramSendQueueLen(self: *const Connection) usize {
+        const v = c.quiche_conn_dgram_send_queue_len(self.ptr);
+        return if (v > 0) @intCast(v) else 0;
+    }
+
+    pub fn dgramSendQueueByteSize(self: *const Connection) usize {
+        const v = c.quiche_conn_dgram_send_queue_byte_size(self.ptr);
+        return if (v > 0) @intCast(v) else 0;
+    }
+
+    pub fn isDgramSendQueueFull(self: *const Connection) bool {
+        return c.quiche_conn_is_dgram_send_queue_full(self.ptr);
+    }
+
+    pub fn isDgramRecvQueueFull(self: *const Connection) bool {
+        return c.quiche_conn_is_dgram_recv_queue_full(self.ptr);
+    }
+
+    /// Purge outgoing datagrams that match the given predicate
+    pub fn dgramPurgeOutgoing(self: *Connection, comptime f: fn([]const u8) bool) void {
+        const Wrapper = struct {
+            const predicate = f;
+            fn callback(data: [*c]const u8, len: usize, _: ?*anyopaque) callconv(.c) c_int {
+                if (data == null) return 0;
+                const slice = data[0..len];
+                return if (predicate(slice)) 1 else 0;
+            }
+        };
+        c.quiche_conn_dgram_purge_outgoing(self.ptr, Wrapper.callback, null);
     }
 };
 

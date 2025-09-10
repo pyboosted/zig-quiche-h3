@@ -194,7 +194,7 @@ Implementation Details:
 - Created comprehensive streaming layer in `src/http/streaming.zig`:
   - PartialResponse abstraction for resumable sends with three source types (memory/file/generator)
   - BlockedStreams tracking for efficient backpressure management
-  - Chunk-based processing with configurable sizes (default 64KB, tunable via H3_CHUNK_KB)
+  - Chunk-based processing with configurable sizes (default 256KB, tunable via H3_CHUNK_KB)
   - Zero-copy file streaming with pread for efficiency
   - Generator-based streaming to avoid blocking the event loop
 - Extended Response API with streaming methods:

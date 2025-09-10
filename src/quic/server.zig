@@ -41,6 +41,8 @@ const RequestState = struct {
     on_body_complete: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
 };
 
+pub const OnDatagram = *const fn (server: *QuicServer, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) anyerror!void;
+
 pub const QuicServer = struct {
     allocator: std.mem.Allocator,
     config: config_mod.ServerConfig,
@@ -69,6 +71,12 @@ pub const QuicServer = struct {
     connections_accepted: usize = 0,
     packets_received: usize = 0,
     packets_sent: usize = 0,
+    dgrams_received: usize = 0,
+    dgrams_sent: usize = 0,
+    dgrams_dropped_send: usize = 0,
+
+    on_datagram: ?OnDatagram = null,
+    on_datagram_user: ?*anyopaque = null,
 
     // Type definitions for stream state tracking
     const StreamKey = struct { conn: *connection.Connection, stream_id: u64 };
@@ -207,9 +215,39 @@ pub const QuicServer = struct {
         self.allocator.destroy(self);
     }
 
+    /// Register a QUIC DATAGRAM handler
+    pub fn onDatagram(self: *QuicServer, cb: OnDatagram, user: ?*anyopaque) void {
+        self.on_datagram = cb;
+        self.on_datagram_user = user;
+    }
+
+    /// Send a QUIC DATAGRAM on a connection, tracking counters
+    pub fn sendDatagram(self: *QuicServer, conn: *connection.Connection, data: []const u8) !void {
+        // Respect max writable length when available
+        if (conn.conn.dgramMaxWritableLen()) |maxw| {
+            if (data.len > maxw) return error.DatagramTooLarge;
+        }
+        _ = conn.conn.dgramSend(data) catch |err| {
+            if (err == error.Done) {
+                // Treat as transient backpressure
+                self.dgrams_dropped_send += 1;
+                return error.WouldBlock;
+            }
+            return err;
+        };
+        self.dgrams_sent += 1;
+    }
+
     pub fn bind(self: *QuicServer) !void {
-        // Try to bind both IPv6 and IPv4
-        const sockets = udp.bindAny(self.config.bind_port, true);
+        // Try to bind sockets based on configured bind_addr
+        var sockets: udp.BindResult = .{};
+        if (std.mem.eql(u8, self.config.bind_addr, "127.0.0.1") or std.mem.eql(u8, self.config.bind_addr, "localhost")) {
+            // Prefer loopback-only in restricted environments (CI/sandbox)
+            sockets.v6 = udp.bindUdp6Loopback(self.config.bind_port, true) catch null;
+            sockets.v4 = udp.bindUdp4Loopback(self.config.bind_port, true) catch null;
+        } else {
+            sockets = udp.bindAny(self.config.bind_port, true);
+        }
         if (!sockets.hasAny()) return error.FailedToBind;
 
         if (sockets.v6) |sock| {
@@ -503,6 +541,10 @@ pub const QuicServer = struct {
                         }
                     };
                 }
+                // Drain any QUIC DATAGRAMs
+                self.processDatagrams(cconn) catch |err| {
+                    std.debug.print("Error processing datagrams: {}\n", .{err});
+                };
                 self.processWritableStreams(cconn) catch |err| {
                     std.debug.print("Error processing writable streams: {}\n", .{err});
                 };
@@ -1111,6 +1153,11 @@ pub const QuicServer = struct {
                 self.processWritableStreams(conn) catch |err| {
                     std.debug.print("Error processing writable streams in timer: {}\n", .{err});
                 };
+
+                // Also check for pending DATAGRAMs
+                self.processDatagrams(conn) catch |err| {
+                    std.debug.print("Error processing datagrams in timer: {}\n", .{err});
+                };
             }
 
             // Check if this connection has timed out
@@ -1122,6 +1169,44 @@ pub const QuicServer = struct {
         // Process timeouts for collected connections
         for (timed_out.items) |conn| {
             self.onTimeout(conn);
+        }
+    }
+
+    fn processDatagrams(self: *QuicServer, conn: *connection.Connection) !void {
+        // Try to read all pending datagrams
+        var small_buf: [2048]u8 = undefined;
+        while (true) {
+            // Optional size hint
+            const hint = conn.conn.dgramRecvFrontLen();
+            var use_heap = false;
+            var buf: []u8 = small_buf[0..];
+            if (hint) |h| {
+                if (h > small_buf.len) {
+                    buf = try self.allocator.alloc(u8, h);
+                    use_heap = true;
+                } else {
+                    buf = small_buf[0..h];
+                }
+            }
+
+            const read = conn.conn.dgramRecv(buf) catch |err| {
+                if (use_heap) self.allocator.free(buf);
+                if (err == error.Done) return; // no more
+                return err;
+            };
+
+            const payload = buf[0..read];
+            self.dgrams_received += 1;
+            // Basic log for debugging/tests
+            std.debug.print("DATAGRAM recv len={d}\n", .{payload.len});
+
+            if (self.on_datagram) |cb| {
+                cb(self, conn, payload, self.on_datagram_user) catch |e| {
+                    std.debug.print("onDatagram error: {}\n", .{e});
+                };
+            }
+
+            if (use_heap) self.allocator.free(buf);
         }
     }
 

@@ -25,6 +25,8 @@ export interface QuicheClientOptions {
   dumpJson?: boolean;
   earlyData?: boolean;
   sessionFile?: string;
+  dgramProto?: "none" | "oneway";
+  dgramCount?: number;
 }
 
 /**
@@ -94,6 +96,14 @@ export async function quicheClient(
     args.push("--session-file", options.sessionFile);
   }
 
+  // DATAGRAM options (must be added before the URL)
+  if (options.dgramProto && options.dgramProto !== "none") {
+    args.push("--dgram-proto", options.dgramProto);
+    if (options.dgramCount && options.dgramCount > 0) {
+      args.push("--dgram-count", String(options.dgramCount));
+    }
+  }
+
   // URL
   args.push(url);
 
@@ -102,6 +112,7 @@ export async function quicheClient(
     cmd: args,
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, RUST_LOG: "info" },
     cwd: "../third_party/quiche/", // Run from quiche directory
   });
 
@@ -127,6 +138,7 @@ export async function quicheClient(
       return {
         success: true,
         output: stdout,
+        error: stderr,
         ...response,
       };
     } catch (error) {
@@ -137,6 +149,7 @@ export async function quicheClient(
   return {
     success: true,
     output: stdout,
+    error: stderr,
   };
 }
 
