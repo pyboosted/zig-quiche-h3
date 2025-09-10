@@ -170,6 +170,7 @@ pub fn build(b: *std.Build) void {
     quic_server_mod.addImport("server", server_mod);
     quic_server_mod.addImport("config", config_mod);
     quic_server_mod.addImport("http", http_mod);
+    quic_server_mod.addImport("connection", connection_mod);
     
     const quic_server = b.addExecutable(.{
         .name = "quic-server",
@@ -225,6 +226,53 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_quic_server.addArgs(args);
     const quic_server_step = b.step("quic-server", "Run the QUIC server (Milestone 2)");
     quic_server_step.dependOn(&run_quic_server.step);
+
+    // QUIC DATAGRAM echo example
+    const dgram_echo_mod = b.createModule(.{
+        .root_source_file = b.path("src/examples/quic_dgram_echo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dgram_echo_mod.addImport("server", server_mod);
+    dgram_echo_mod.addImport("config", config_mod);
+    dgram_echo_mod.addImport("http", http_mod);
+    dgram_echo_mod.addImport("connection", connection_mod);
+
+    const dgram_echo = b.addExecutable(.{ .name = "quic-dgram-echo", .root_module = dgram_echo_mod });
+    if (use_system_quiche) {
+        dgram_echo.linkSystemLibrary("quiche");
+    } else {
+        dgram_echo.addObjectFile(quiche_lib_path);
+        const verify_quiche_dgram = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
+        dgram_echo.step.dependOn(&verify_quiche_dgram.step);
+    }
+    if (with_libev) {
+        dgram_echo.linkSystemLibrary("ev");
+        if (libev_lib_dir) |libdir| dgram_echo.addLibraryPath(.{ .cwd_relative = libdir });
+    }
+    dgram_echo.linkLibC();
+    switch (target.result.os.tag) {
+        .linux => {
+            dgram_echo.linkSystemLibrary("stdc++");
+            dgram_echo.linkSystemLibrary("pthread");
+            dgram_echo.linkSystemLibrary("dl");
+        },
+        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
+            dgram_echo.linkSystemLibrary("c++");
+            dgram_echo.linkFramework("Security");
+            dgram_echo.linkFramework("CoreFoundation");
+        },
+        else => {},
+    }
+    if (link_ssl) {
+        dgram_echo.linkSystemLibrary("ssl");
+        dgram_echo.linkSystemLibrary("crypto");
+    }
+    b.installArtifact(dgram_echo);
+    const run_dgram = b.addRunArtifact(dgram_echo);
+    if (b.args) |args| run_dgram.addArgs(args);
+    const dgram_step = b.step("quic-dgram-echo", "Run QUIC DATAGRAM echo example");
+    dgram_step.dependOn(&run_dgram.step);
 
     // Unit tests: run a test that prints quiche version
     const test_mod = b.createModule(.{

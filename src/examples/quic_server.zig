@@ -2,9 +2,11 @@ const std = @import("std");
 const QuicServer = @import("server").QuicServer;
 const ServerConfig = @import("config").ServerConfig;
 const http = @import("http");
+const connection = @import("connection");
 
 var g_enable_progress_log: bool = false;
 var g_disable_hash: bool = false;
+var g_enable_dgram_echo: bool = false;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -47,6 +49,8 @@ pub fn main() !void {
             enable_pacing = true;
         } else if (std.mem.eql(u8, args[i], "--no-pacing")) {
             enable_pacing = false;
+        } else if (std.mem.eql(u8, args[i], "--dgram-echo")) {
+            g_enable_dgram_echo = true;
         } else if (std.mem.eql(u8, args[i], "--help")) {
             printHelp();
             return;
@@ -90,6 +94,12 @@ pub fn main() !void {
     }
     std.debug.print("\n", .{});
     
+    // Optional: enable DATAGRAM echo via environment for tests (H3_DGRAM_ECHO=1)
+    if (std.process.getEnvVarOwned(allocator, "H3_DGRAM_ECHO")) |v| {
+        defer allocator.free(v);
+        if (std.mem.eql(u8, v, "1")) g_enable_dgram_echo = true;
+    } else |_| {}
+
     // Create server configuration
     const config = ServerConfig{
         .bind_port = port,
@@ -113,6 +123,9 @@ pub fn main() !void {
         .debug_log_throttle = 100,
         .enable_pacing = enable_pacing,
         .cc_algorithm = cc_algo,
+        .enable_dgram = g_enable_dgram_echo,
+        .dgram_recv_queue_len = 1024,
+        .dgram_send_queue_len = 1024,
     };
     
     // Create and run server
@@ -121,9 +134,21 @@ pub fn main() !void {
     
     // Register routes
     try registerRoutes(server);
+
+    if (g_enable_dgram_echo) {
+        server.onDatagram(datagramEcho, null);
+        std.debug.print("DATAGRAM echo: enabled\n", .{});
+    }
     
     try server.bind();
     try server.run();
+}
+
+fn datagramEcho(server: *QuicServer, conn: *connection.Connection, payload: []const u8, _: ?*anyopaque) !void {
+    server.sendDatagram(conn, payload) catch |err| switch (err) {
+        error.WouldBlock => return, // drop when backpressured
+        else => return err,
+    };
 }
 
 fn registerRoutes(server: *QuicServer) !void {
@@ -718,6 +743,7 @@ fn printHelp() void {
         \\  --cc <algo>      Congestion control: cubic|reno|bbr|bbr2 (default: bbr2)
         \\  --pacing         Enable pacing (default)
         \\  --no-pacing      Disable pacing
+        \\  --dgram-echo     Enable QUIC DATAGRAM echo handler
         \\  --help           Show this help message
         \\
         \\Test with quiche-client:

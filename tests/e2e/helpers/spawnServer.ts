@@ -34,13 +34,13 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
 
   // Build server arguments
   const args = [
-    "../../zig-out/bin/quic-server", // Relative to tests/e2e/ directory
+    "../zig-out/bin/quic-server", // Relative to tests/ directory
     "--port",
     port.toString(),
     "--cert",
-    "../../third_party/quiche/quiche/examples/cert.crt",
+    "../third_party/quiche/quiche/examples/cert.crt",
     "--key",
-    "../../third_party/quiche/quiche/examples/cert.key",
+    "../third_party/quiche/quiche/examples/cert.key",
   ];
 
   // QLOG configuration
@@ -166,7 +166,7 @@ export async function withServer<T>(
 export async function checkServerBinary(): Promise<boolean> {
   try {
     const proc = spawn({
-      cmd: ["../../zig-out/bin/quic-server", "--help"],
+      cmd: ["../zig-out/bin/quic-server", "--help"],
       stdout: "pipe",
       stderr: "pipe",
       cwd: "./",
@@ -189,8 +189,18 @@ export async function ensureServerBuilt(): Promise<void> {
   console.log("Building server...");
 
   const optimize = process.env.H3_OPTIMIZE ?? "ReleaseFast"; // ReleaseFast by default for perf tests
+  const libevInclude =
+    process.env.H3_LIBEV_INCLUDE ??
+    (process.platform === "darwin" ? "/opt/homebrew/include" : undefined);
+  const libevLib =
+    process.env.H3_LIBEV_LIB ?? (process.platform === "darwin" ? "/opt/homebrew/lib" : undefined);
+
+  const args = ["zig", "build", "-Dwith-libev=true", `-Doptimize=${optimize}`];
+  if (libevInclude) args.push(`-Dlibev-include=${libevInclude}`);
+  if (libevLib) args.push(`-Dlibev-lib=${libevLib}`);
+
   const proc = spawn({
-    cmd: ["zig", "build", "-Dwith-libev=true", "-Doptimize=" + optimize],
+    cmd: args,
     stdout: "pipe",
     stderr: "pipe",
     cwd: "../", // Run from project root
