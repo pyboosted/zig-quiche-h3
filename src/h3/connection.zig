@@ -71,6 +71,17 @@ pub const H3Connection = struct {
             return err;
         };
     }
+
+    pub fn sendAdditionalHeaders(
+        self: *H3Connection,
+        quic_conn: *quiche.Connection,
+        stream_id: u64,
+        headers: []const quiche.h3.Header,
+        is_trailer_section: bool,
+        fin: bool,
+    ) !void {
+        try self.conn.sendAdditionalHeaders(quic_conn, stream_id, headers, is_trailer_section, fin);
+    }
     
     pub fn recvBody(
         self: *H3Connection,
@@ -84,6 +95,11 @@ pub const H3Connection = struct {
             }
             return err;
         };
+    }
+    
+    /// Check if H3 DATAGRAM is enabled by peer (negotiated via SETTINGS)
+    pub fn dgramEnabledByPeer(self: *H3Connection, quic_conn: *quiche.Connection) bool {
+        return self.conn.dgramEnabledByPeer(quic_conn);
     }
     
     pub const PollResult = struct {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const quiche = @import("quiche");
 const h3 = @import("h3");
+const h3_datagram = h3.datagram;
 const Status = @import("handler.zig").Status;
 const Headers = @import("handler.zig").Headers;
 const MimeTypes = @import("handler.zig").MimeTypes;
@@ -11,6 +12,8 @@ pub const Response = struct {
     h3_conn: *h3.H3Connection,
     quic_conn: *quiche.Connection,
     stream_id: u64,
+    /// Optional negotiated/derived H3 DATAGRAM flow_id for this request
+    h3_flow_id: ?u64 = null,
     headers_sent: bool,
     ended: bool,
     status_code: u16,
@@ -31,6 +34,7 @@ pub const Response = struct {
             .h3_conn = h3_conn,
             .quic_conn = quic_conn,
             .stream_id = stream_id,
+            .h3_flow_id = null,
             .headers_sent = false,
             .ended = false,
             .status_code = 200,
@@ -263,6 +267,62 @@ pub const Response = struct {
             .code = code,
         };
         try self.jsonValue(error_obj);
+    }
+
+    /// Type for trailer headers
+    pub const Trailer = struct { name: []const u8, value: []const u8 };
+    
+    /// Send HTTP/3 trailers and finish the stream.
+    /// Typical use: write headers/body (possibly streaming), then call sendTrailers()
+    /// with final metadata like checksums or status. This sets FIN.
+    pub fn sendTrailers(
+        self: *Response,
+        trailers: []const Trailer,
+    ) !void {
+        if (self.ended) return error.ResponseEnded;
+        if (self.is_head_request) return error.InvalidState;
+
+        // Ensure initial headers are sent
+        if (!self.headers_sent) {
+            self.sendHeaders(false) catch |err| {
+                if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                    _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                    return error.StreamBlocked;
+                }
+                return err;
+            };
+        }
+
+        // Duplicate into quiche.h3.Header list
+        var list = std.ArrayList(quiche.h3.Header){};
+        defer {
+            for (list.items) |hdr| {
+                self.allocator.free(hdr.name[0..hdr.name_len]);
+                self.allocator.free(hdr.value[0..hdr.value_len]);
+            }
+            list.deinit(self.allocator);
+        }
+        for (trailers) |t| {
+            const name_copy = try self.allocator.dupe(u8, t.name);
+            const value_copy = try self.allocator.dupe(u8, t.value);
+            try list.append(self.allocator, quiche.h3.Header{
+                .name = name_copy.ptr,
+                .name_len = name_copy.len,
+                .value = value_copy.ptr,
+                .value_len = value_copy.len,
+            });
+        }
+
+        // Send as trailer section with FIN
+        try self.h3_conn.sendAdditionalHeaders(
+            self.quic_conn,
+            self.stream_id,
+            list.items,
+            true,
+            true,
+        );
+
+        self.ended = true;
     }
     
     /// Send a redirect response
@@ -532,4 +592,74 @@ pub const Response = struct {
         partial.deinit();
         self.partial_response = null;
     }
+    
+    /// Send H3 DATAGRAM payload for this request's flow_id
+    /// Checks H3 DATAGRAM negotiation, calculates size limits, and sends via QUIC DATAGRAM
+    pub fn sendH3Datagram(self: *Response, payload: []const u8) !void {
+        // Verify H3 DATAGRAM is enabled by peer
+        if (!self.h3_conn.dgramEnabledByPeer(self.quic_conn)) {
+            return error.H3DatagramNotEnabled;
+        }
+        
+        // Calculate flow_id for this request
+        const flow_id = self.h3_flow_id orelse h3_datagram.flowIdForStream(self.stream_id);
+        
+        // Calculate overhead and (optionally) check max datagram size if available.
+        // When the peer hasn't advertised a limit yet, dgramMaxWritableLen() returns null;
+        // in that case we optimistically attempt the send and rely on quiche to enforce
+        // limits (it will error if too large or not enabled).
+        const max_dgram_size = self.quic_conn.dgramMaxWritableLen();
+        const varint_overhead = h3_datagram.varintLen(flow_id);
+        if (max_dgram_size) |maxw| {
+            if (payload.len + varint_overhead > maxw) {
+                return error.DatagramTooLarge;
+            }
+        }
+        
+        // Encode H3 DATAGRAM: varint(flow_id) + payload
+        // Prefer stack buffer for typical MTU-sized datagrams; fall back to heap for larger
+        var small_buf: [2048]u8 = undefined;
+        const total_len: usize = varint_overhead + payload.len;
+        var use_heap = false;
+        var dgram_buf: []u8 = small_buf[0..];
+        if (total_len <= small_buf.len) {
+            dgram_buf = small_buf[0..total_len];
+        } else {
+            dgram_buf = try self.allocator.alloc(u8, total_len);
+            use_heap = true;
+        }
+        defer if (use_heap) self.allocator.free(dgram_buf);
+
+        // Encode flow_id as varint
+        const varint_len = try h3_datagram.encodeVarint(dgram_buf, flow_id);
+        std.debug.assert(varint_len == varint_overhead);
+
+        // Copy payload after varint
+        @memcpy(dgram_buf[varint_len..], payload);
+        
+        // Send via QUIC DATAGRAM
+        const sent = self.quic_conn.dgramSend(dgram_buf) catch |err| {
+            return switch (err) {
+                error.Done => error.WouldBlock, // Map to consistent backpressure error
+                else => err,
+            };
+        };
+        
+        // Should have sent the entire datagram
+        if (sent != dgram_buf.len) {
+            return error.PartialSend; // Unexpected - datagrams are atomic
+        }
+        
+        
+        // Optional debug log for H3 DATAGRAM send (compile-time gated)
+        if (H3_DEBUG_LOG) {
+            std.debug.print("H3 DGRAM sent flow={d} len={d}\n", .{ flow_id, payload.len });
+        }
+        
+        // Note: Applications that need to track H3 DATAGRAM statistics should call
+        // server.incrementH3DatagramSent() after successful sends
+    }
 };
+
+// Compile-time gate for Response-level debug logging
+const H3_DEBUG_LOG = false;

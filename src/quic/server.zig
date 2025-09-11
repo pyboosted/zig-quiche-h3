@@ -5,6 +5,7 @@ const config_mod = @import("config");
 const EventLoop = @import("event_loop").EventLoop;
 const udp = @import("udp");
 const h3 = @import("h3");
+const h3_datagram = @import("h3").datagram;
 const http = @import("http");
 
 const c = quiche.c;
@@ -19,6 +20,16 @@ fn debugLog(line: [*c]const u8, argp: ?*anyopaque) callconv(.c) void {
     // debug_log_throttle is validated to be > 0 in config.validate()
     if (count % cfg.debug_log_throttle == 0) {
         std.debug.print("[QUICHE] {s}\n", .{line});
+    }
+}
+
+fn appDebug(self: *const QuicServer) bool {
+    return self.config.enable_debug_logging;
+}
+
+fn debugPrint(self: *const QuicServer, comptime fmt: []const u8, args: anytype) void {
+    if (self.config.enable_debug_logging) {
+        std.debug.print(fmt, args);
     }
 }
 
@@ -39,6 +50,9 @@ const RequestState = struct {
     on_headers: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
     on_body_chunk: ?*const fn (req: *http.Request, res: *http.Response, chunk: []const u8) anyerror!void = null,
     on_body_complete: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
+    
+    // H3 DATAGRAM callback for request-associated datagrams
+    on_h3_dgram: ?*const fn (req: *http.Request, res: *http.Response, payload: []const u8) anyerror!void = null,
 };
 
 pub const OnDatagram = *const fn (server: *QuicServer, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) anyerror!void;
@@ -66,6 +80,9 @@ pub const QuicServer = struct {
     // simultaneous connections with the same stream_id (e.g., 0)
     // don't collide.
     stream_states: std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80),
+    
+    // H3 DATAGRAM flow_id mapping (flow_id -> RequestState for active requests)
+    h3_dgram_flows: std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80),
 
     // Statistics
     connections_accepted: usize = 0,
@@ -74,6 +91,12 @@ pub const QuicServer = struct {
     dgrams_received: usize = 0,
     dgrams_sent: usize = 0,
     dgrams_dropped_send: usize = 0,
+    
+    // H3 DATAGRAM statistics
+    h3_dgrams_received: usize = 0,
+    h3_dgrams_sent: usize = 0,
+    h3_dgrams_unknown_flow: usize = 0,
+    h3_dgrams_would_block: usize = 0,
 
     on_datagram: ?OnDatagram = null,
     on_datagram_user: ?*anyopaque = null,
@@ -89,6 +112,20 @@ pub const QuicServer = struct {
         }
         pub fn eql(_: StreamKeyContext, a: StreamKey, b: StreamKey) bool {
             return a.conn == b.conn and a.stream_id == b.stream_id;
+        }
+    };
+    
+    // Type definitions for H3 DATAGRAM flow_id tracking
+    const FlowKey = struct { conn: *connection.Connection, flow_id: u64 };
+    const FlowKeyContext = struct {
+        pub fn hash(_: FlowKeyContext, key: FlowKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(std.mem.asBytes(&key.conn));
+            h.update(std.mem.asBytes(&key.flow_id));
+            return h.final();
+        }
+        pub fn eql(_: FlowKeyContext, a: FlowKey, b: FlowKey) bool {
+            return a.conn == b.conn and a.flow_id == b.flow_id;
         }
     };
 
@@ -167,6 +204,7 @@ pub const QuicServer = struct {
             .conn_id_seed = conn_id_seed,
             .router = http.Router.init(allocator),
             .stream_states = std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80).init(allocator),
+            .h3_dgram_flows = std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80).init(allocator),
         };
 
         // Create H3 config
@@ -203,6 +241,9 @@ pub const QuicServer = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.stream_states.deinit();
+        
+        // Clean up H3 DATAGRAM flows (no values to free - they point to RequestState already freed above)
+        self.h3_dgram_flows.deinit();
 
         // Clean up router
         self.router.deinit();
@@ -802,6 +843,9 @@ pub const QuicServer = struct {
                             } else {
                                 state.handler = found.route.handler;
                             }
+                            
+                            // Copy H3 DATAGRAM callback if present
+                            state.on_h3_dgram = found.route.on_h3_dgram;
 
                             // Initialize response
                             state.response = http.Response.init(
@@ -811,9 +855,40 @@ pub const QuicServer = struct {
                                 result.stream_id,
                                 method == .HEAD,
                             );
+                            
+                            // H3 DATAGRAM sent counter is available via incrementH3DatagramSent() for applications that need tracking
 
                             // Store state (keyed by connection + stream id)
                             try self.stream_states.put(.{ .conn = conn, .stream_id = result.stream_id }, state);
+                            
+                            // If route has H3 DATAGRAM callback, create flow_id mapping
+                            if (state.on_h3_dgram != null) {
+                                // Derive flow_id similar to quiche's driver behavior
+                                // Default mapping: flow_id == stream_id (simple GET demo)
+                                var flow_id: u64 = h3_datagram.flowIdForStream(result.stream_id);
+
+                                // RFC 9298 CONNECT-UDP over CONNECT with :protocol → use quarter_stream_id
+                                if (method == .CONNECT) {
+                                    if (state.request.h3Protocol() != null) {
+                                        flow_id = result.stream_id / 4;
+                                    }
+                                }
+
+                                // Draft CONNECT-UDP method with datagram-flow-id header
+                                if (method == .CONNECT_UDP) {
+                                    if (state.request.datagramFlowId()) |v| {
+                                        flow_id = v;
+                                    }
+                                }
+
+                                // Persist on response so sends use the correct flow_id
+                                state.response.h3_flow_id = flow_id;
+
+                                self.debugPrint("[DEBUG] Creating H3 DATAGRAM flow mapping: conn={*}, stream_id={}, flow_id={}, route={s}\n", 
+                                    .{conn, result.stream_id, flow_id, found.route.raw_pattern});
+                                try self.h3_dgram_flows.put(.{ .conn = conn, .flow_id = flow_id }, state);
+                                self.debugPrint("[DEBUG] Flow mapping created successfully\n", .{});
+                            }
 
                             // Handle immediate invocation based on route type
                             if (state.is_streaming) {
@@ -890,10 +965,7 @@ pub const QuicServer = struct {
                                 if (new_total > self.config.max_request_body_size) {
                                     try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
                                     // Clean up state
-                                    _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
-                                    state.response.deinit();
-                                    state.arena.deinit();
-                                    self.allocator.destroy(state);
+                                    self.cleanupStreamState(conn, result.stream_id, state);
                                     return;
                                 }
 
@@ -908,10 +980,7 @@ pub const QuicServer = struct {
                                     }
                                     const status = http.errorToStatus(err);
                                     try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, status);
-                                    _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
-                                    state.response.deinit();
-                                    state.arena.deinit();
-                                    self.allocator.destroy(state);
+                                    self.cleanupStreamState(conn, result.stream_id, state);
                                     return;
                                 };
                             } else {
@@ -919,10 +988,7 @@ pub const QuicServer = struct {
                                 state.request.appendBody(buf[0..received], self.config.max_request_body_size) catch |err| {
                                     if (err == error.PayloadTooLarge) {
                                         try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 413);
-                                        _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
-                                        state.response.deinit();
-                                        state.arena.deinit();
-                                        self.allocator.destroy(state);
+                                        self.cleanupStreamState(conn, result.stream_id, state);
                                         return;
                                     }
                                 };
@@ -970,10 +1036,7 @@ pub const QuicServer = struct {
                         // Only clean up if response is truly complete
                         if (state.response.isEnded() and state.response.partial_response == null) {
                             // Response is complete, safe to clean up
-                            _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
-                            state.response.deinit();
-                            state.arena.deinit();
-                            self.allocator.destroy(state);
+                            self.cleanupStreamState(conn, result.stream_id, state);
                         } else {
                             // Keep state alive for processWritableStreams to finish
                             std.debug.print("  Keeping stream {} alive for ongoing response\n", .{result.stream_id});
@@ -983,11 +1046,9 @@ pub const QuicServer = struct {
                 .GoAway, .Reset => {
                     std.debug.print("  Stream {} closed ({})\n", .{ result.stream_id, result.event_type });
 
-                    // Clean up state if exists
+                    // Clean up state if exists (also purge H3 DATAGRAM flow mapping)
                     if (self.stream_states.fetchRemove(.{ .conn = conn, .stream_id = result.stream_id })) |entry| {
-                        entry.value.response.deinit();
-                        entry.value.arena.deinit();
-                        self.allocator.destroy(entry.value);
+                        self.cleanupStreamState(conn, result.stream_id, entry.value);
                     }
                 },
                 .PriorityUpdate => {
@@ -1040,6 +1101,12 @@ pub const QuicServer = struct {
                         }
                         // For other errors, clean up the stream state
                         std.debug.print("Error processing partial response for stream {}: {}\n", .{ stream_id, err });
+                        // Remove from H3 DATAGRAM flow mapping if present
+                        if (state.on_h3_dgram != null) {
+                            const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
+                            _ = self.h3_dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
+                        }
+                        
                         state.response.deinit();
                         state.arena.deinit();
                         self.allocator.destroy(state);
@@ -1048,6 +1115,12 @@ pub const QuicServer = struct {
 
                     // If response is complete, clean up
                     if (state.response.isEnded() and state.response.partial_response == null) {
+                        // Remove from H3 DATAGRAM flow mapping if present
+                        if (state.on_h3_dgram != null) {
+                            const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
+                            _ = self.h3_dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
+                        }
+                        
                         state.response.deinit();
                         state.arena.deinit();
                         self.allocator.destroy(state);
@@ -1175,6 +1248,7 @@ pub const QuicServer = struct {
     fn processDatagrams(self: *QuicServer, conn: *connection.Connection) !void {
         // Try to read all pending datagrams
         var small_buf: [2048]u8 = undefined;
+        
         while (true) {
             // Optional size hint
             const hint = conn.conn.dgramRecvFrontLen();
@@ -1191,23 +1265,218 @@ pub const QuicServer = struct {
 
             const read = conn.conn.dgramRecv(buf) catch |err| {
                 if (use_heap) self.allocator.free(buf);
-                if (err == error.Done) return; // no more
+                if (err == error.Done) {
+                    return; // no more
+                }
+                self.debugPrint("[DEBUG] dgramRecv error: {}\n", .{err});
                 return err;
             };
 
             const payload = buf[0..read];
             self.dgrams_received += 1;
             // Basic log for debugging/tests
-            std.debug.print("DATAGRAM recv len={d}\n", .{payload.len});
+            if (self.appDebug()) {
+                std.debug.print("[DEBUG] DATAGRAM recv len={d}, first bytes: ", .{payload.len});
+                for (payload[0..@min(16, payload.len)]) |b| {
+                    std.debug.print("{x:0>2} ", .{b});
+                }
+                std.debug.print("\n", .{});
+            }
 
-            if (self.on_datagram) |cb| {
-                cb(self, conn, payload, self.on_datagram_user) catch |e| {
-                    std.debug.print("onDatagram error: {}\n", .{e});
-                };
+            // Try H3 DATAGRAM first if H3 connection exists and H3 DATAGRAMs are enabled
+            var handled_as_h3 = false;
+            if (conn.http3) |h3_ptr| {
+                const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
+                const h3_enabled = h3_conn.dgramEnabledByPeer(&conn.conn);
+                self.debugPrint("[DEBUG] H3 connection exists, dgramEnabledByPeer={}\n", .{h3_enabled});
+                
+                if (h3_enabled) {
+                    handled_as_h3 = self.processH3Datagram(conn, payload) catch |err| blk: {
+                        // On parse error, fall back to QUIC DATAGRAM (configurable behavior)
+                        self.debugPrint("[DEBUG] H3 DATAGRAM parse error: {}, falling back to QUIC\n", .{err});
+                        break :blk false;
+                    };
+                    self.debugPrint("[DEBUG] Handled as H3 DATAGRAM: {}\n", .{handled_as_h3});
+                }
+            } else {
+                self.debugPrint("[DEBUG] No H3 connection for this QUIC connection\n", .{});
+            }
+
+            // Fall back to QUIC DATAGRAM callback if not handled as H3 DATAGRAM
+            if (!handled_as_h3 and self.on_datagram != null) {
+                if (self.on_datagram) |cb| {
+                    cb(self, conn, payload, self.on_datagram_user) catch |e| {
+                        std.debug.print("onDatagram error: {}\n", .{e});
+                    };
+                }
             }
 
             if (use_heap) self.allocator.free(buf);
         }
+    }
+    
+    /// Process H3 DATAGRAM payload (with varint flow_id prefix)
+    /// Returns true if successfully handled as H3 DATAGRAM, false if should fall back to QUIC
+    fn processH3Datagram(self: *QuicServer, conn: *connection.Connection, payload: []const u8) !bool {
+        self.debugPrint("[DEBUG] processH3Datagram: attempting to decode varint from {} bytes\n", .{payload.len});
+        
+        // Decode varint flow_id from the payload
+        const varint_result = h3_datagram.decodeVarint(payload) catch |err| {
+            // Invalid varint format - not an H3 DATAGRAM
+            self.debugPrint("[DEBUG] Failed to decode varint: {}\n", .{err});
+            return false;
+        };
+        
+        const flow_id = varint_result.value;
+        const payload_offset = varint_result.consumed;
+        self.debugPrint("[DEBUG] Decoded flow_id={}, consumed {} bytes\n", .{flow_id, payload_offset});
+        
+        if (payload_offset >= payload.len) {
+            // No payload after flow_id
+            self.debugPrint("[DEBUG] Empty H3 DATAGRAM payload after flow_id\n", .{});
+            self.h3_dgrams_received += 1; // Count it but don't process empty payload
+            return true;
+        }
+        
+        const h3_payload = payload[payload_offset..];
+        self.debugPrint("[DEBUG] H3 DATAGRAM payload size: {} bytes\n", .{h3_payload.len});
+        
+        // Look up the request state for this flow_id
+        const flow_key = FlowKey{ .conn = conn, .flow_id = flow_id };
+        self.debugPrint("[DEBUG] Looking up flow_key: conn={*}, flow_id={}\n", .{conn, flow_id});
+        
+        if (self.h3_dgram_flows.get(flow_key)) |state| {
+            self.debugPrint("[DEBUG] Found flow mapping for flow_id={}\n", .{flow_id});
+            self.h3_dgrams_received += 1;
+            
+            if (state.on_h3_dgram) |callback| {
+                // Debug log for H3 DATAGRAM
+                self.debugPrint("[DEBUG] H3 DGRAM recv flow={d} len={d}, invoking callback\n", .{ flow_id, h3_payload.len });
+                
+                // Invoke the H3 DATAGRAM callback
+                callback(&state.request, &state.response, h3_payload) catch |err| {
+                    // Count would_block errors for H3 DATAGRAM sends  
+                    if (err == error.WouldBlock) {
+                        self.h3_dgrams_would_block += 1;
+                        self.debugPrint("[DEBUG] H3 DATAGRAM callback returned WouldBlock\n", .{});
+                    } else {
+                        self.debugPrint("[DEBUG] H3 DATAGRAM callback error: {}\n", .{err});
+                    }
+                    // Don't propagate callback errors - continue processing
+                };
+                self.debugPrint("[DEBUG] H3 DATAGRAM callback completed\n", .{});
+            } else {
+                // Route matched but no H3 DATAGRAM callback registered
+                self.debugPrint("[DEBUG] H3 DGRAM recv flow={d} len={d} - no callback registered\n", .{ flow_id, h3_payload.len });
+            }
+            
+            return true;
+        } else {
+            // Unknown flow_id - drop and count
+            self.h3_dgrams_unknown_flow += 1;
+            self.debugPrint("[DEBUG] H3 DGRAM recv unknown flow_id={d} len={d} - dropped\n", .{ flow_id, h3_payload.len });
+            
+            // Debug: print all registered flow_ids for this connection
+            if (self.appDebug()) {
+                std.debug.print("[DEBUG] Registered flow_ids for conn={*}:\n", .{conn});
+                var it = self.h3_dgram_flows.iterator();
+                while (it.next()) |entry| {
+                    if (entry.key_ptr.conn == conn) {
+                        std.debug.print("[DEBUG]   flow_id={}\n", .{entry.key_ptr.flow_id});
+                    }
+                }
+            }
+            
+            return true; // Still handled as H3 DATAGRAM (just dropped)
+        }
+    }
+
+    /// Helper function to clean up both stream state and flow_id mapping
+    fn cleanupStreamState(self: *QuicServer, conn: *connection.Connection, stream_id: u64, state: *RequestState) void {
+        // Remove from stream states
+        _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
+
+        // Also remove H3 DATAGRAM flow mapping if present for this request
+        if (state.on_h3_dgram != null) {
+            const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
+            _ = self.h3_dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
+        }
+        
+        // Clean up state memory
+        state.response.deinit();
+        state.arena.deinit();
+        self.allocator.destroy(state);
+    }
+
+    // ------------------------ Tests ------------------------
+    test "cleanup removes stream state and H3 DATAGRAM flow mapping" {
+        const allocator = std.testing.allocator;
+
+        // Prepare a minimal server instance with just the fields we need
+        var server: QuicServer = undefined;
+        server.allocator = allocator;
+        server.stream_states = std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80).init(allocator);
+        server.h3_dgram_flows = std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80).init(allocator);
+
+        // Create a dummy connection
+        const conn_ptr = try allocator.create(connection.Connection);
+        defer allocator.destroy(conn_ptr);
+
+        const test_stream_id: u64 = 5;
+        const flow_id = h3_datagram.flowIdForStream(test_stream_id);
+
+        // Create a minimal RequestState with a Response safe for deinit()
+        const state = try allocator.create(RequestState);
+        state.* = .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .request = undefined,
+            .response = .{
+                .h3_conn = @ptrFromInt(1),
+                .quic_conn = @ptrFromInt(1),
+                .stream_id = test_stream_id,
+                .headers_sent = false,
+                .ended = false,
+                .status_code = 200,
+                .header_buffer = std.ArrayList(quiche.h3.Header){},
+                .allocator = allocator,
+                .is_head_request = false,
+                .partial_response = null,
+            },
+            .handler = undefined,
+            .body_complete = false,
+            .handler_invoked = false,
+            .is_streaming = false,
+            .user_data = null,
+            .on_headers = null,
+            .on_body_chunk = null,
+            .on_body_complete = null,
+            // Set a non-null callback so cleanup also purges flow mapping
+            .on_h3_dgram = @ptrFromInt(1),
+        };
+
+        // Insert entries into both maps
+        try server.stream_states.put(.{ .conn = conn_ptr, .stream_id = test_stream_id }, state);
+        try server.h3_dgram_flows.put(.{ .conn = conn_ptr, .flow_id = flow_id }, state);
+
+        // Sanity: entries exist
+        try std.testing.expect(server.stream_states.get(.{ .conn = conn_ptr, .stream_id = test_stream_id }) != null);
+        try std.testing.expect(server.h3_dgram_flows.get(.{ .conn = conn_ptr, .flow_id = flow_id }) != null);
+
+        // Act: cleanup
+        server.cleanupStreamState(conn_ptr, test_stream_id, state);
+
+        // Verify: both entries are removed
+        try std.testing.expect(server.stream_states.get(.{ .conn = conn_ptr, .stream_id = test_stream_id }) == null);
+        try std.testing.expect(server.h3_dgram_flows.get(.{ .conn = conn_ptr, .flow_id = flow_id }) == null);
+
+        // Deinit maps
+        server.stream_states.deinit();
+        server.h3_dgram_flows.deinit();
+    }
+
+    /// Increment H3 DATAGRAM sent counter (for use by callbacks)
+    pub fn incrementH3DatagramSent(self: *QuicServer) void {
+        self.h3_dgrams_sent += 1;
     }
 
     fn onTimeout(self: *QuicServer, conn: *connection.Connection) void {
@@ -1237,9 +1506,23 @@ pub const QuicServer = struct {
         }
         for (to_remove.items) |k| {
             if (self.stream_states.fetchRemove(k)) |kv| {
-                kv.value.response.deinit();
-                kv.value.arena.deinit();
-                self.allocator.destroy(kv.value);
+                self.cleanupStreamState(conn, k.stream_id, kv.value);
+            }
+        }
+
+        // Purge any remaining H3 DATAGRAM flow mappings for this connection
+        {
+            var it2 = self.h3_dgram_flows.iterator();
+            var flow_keys_to_remove = std.ArrayList(FlowKey){};
+            defer flow_keys_to_remove.deinit(self.allocator);
+            while (it2.next()) |entry| {
+                const fk = entry.key_ptr.*;
+                if (fk.conn == conn) {
+                    flow_keys_to_remove.append(self.allocator, fk) catch {};
+                }
+            }
+            for (flow_keys_to_remove.items) |fk| {
+                _ = self.h3_dgram_flows.remove(fk);
             }
         }
 

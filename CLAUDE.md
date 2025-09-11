@@ -29,8 +29,7 @@
 
 ## Testing Guidelines
 - Unit tests live near code or in `src/tests.zig` using `test "…" {}`; name tests with short, imperative phrases.
-- Integration: run the server, then from `third_party/quiche`: `cargo run -p quiche --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn hq-interop`.
- - JS/TS tests (if present) use Bun 1.x: setup `bun install`; run `bun test`; coverage with `bun test --coverage`. Place tests as `*.test.ts` under `scripts/` or `tests/js/`.
+ - E2E tests use Bun: run them from "tests" directory; setup `bun install`; run `bun test`; coverage with `bun test --coverage`. Place tests as `*.test.ts` under `scripts/` or `tests/js/`.
 
 ## Commit & Pull Request Guidelines
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `chore:`. Keep subject ≤72 chars; add a body for context.

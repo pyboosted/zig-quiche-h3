@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, dirname } from "node:path";
+import { existsSync } from "fs";
+import { spawn } from "bun";
 
 /**
  * Information about a generated test file
@@ -149,4 +151,127 @@ export async function waitFor(
   }
 
   throw new Error(`Condition not met within ${timeoutMs}ms`);
+}
+
+/**
+ * Find the project root directory by looking for build.zig
+ * Works from any subdirectory within the project
+ */
+export function getProjectRoot(): string {
+  let current = resolve(process.cwd());
+  const root = resolve("/");
+  
+  // Walk up the directory tree looking for build.zig
+  while (current !== root) {
+    if (existsSync(join(current, "build.zig"))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      // We've reached the root and can't go up further
+      break;
+    }
+    current = parent;
+  }
+  
+  throw new Error("Could not find project root (no build.zig found in parent directories)");
+}
+
+/**
+ * Get the path to the zig-out directory
+ * Works from any subdirectory within the project
+ */
+export function getZigOutDirectory(): string {
+  const projectRoot = getProjectRoot();
+  const zigOutPath = join(projectRoot, "zig-out");
+  
+  if (!existsSync(zigOutPath)) {
+    throw new Error(`zig-out directory not found at ${zigOutPath}. Run 'zig build' first.`);
+  }
+  
+  return zigOutPath;
+}
+
+/**
+ * Get the full path to the server binary
+ * Works from any subdirectory within the project
+ */
+export function getServerBinary(): string {
+  const zigOut = getZigOutDirectory();
+  const binaryPath = join(zigOut, "bin", "quic-server");
+  
+  if (!existsSync(binaryPath)) {
+    throw new Error(`Server binary not found at ${binaryPath}. Run 'zig build' first.`);
+  }
+  
+  return binaryPath;
+}
+
+/**
+ * Get the path to a certificate file
+ * Works from any subdirectory within the project
+ */
+export function getCertPath(filename: string): string {
+  const projectRoot = getProjectRoot();
+  return join(projectRoot, "third_party", "quiche", "quiche", "examples", filename);
+}
+
+/**
+ * Get the correct path to quiche directory based on current working directory.
+ * Works from both project root and tests/ directory.
+ */
+export function getQuicheDirectory(): string {
+  const projectRoot = getProjectRoot();
+  const quichePath = join(projectRoot, "third_party", "quiche");
+  
+  if (!existsSync(quichePath)) {
+    throw new Error(`Quiche directory not found at ${quichePath}`);
+  }
+  
+  return quichePath;
+}
+
+/**
+ * Check if a command is available in the system PATH
+ */
+export async function commandExists(command: string): Promise<boolean> {
+  try {
+    const proc = spawn({
+      cmd: ["which", command],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await proc.exited;
+    return proc.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check that all required dependencies are installed
+ * Throws an error with helpful message if any are missing
+ */
+export async function checkDependencies(): Promise<void> {
+  const missing: string[] = [];
+  
+  // Check for required commands
+  const dependencies = [
+    { cmd: "zig", name: "Zig", install: "https://ziglang.org/download/" },
+    { cmd: "cargo", name: "Cargo (Rust)", install: "https://rustup.rs/" },
+    { cmd: "curl", name: "curl", install: "brew install curl (macOS) or apt-get install curl (Linux)" },
+  ];
+  
+  for (const dep of dependencies) {
+    if (!(await commandExists(dep.cmd))) {
+      missing.push(`  - ${dep.name}: ${dep.install}`);
+    }
+  }
+  
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required dependencies:\n${missing.join("\n")}\n\n` +
+      "Please install the missing dependencies and try again."
+    );
+  }
 }

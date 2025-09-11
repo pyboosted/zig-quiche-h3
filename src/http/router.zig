@@ -6,6 +6,7 @@ const Handler = handler_mod.Handler;
 const OnHeaders = handler_mod.OnHeaders;
 const OnBodyChunk = handler_mod.OnBodyChunk;
 const OnBodyComplete = handler_mod.OnBodyComplete;
+const OnH3Datagram = handler_mod.OnH3Datagram;
 
 /// A single route with its compiled pattern and handler
 pub const Route = struct {
@@ -19,6 +20,9 @@ pub const Route = struct {
     on_headers: ?OnHeaders = null,
     on_body_chunk: ?OnBodyChunk = null,
     on_body_complete: ?OnBodyComplete = null,
+    
+    // H3 DATAGRAM callback for request-associated datagrams
+    on_h3_dgram: ?OnH3Datagram = null,
 };
 
 /// Result of route matching
@@ -107,6 +111,42 @@ pub const Router = struct {
             .on_headers = callbacks.on_headers,
             .on_body_chunk = callbacks.on_body_chunk,
             .on_body_complete = callbacks.on_body_complete,
+        });
+        
+        // Sort routes by specificity (higher score first)
+        std.mem.sort(Route, self.routes.items, {}, compareRoutes);
+    }
+    
+    /// Register an H3 DATAGRAM callback for a route
+    /// This associates H3 DATAGRAM handling with a specific request route pattern
+    /// The callback is invoked when H3 DATAGRAMs arrive for matching requests
+    pub fn routeH3Datagram(
+        self: *Router,
+        method: Method,
+        route_pattern: []const u8,
+        on_h3_dgram: OnH3Datagram,
+    ) !void {
+        // Find existing route to add H3 DATAGRAM callback to
+        for (self.routes.items) |*existing_route| {
+            if (existing_route.method == method and std.mem.eql(u8, existing_route.raw_pattern, route_pattern)) {
+                existing_route.on_h3_dgram = on_h3_dgram;
+                return;
+            }
+        }
+        
+        // No existing route found, create new one with just H3 DATAGRAM callback
+        var compiled = try pattern.compile(self.allocator, route_pattern);
+        errdefer compiled.deinit();
+        
+        const raw = try self.allocator.dupe(u8, route_pattern);
+        errdefer self.allocator.free(raw);
+        
+        try self.routes.append(self.allocator, Route{
+            .pattern = compiled,
+            .handler = undefined, // No regular handler for H3 DATAGRAM-only routes
+            .method = method,
+            .raw_pattern = raw,
+            .on_h3_dgram = on_h3_dgram,
         });
         
         // Sort routes by specificity (higher score first)

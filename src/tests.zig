@@ -1,4 +1,6 @@
 const std = @import("std");
+// Import modules with inline tests so they get compiled and executed
+const _server_tests = @import("quic/server.zig");
 
 extern fn quiche_version() [*:0]const u8;
 
@@ -8,4 +10,3 @@ test "print quiche version" {
     // Sanity: ensure non-empty
     try std.testing.expect(ver.len > 0);
 }
-

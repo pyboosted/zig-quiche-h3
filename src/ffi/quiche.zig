@@ -335,6 +335,11 @@ pub const Connection = struct {
         const Wrapper = struct {
             const predicate = f;
             fn callback(data: [*c]const u8, len: usize, _: ?*anyopaque) callconv(.c) c_int {
+                // Be safe with potential null pointers and zero-length slices.
+                if (len == 0) {
+                    const empty: []const u8 = &[_]u8{};
+                    return if (predicate(empty)) 1 else 0;
+                }
                 if (data == null) return 0;
                 const slice = data[0..len];
                 return if (predicate(slice)) 1 else 0;
@@ -649,6 +654,31 @@ pub const h3 = struct {
             return @intCast(res);
         }
 
+        /// Send additional headers on a stream. When is_trailer_section is true, the
+        /// header block is interpreted as trailers. Set fin=true to finish the stream.
+        pub fn sendAdditionalHeaders(
+            self: *h3.Connection,
+            quic_conn: *QuicConnection,
+            stream_id: u64,
+            headers: []const Header,
+            is_trailer_section: bool,
+            fin: bool,
+        ) !void {
+            const res = c.quiche_h3_send_additional_headers(
+                self.ptr,
+                quic_conn.ptr,
+                stream_id,
+                @constCast(@ptrCast(headers.ptr)),
+                headers.len,
+                is_trailer_section,
+                fin,
+            );
+            if (res < 0) {
+                try h3.mapError(res);
+                return error.SendResponseFailed;
+            }
+        }
+
         pub fn recvBody(
             self: *h3.Connection,
             quic_conn: *QuicConnection,
@@ -667,6 +697,11 @@ pub const h3 = struct {
                 return error.RecvBodyFailed;
             }
             return @intCast(res);
+        }
+
+        /// Check if H3 DATAGRAM is enabled by peer (negotiated via SETTINGS)
+        pub fn dgramEnabledByPeer(self: *h3.Connection, quic_conn: *QuicConnection) bool {
+            return c.quiche_h3_dgram_enabled_by_peer(self.ptr, quic_conn.ptr);
         }
 
         pub const PollResult = struct {

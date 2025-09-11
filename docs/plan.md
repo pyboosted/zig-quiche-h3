@@ -8,11 +8,17 @@ Prerequisites
 - CMake (for BoringSSL via quiche)
 - Zig 0.15.1
 - libev dev headers (default backend)
-- Build quiche with: `cargo build --release --features ffi`
+- Build/run via Zig:
+  - `git submodule update --init --recursive`
+  - `zig build quiche -Dquiche-profile=release` (optional; also runs implicitly)
+  - `zig build` (smoke app prints quiche version)
+  - Use system quiche: `zig build -Dsystem-quiche=true`
+  - Common flags: `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…`, `-Dlink-ssl=true`
 
 Milestone 0: Build Infrastructure (Day 1)
 Status: Completed — `zig build run` and `zig build test` print quiche version (0.24.6) ✓
-- Create `build.zig` linking `third_party/quiche/quiche/include` and `target/release/libquiche.a`; link `ev`.
+- Implement `build.zig` that can either build vendored quiche via Cargo (`zig build quiche`, with `-Dquiche-profile`) or link a system quiche (`-Dsystem-quiche=true`).
+- Add libev toggle `-Dwith-libev=true` and include/lib path flags.
 - Minimal Zig FFI wrapper for `quiche_version()`.
 - Optional: Export `zig_h3_version()` from a shared lib and call it from Bun via `dlopen` as a smoke test.
 - Test:
@@ -276,6 +282,7 @@ Status: Completed ✓
   - `H3_STRESS=1 bun test` includes stress tests (~55s)
   - Individual test files for focused debugging
   - QLOG disabled by default for performance
+  - Note: curl must include HTTP/3 support for these tests; if unavailable, use `third_party/quiche` client binaries as an alternative.
 
 Milestone 5.5: HTTP Range Requests (Day 17–18)
 Status: Completed ✓
@@ -296,31 +303,48 @@ Status: Completed ✓
   - Created comprehensive E2E test suite (18 tests)
 
 Milestone 6: QUIC DATAGRAM (Day 19–21)
+Status: Completed ✓
 - Enable QUIC DATAGRAM; send/recv APIs; queue sizing and purge.
-- Test: QUIC datagram echo endpoint; disabled-path returns error ✓
+- Implementation details:
+  - `QuicServer.onDatagram(cb, user)` registers a connection-scoped callback
+  - `QuicServer.sendDatagram(conn, data)` respects `dgramMaxWritableLen()` and backpressure (`error.WouldBlock`)
+  - Counters for sent/dropped datagrams maintained in server
+- Tests:
+  - QUIC datagram echo endpoint (see `src/examples/quic_dgram_echo.zig`)
+  - E2E: `tests/e2e/basic/dgram.test.ts`
 
 Milestone 7: H3 DATAGRAM (Day 20–22)
+Status: Completed ✓
 - Gate on `quiche_h3_dgram_enabled_by_peer()`; implement H3 flow‑id varint mapping for request association.
-- Test: request-associated datagram echo; flow‑id routing verified ✓
+- Implementation details:
+  - Route-level callback via `router.routeH3Datagram(method, pattern, cb)`
+  - `Response.sendH3Datagram(payload)` encodes flow-id varint + payload and sends via QUIC DATAGRAM
+  - Flow-id mapping derived from request stream id, with CONNECT and CONNECT-UDP handling
+- Tests:
+  - Request-associated datagram echo; flow‑id routing verified
+  - E2E: `tests/e2e/basic/h3_dgram.test.ts`
 
 Milestone 8: WebTransport (Experimental) (Day 23–25)
+Status: Planned
 - Extended CONNECT session management (`:protocol = webtransport`).
 - Session‑bound DATAGRAMs (session id = CONNECT stream id). No WT streams yet (blocked by C FFI).
-- Test:
-  - CLI test client performs WT handshake; session DATAGRAM echo ✓
-  - Stretch: browser WT handshake with trusted cert/Alt‑Svc ✓
+- Tests (planned):
+  - CLI test client performs WT handshake; session DATAGRAM echo
+  - Stretch: browser WT handshake with trusted cert/Alt‑Svc
 
 Milestone 9: Interop + Performance (Day 26–28)
+Status: Planned
 - Quick interop sanity with another stack (e.g., ngtcp2/quic-go) on basic H3 routes.
 - Metrics + qlog hooks; pacing/params tuning; initial throughput/latency targets.
-- Test:
-  - Interop basic success ✓
-  - 10k req/s benchmark target on loopback ✓
+- Tests (targets):
+  - Interop basic success
+  - 10k req/s benchmark target on loopback
 
 Milestone 10: Bun FFI (Day 29–30)
+Status: Planned (partial smoke test done)
 - Export thin C ABI for Bun (`zig_h3_server_new/start/stop`, routing, response, datagrams, WT session DATAGRAMs, `zig_h3_version`).
 - JS example using `bun:ffi` (`dlopen`, `JSCallback` or polling mode) to run server and handle requests.
-- Test: Run server from Bun; receive responses; clean shutdown ✓
+- Test: Run server from Bun; receive responses; clean shutdown
 
 Acceptance Gates
 - QUIC/H3: Handshake success; qlogs readable; event loop drives send/recv correctly.
@@ -332,3 +356,7 @@ Notes
 - Default event backend: libev; epoll/kqueue backends are available via compile‑time flag; future `zig_io` backend when stable.
 - Spec clarifies C FFI realities: no H3 DATAGRAM event; WebTransport streams not exposed via C FFI.
 - quiche submodule pinned to 0.24.6.
+ - E2E tests reference:
+   - Basic DATAGRAM: `tests/e2e/basic/dgram.test.ts`
+   - H3 DATAGRAM: `tests/e2e/basic/h3_dgram.test.ts`
+   - Trailers: `tests/e2e/basic/trailers.test.ts`

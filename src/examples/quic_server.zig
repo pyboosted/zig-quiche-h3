@@ -169,6 +169,9 @@ fn registerRoutes(server: *QuicServer) !void {
     try server.route(.GET, "/stream/1gb", stream1GBHandler);
     try server.route(.GET, "/stream/test", streamTestHandler);
     
+    // Trailers demo endpoint
+    try server.route(.GET, "/trailers/demo", trailersDemoHandler);
+    
     // Upload streaming endpoints (M5 - push-mode callbacks)
     try server.routeStreaming(.POST, "/upload/stream", .{
         .on_headers = uploadStreamOnHeaders,
@@ -181,6 +184,10 @@ fn registerRoutes(server: *QuicServer) !void {
         .on_body_complete = uploadEchoOnComplete,
     });
     
+    // H3 DATAGRAM echo endpoint (M7)
+    try server.route(.GET, "/h3dgram/echo", h3dgramEchoHandler);
+    try server.router.routeH3Datagram(.GET, "/h3dgram/echo", h3dgramEchoCallback);
+    
     std.debug.print("Routes registered:\n", .{});
     std.debug.print("  GET  /\n", .{});
     std.debug.print("  GET  /api/users\n", .{});
@@ -191,8 +198,10 @@ fn registerRoutes(server: *QuicServer) !void {
     std.debug.print("  GET  /download/* (file streaming)\n", .{});
     std.debug.print("  GET  /stream/1gb (1GB test)\n", .{});
     std.debug.print("  GET  /stream/test (streaming test)\n", .{});
+    std.debug.print("  GET  /trailers/demo (trailers example)\n", .{});
     std.debug.print("  POST /upload/stream (streaming upload with SHA-256)\n", .{});
     std.debug.print("  POST /upload/echo (bidirectional echo)\n", .{});
+    std.debug.print("  GET  /h3dgram/echo (H3 DATAGRAM echo)\n", .{});
     std.debug.print("\n", .{});
 }
 
@@ -311,6 +320,22 @@ fn echoHandler(req: *http.Request, res: *http.Response) !void {
         };
         try res.jsonValue(response);
     }
+}
+
+// Simple trailers example: send a short body, then a trailer and FIN
+fn trailersDemoHandler(req: *http.Request, res: *http.Response) !void {
+    _ = req;
+    try res.header(http.Headers.ContentType, "text/plain");
+    const body = "Hello, trailers!\n";
+    try res.setContentLength(body.len);
+    // Send body first (no FIN)
+    try res.writeAll(body);
+
+    // Now send trailers and finish the stream
+    const trailers = [_]http.Response.Trailer{
+        .{ .name = "x-demo-trailer", .value = "finished" },
+    };
+    try res.sendTrailers(&trailers);
 }
 
 // Streaming handlers for Milestone 5
@@ -729,6 +754,42 @@ fn uploadEchoOnComplete(req: *http.Request, res: *http.Response) !void {
         else => return err,
     };
     try res.end(null);
+}
+
+// H3 DATAGRAM handlers (M7)
+fn h3dgramEchoHandler(req: *http.Request, res: *http.Response) !void {
+    _ = req; // Request info not needed
+    
+    // Send HTTP response explaining H3 DATAGRAM echo endpoint
+    try res.status(200);
+    try res.header("content-type", "text/plain");
+    try res.writeAll(
+        \\H3 DATAGRAM Echo Endpoint
+        \\=========================
+        \\
+        \\This endpoint supports H3 DATAGRAM echo functionality.
+        \\Send HTTP/3 DATAGRAMs to this request's flow_id to receive echo responses.
+        \\
+        \\The flow_id for this request is the stream_id.
+        \\H3 DATAGRAMs will be echoed back using Response.sendH3Datagram().
+        \\
+        \\Test with quiche-client:
+        \\  cargo run -p quiche_apps --bin quiche-client -- \
+        \\    --dgram-proto oneway --dgram-count 3 \
+        \\    https://127.0.0.1:4433/h3dgram/echo --no-verify
+        \\
+    );
+    try res.end(null);
+}
+
+fn h3dgramEchoCallback(req: *http.Request, res: *http.Response, payload: []const u8) !void {
+    _ = req; // Request not needed for echo
+    
+    // Echo the payload back via H3 DATAGRAM
+    res.sendH3Datagram(payload) catch {
+        // Don't propagate error - continue processing other datagrams
+        return;
+    };
 }
 
 fn printHelp() void {

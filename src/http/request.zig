@@ -62,6 +62,17 @@ pub const Request = struct {
         };
     }
     
+    /// Get the HTTP/3 :protocol pseudo-header (for CONNECT semantics)
+    pub fn h3Protocol(self: *Request) ?[]const u8 {
+        return self.getHeader(":protocol");
+    }
+
+    /// Parse datagram-flow-id header as u64 if present (CONNECT-UDP)
+    pub fn datagramFlowId(self: *Request) ?u64 {
+        const v = self.getHeader("datagram-flow-id") orelse return null;
+        return std.fmt.parseInt(u64, v, 10) catch null;
+    }
+
     /// Read all body data (up to max_bytes)
     pub fn readAll(self: *Request, max_bytes: usize) ![]const u8 {
         if (self.body_buffer.items.len > max_bytes) {
@@ -137,6 +148,26 @@ pub const Request = struct {
     pub fn contentLength(self: *Request) ?usize {
         const len_str = self.getHeader("content-length") orelse return null;
         return std.fmt.parseInt(usize, len_str, 10) catch null;
+    }
+
+    test "datagram-flow-id and :protocol parsing" {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        // Build headers including pseudo-headers and datagram-flow-id
+        var hdrs = try alloc.alloc(Header, 4);
+        hdrs[0] = .{ .name = ":method", .value = "CONNECT" };
+        hdrs[1] = .{ .name = ":protocol", .value = "webtransport" };
+        hdrs[2] = .{ .name = "datagram-flow-id", .value = "12345" };
+        hdrs[3] = .{ .name = ":path", .value = "/" };
+
+        var req = try Request.init(&arena, .CONNECT, "/", null, hdrs, 9);
+
+        try std.testing.expect(req.h3Protocol() != null);
+        try std.testing.expectEqualStrings("webtransport", req.h3Protocol().?);
+        try std.testing.expect(req.datagramFlowId() != null);
+        try std.testing.expectEqual(@as(u64, 12345), req.datagramFlowId().?);
     }
 };
 

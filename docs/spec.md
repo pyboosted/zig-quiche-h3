@@ -31,7 +31,7 @@ Where relevant I cite `quiche` sources and docs so you can jump straight to the 
 ## 2) External dependencies & versions
 
 * **Zig**: 0.15.1. ([Zig Programming Language][7])
-* **quiche**: latest 0.24.x $current docs show 0.24.6$. Build with **`--features ffi`** to export the C ABI (`libquiche.a`), optionally **`pkg-config-meta`** for `quiche.pc`. `quiche` offers an **HTTP/3 module** (`quiche::h3`) and a **thin C API** in `include/quiche.h`. ([Docs.rs][2])
+* **quiche**: 0.24.6 (pinned submodule). Build with **`--features ffi`** to export the C ABI (`libquiche.a`), optionally **`pkg-config-meta`** for `quiche.pc`. `quiche` offers an **HTTP/3 module** (`quiche::h3`) and a **thin C API** in `include/quiche.h`. ([Docs.rs][2])
 * **TLS**: `quiche` uses **BoringSSL** by default (auto-built by Cargo) or can be built with **quictls/openssl** feature (0‑RTT not supported with openssl vendor). We follow `quiche` choice. ([Docs.rs][2])
 * **libev**: used as the default event loop backend (mirrors quiche C examples); alternative raw epoll/kqueue backend remains an option. Link as a system library (`ev`).
 
@@ -62,25 +62,44 @@ Where relevant I cite `quiche` sources and docs so you can jump straight to the 
 * Zig 0.15.1
 * libev development headers (for default backend; e.g., `libev-dev` on Debian/Ubuntu, `brew install libev` on macOS)
 
-**Build steps**
+**Build steps (in-repo)**
 
-1. Build `quiche` with FFI:
+1) Initialize submodules (quiche vendored under `third_party/`):
 
 ```bash
-git clone --recursive https://github.com/cloudflare/quiche
-cd quiche
-cargo build --release --features ffi
-# optional: also add 'pkg-config-meta' to expose a .pc file
+git submodule update --init --recursive
 ```
 
-This produces a standalone `libquiche.a` suitable for linking from C-like ABIs. Note: the `ffi` feature is NOT enabled by default; it must be passed explicitly. ([Docs.rs][2])
+2) Build everything via Zig (Cargo run for quiche is handled by `build.zig`):
 
-2. In `build.zig`:
+```bash
+# Build quiche staticlib first (optional: also happens implicitly on full build)
+zig build quiche -Dquiche-profile=release
 
-* Point the linker at `libquiche.a` (or shared).
-* `exe.addIncludePath("path/to/quiche/include")` for `quiche.h`.
-* Link BoringSSL (transitively from quiche) or, when using a shared lib, rely on `pkg-config` metadata exposed by `quiche`’s `pkg-config-meta` feature. (The README notes BoringSSL is built automatically; ensure `cmake` present.) ([Docs.rs][2])
-* Link the event loop backend: `exe.linkSystemLibrary("ev")` (libev).
+# Build the project (prints quiche version as a smoke test)
+zig build
+
+# Run the smoke app
+zig build run
+```
+
+3) Use a system-installed quiche instead of the vendored submodule:
+
+```bash
+zig build -Dsystem-quiche=true
+```
+
+Common flags:
+
+- `-Dquiche-profile=release|debug` to select Cargo profile when building vendored quiche.
+- `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…` to link libev as the default event backend.
+- `-Dlink-ssl=true` when linking against OpenSSL/quictls instead of vendored BoringSSL.
+
+Examples and tests:
+
+- UDP echo: `zig build echo` (send with `nc -u localhost 4433`).
+- QUIC server example: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
+- Unit tests: `zig build test` or `zig test src/tests.zig`.
 
 > **Why C FFI (not Rust JNI/`extern "Rust"`)?** The `quiche` team officially supports a **thin C API** consistent with the Rust API. Zig’s C-ABI interop is first-class and stable, so this is the cleanest, most robust bridge. ([GitHub][8])
 
@@ -104,14 +123,12 @@ pub const Server = struct {
     /// Register HTTP route handlers before run().
     pub fn route(self: *Server, method: Method, pattern: []const u8, handler: HttpHandler) !void;
 
-    /// Register datagram handler for an endpoint/context.
-    pub fn datagram(self: *Server, pattern: []const u8, handler: DatagramHandler) !void;
+    /// Register a QUIC DATAGRAM handler (connection-scoped, not HTTP-routed).
+    /// For HTTP/3 DATAGRAM associated to requests, attach callbacks via router.routeH3Datagram().
+    pub fn onDatagram(self: *Server, cb: OnDatagram, user: ?*anyopaque) void;
 
-    /// Register WebTransport handler for CONNECT + :protocol=webtransport (experimental).
+    /// Register WebTransport handler for CONNECT + :protocol=webtransport (experimental/planned).
     pub fn webtransport(self: *Server, pattern: []const u8, handler: WebTransportHandler) !void;
-
-    /// Export stats (QUIC + H3) for metrics.
-    pub fn exportMetrics(self: *Server) ServerMetrics;
 };
 
 pub const ServerConfig = struct {
@@ -159,24 +176,27 @@ pub const Request = struct {
     conn_id: u64,              // tie back to connection for server-state
 };
 
-pub const ResponseWriter = struct {
-    /// Send initial response headers; call once per response.
-    pub fn sendHead(self: *ResponseWriter, status: u16, headers: []const Header, has_body: bool) !void;
-    /// Stream body chunks; set fin=true on last call.
-    pub fn sendBody(self: *ResponseWriter, chunk: []const u8, fin: bool) !usize;
-    /// Optionally send trailers (additional headers) at end of body.
-    pub fn sendTrailers(self: *ResponseWriter, trailers: []const Header) !void;
+pub const Response = struct {
+    /// Set status and add headers before sending body
+    pub fn status(self: *Response, code: u16) !void;
+    pub fn header(self: *Response, name: []const u8, value: []const u8) !void;
+    /// Write helpers
+    pub fn write(self: *Response, data: []const u8) !usize;
+    pub fn writeAll(self: *Response, data: []const u8) !void;
+    /// Finish the response (optionally with a final chunk)
+    pub fn end(self: *Response, final: ?[]const u8) !void;
+    /// Send HTTP/3 trailers and finish the stream
+    pub fn sendTrailers(self: *Response, trailers: []const Trailer) !void;
+    /// Send an H3 DATAGRAM associated with this request (if negotiated)
+    pub fn sendH3Datagram(self: *Response, payload: []const u8) !void;
 };
 
-pub const HttpHandler = fn (req: *Request, resp: *ResponseWriter) anyerror!void;
+pub const HttpHandler = *const fn (*Request, *Response) anyerror!void;
 
-pub const Datagram = struct { context_id: u64, payload: []const u8, req_stream_id: ?u64 };
-pub const DatagramHandler = fn (d: *Datagram, out: *DatagramOut) anyerror!void;
-
-pub const DatagramOut = struct {
-    /// queue an unreliable datagram (QUIC DATAGRAM / H3 Datagram)
-    pub fn send(self: *DatagramOut, context_id: u64, payload: []const u8) !void;
-};
+/// HTTP/3 DATAGRAM callback associated to a request route
+pub const OnH3Datagram = *const fn (*Request, *Response, []const u8) anyerror!void;
+/// QUIC DATAGRAM callback (connection-scoped)
+pub const OnDatagram = *const fn (*Server, *Connection, []const u8, ?*anyopaque) anyerror!void;
 
 /// Event backend abstraction to allow swapping libev / raw epoll/kqueue /
 /// (future) Zig std.io based loops without changing the public API.
@@ -214,7 +234,7 @@ pub const WebTransportHandler = fn (req: *Request, sess: *WebTransportSession) a
 **Notes & mapping to `quiche`:**
 
 * We impersonate `quiche`’s runtime pattern: **create QUIC config**, accept/recv, then construct **`h3::Connection::with_transport()`** and **`poll()` for events** (Headers/Data/Finished/PriorityUpdate/GoAway). We hide that behind the server loop and invoke your registered handlers. ([QUIC Docs][1])
-* `ResponseWriter.sendTrailers()` maps to **`send_additional_headers(..., is_trailer_section=true)`** introduced in `quiche::h3::Connection` (see method list). ([QUIC Docs][4])
+* `Response.sendTrailers()` maps to **`send_additional_headers(..., is_trailer_section=true)`** in `quiche::h3::Connection`. ([QUIC Docs][4])
 * **Datagrams**: We expose QUIC DATAGRAM and **HTTP/3 DATAGRAM** integration (when negotiated). You can test availability using `h3_conn.dgram_enabled_by_peer(conn)`; we do this internally, surfacing a runtime capability and returning an error if you try to send before it’s enabled. ([QUIC Docs][9])
 
 ### 4.2 “Hello H3” example (library UX)
@@ -225,29 +245,47 @@ var server = try Server.init(allocator, .{
     .cert_chain_pem = "certs/server.crt",
     .priv_key_pem   = "certs/server.key",
     .quic = .{ .alpn = &.{ "h3" }, .enable_datagrams = true },
-    .h3   = .{ .qpack_max_table_capacity = 4096, .enable_extended_connect = true },
+    .h3   = .{ .qpack_max_table_capacity = 4096 },
     .qlog_dir = "/var/log/quic",
 });
 
 // Simple GET endpoint.
 try server.route(.GET, "/hello", struct {
-    pub fn handler(req: *Request, resp: *ResponseWriter) !void {
-        const headers = [_]Header{
-            .{ .name = "server", .value = "zig-quiche-h3" },
-            .{ .name = "content-type", .value = "text/plain" },
-        };
-        try resp.sendHead(200, &headers, true);
-        _ = try resp.sendBody("Hello, HTTP/3!\n", true);
+    pub fn handler(_: *Request, res: *Response) !void {
+        try res.status(200);
+        try res.header("content-type", "text/plain");
+        try res.writeAll("Hello, HTTP/3!\n");
+        try res.end(null);
     }
 }.handler);
 
-// Datagram endpoint (application-chosen context).
-try server.datagram("/udp", struct {
-    pub fn onDatagram(d: *Datagram, out: *DatagramOut) !void {
-        // Echo
-        try out.send(d.context_id, d.payload);
+// QUIC DATAGRAM echo (connection-scoped)
+server.onDatagram(struct {
+    fn dgramEcho(srv: *Server, conn: *Connection, payload: []const u8, _: ?*anyopaque) !void {
+        // Best-effort echo; drop if backpressured
+        srv.sendDatagram(conn, payload) catch |err| switch (err) {
+            error.WouldBlock => {},
+            else => return err,
+        };
     }
-}.onDatagram);
+}.dgramEcho, null);
+
+// HTTP/3 DATAGRAM echo bound to a request route
+try server.route(.GET, "/h3dgram/echo", struct {
+    pub fn handler(_: *Request, res: *Response) !void {
+        // Normal response body or just headers; H3 dgrams handled by callback below
+        try res.status(200);
+        try res.header("content-type", "text/plain");
+        try res.writeAll("h3 dgram route active\n");
+        try res.end(null);
+    }
+}.handler);
+try server.router.routeH3Datagram(.GET, "/h3dgram/echo", struct {
+    pub fn onDgram(_: *Request, res: *Response, payload: []const u8) !void {
+        // Echo back via request-associated H3 DATAGRAM
+        try res.sendH3Datagram(payload);
+    }
+}.onDgram);
 
 try server.run();
 ```
@@ -680,21 +718,21 @@ If you want, I can add a first-pass `build.zig` and the FFI bindings skeleton ne
 
 [1]: https://docs.quic.tech/src/quiche/h3/mod.rs.html "mod.rs - source"
 [2]: https://docs.rs/crate/quiche/latest/source/README.md "quiche 0.24.6 - Docs.rs"
-[3]: https://github.com/quic-interop/quic-interop-runner?utm_source=chatgpt.com "QUIC interop runner"
+[3]: https://github.com/quic-interop/quic-interop-runner "QUIC interop runner"
 [4]: https://docs.quic.tech/quiche/h3/struct.Connection.html "Connection in quiche::h3 - Rust"
-[5]: https://developer.chrome.com/blog/removing-push?utm_source=chatgpt.com "Remove HTTP/2 Server Push from Chrome | Blog"
-[6]: https://mailman.nginx.org/pipermail/nginx-devel/2023-May/RMGWK746UHXKMNFBO3JYNU4SRA5HRSIR.html?utm_source=chatgpt.com "[PATCH 3 of 4] HTTP/3: removed server push support"
-[7]: https://ziglang.org/download/0.15.1/release-notes.html?utm_source=chatgpt.com "0.15.1 Release Notes"
-[8]: https://github.com/cloudflare/quiche?utm_source=chatgpt.com "cloudflare/quiche: 🥧 Savoury implementation of the QUIC ..."
-[9]: https://docs.quic.tech/src/quiche/h3/mod.rs.html?utm_source=chatgpt.com "quiche/h3/ mod.rs"
-[10]: https://docs.rs/crate/quiche/latest/source/examples/http3-client.c?utm_source=chatgpt.com "quiche 0.24.4"
-[11]: https://android.googlesource.com/platform/external/rust/crates/quiche/%2B/refs/tags/android-security-12.0.0_r53/examples/http3-client.c?utm_source=chatgpt.com "examples/http3-client.c - platform/external/rust/crates/quiche"
+[5]: https://developer.chrome.com/blog/removing-push "Remove HTTP/2 Server Push from Chrome | Blog"
+[6]: https://mailman.nginx.org/pipermail/nginx-devel/2023-May/RMGWK746UHXKMNFBO3JYNU4SRA5HRSIR.html "[PATCH 3 of 4] HTTP/3: removed server push support"
+[7]: https://ziglang.org/download/0.15.1/release-notes.html "0.15.1 Release Notes"
+[8]: https://github.com/cloudflare/quiche "cloudflare/quiche: 🥧 Savoury implementation of the QUIC ..."
+[9]: https://docs.quic.tech/src/quiche/h3/mod.rs.html "quiche/h3/ mod.rs"
+[10]: https://docs.rs/crate/quiche/latest/source/examples/http3-client.c "quiche 0.24.4"
+[11]: https://android.googlesource.com/platform/external/rust/crates/quiche/%2B/refs/tags/android-security-12.0.0_r53/examples/http3-client.c "examples/http3-client.c - platform/external/rust/crates/quiche"
 [12]: https://docs.rs/crate/quiche/latest/source/include/quiche.h "quiche 0.24.6 - Docs.rs"
-[13]: https://gitlab.informatik.hu-berlin.de/thimmaka/quiche/-/blob/e98cccd9256be546578bcb6ac42881e2a06a25f7/examples/http3-server.c?utm_source=chatgpt.com "quiche - examples - http3-server.c"
-[14]: https://datatracker.ietf.org/doc/html/rfc9114?utm_source=chatgpt.com "RFC 9114 - HTTP/3"
-[15]: https://docs.quic.tech/quiche/h3/struct.Config.html?utm_source=chatgpt.com "Config in quiche::h3 - Rust"
-[16]: https://docs.quic.tech/quiche/h3/enum.Error.html?utm_source=chatgpt.com "Error in quiche::h3 - Rust"
-[17]: https://docs.rs/quiche/latest/quiche/struct.Stats.html?utm_source=chatgpt.com "Stats in quiche - Rust"
-[18]: https://blog.cloudflare.com/de-de/h3i/?utm_source=chatgpt.com "Open sourcing h3i: a command line tool and library for low- ..."
-[19]: https://fossies.org/linux/quiche/h3i/README.md?utm_source=chatgpt.com "quiche: h3i/README.md"
-[20]: https://quicwg.org/load-balancers/draft-ietf-quic-load-balancers.html?utm_source=chatgpt.com "QUIC-LB: Generating Routable QUIC Connection IDs"
+[13]: https://gitlab.informatik.hu-berlin.de/thimmaka/quiche/-/blob/e98cccd9256be546578bcb6ac42881e2a06a25f7/examples/http3-server.c "quiche - examples - http3-server.c"
+[14]: https://datatracker.ietf.org/doc/html/rfc9114 "RFC 9114 - HTTP/3"
+[15]: https://docs.quic.tech/quiche/h3/struct.Config.html "Config in quiche::h3 - Rust"
+[16]: https://docs.quic.tech/quiche/h3/enum.Error.html "Error in quiche::h3 - Rust"
+[17]: https://docs.rs/quiche/latest/quiche/struct.Stats.html "Stats in quiche - Rust"
+[18]: https://blog.cloudflare.com/open-sourcing-h3i "Open sourcing h3i: a command line tool and library for low- ..."
+[19]: https://fossies.org/linux/quiche/h3i/README.md "quiche: h3i/README.md"
+[20]: https://quicwg.org/load-balancers/draft-ietf-quic-load-balancers.html "QUIC-LB: Generating Routable QUIC Connection IDs"

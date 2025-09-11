@@ -1,6 +1,13 @@
 import { type Subprocess, spawn } from "bun";
 import { get } from "./curlClient";
-import { randPort, waitFor } from "./testUtils";
+import { 
+  randPort, 
+  waitFor, 
+  getServerBinary, 
+  getCertPath, 
+  getProjectRoot,
+  checkDependencies 
+} from "./testUtils";
 
 /**
  * Server instance with cleanup capability
@@ -29,18 +36,26 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
   const port =
     opts.port ?? (process.env.H3_TEST_PORT ? Number(process.env.H3_TEST_PORT) : randPort());
 
+  // Check dependencies first
+  await checkDependencies();
+  
   // Ensure server is built before attempting to spawn
   await ensureServerBuilt();
 
+  // Get paths using the new utilities - works from any directory
+  const serverPath = getServerBinary();
+  const certPath = getCertPath("cert.crt");
+  const keyPath = getCertPath("cert.key");
+
   // Build server arguments
   const args = [
-    "../zig-out/bin/quic-server", // Relative to tests/ directory
+    serverPath,
     "--port",
     port.toString(),
     "--cert",
-    "../third_party/quiche/quiche/examples/cert.crt",
+    certPath,
     "--key",
-    "../third_party/quiche/quiche/examples/cert.key",
+    keyPath,
   ];
 
   // QLOG configuration
@@ -72,7 +87,7 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
     stdout: "pipe",
     stderr: "pipe",
     env,
-    cwd: "./", // Run from tests directory
+    // No need to set cwd - we're using absolute paths
   });
 
   // Create cleanup function
@@ -165,15 +180,17 @@ export async function withServer<T>(
  */
 export async function checkServerBinary(): Promise<boolean> {
   try {
+    const serverPath = getServerBinary();
+    
     const proc = spawn({
-      cmd: ["../zig-out/bin/quic-server", "--help"],
+      cmd: [serverPath, "--help"],
       stdout: "pipe",
       stderr: "pipe",
-      cwd: "./",
     });
     await proc.exited;
     return proc.exitCode === 0;
   } catch {
+    // Binary doesn't exist or isn't executable
     return false;
   }
 }
@@ -191,19 +208,22 @@ export async function ensureServerBuilt(): Promise<void> {
   const optimize = process.env.H3_OPTIMIZE ?? "ReleaseFast"; // ReleaseFast by default for perf tests
   const libevInclude =
     process.env.H3_LIBEV_INCLUDE ??
-    (process.platform === "darwin" ? "/opt/homebrew/include" : undefined);
+    (process.platform === "darwin" ? "/opt/homebrew/opt/libev/include" : undefined);
   const libevLib =
-    process.env.H3_LIBEV_LIB ?? (process.platform === "darwin" ? "/opt/homebrew/lib" : undefined);
+    process.env.H3_LIBEV_LIB ?? (process.platform === "darwin" ? "/opt/homebrew/opt/libev/lib" : undefined);
 
   const args = ["zig", "build", "-Dwith-libev=true", `-Doptimize=${optimize}`];
   if (libevInclude) args.push(`-Dlibev-include=${libevInclude}`);
   if (libevLib) args.push(`-Dlibev-lib=${libevLib}`);
 
+  // Always run from project root
+  const projectRoot = getProjectRoot();
+  
   const proc = spawn({
     cmd: args,
     stdout: "pipe",
     stderr: "pipe",
-    cwd: "../", // Run from project root
+    cwd: projectRoot,
   });
 
   await proc.exited;

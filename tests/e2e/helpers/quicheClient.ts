@@ -1,4 +1,5 @@
 import { spawn } from "bun";
+import { getQuicheDirectory } from "./testUtils";
 
 /**
  * Response from quiche-client
@@ -27,6 +28,7 @@ export interface QuicheClientOptions {
   sessionFile?: string;
   dgramProto?: "none" | "oneway";
   dgramCount?: number;
+  idleTimeout?: number; // Idle timeout in milliseconds
 }
 
 /**
@@ -104,6 +106,17 @@ export async function quicheClient(
     }
   }
 
+  // Idle timeout for DATAGRAM echo responses
+  if (options.idleTimeout) {
+    args.push("--idle-timeout", String(options.idleTimeout));
+  }
+  
+  // Add max-data to prevent early close
+  if (options.dgramProto && options.dgramProto !== "none") {
+    // Increase initial max data to ensure connection stays open
+    args.push("--max-data", "10000000");
+  }
+
   // URL
   args.push(url);
 
@@ -112,11 +125,30 @@ export async function quicheClient(
     cmd: args,
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, RUST_LOG: "info" },
-    cwd: "../third_party/quiche/", // Run from quiche directory
+    env: { 
+      ...process.env, 
+      // Use info level to capture DATAGRAM logs without overwhelming output
+      RUST_LOG: options.dgramProto ? "info,quiche_apps::common=info" : "warn"
+    },
+    cwd: getQuicheDirectory(), // Run from quiche directory
   });
 
-  await proc.exited;
+  // For DATAGRAM tests, add a small timeout to ensure all packets are processed
+  if (options.dgramProto && options.dgramProto !== "none") {
+    // Use Promise.race to wait for either exit or timeout
+    await Promise.race([
+      proc.exited,
+      new Promise(resolve => setTimeout(resolve, options.idleTimeout || 5000))
+    ]);
+    
+    // If process is still running, kill it
+    if (proc.exitCode === null) {
+      proc.kill();
+      await proc.exited;
+    }
+  } else {
+    await proc.exited;
+  }
 
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
@@ -217,7 +249,8 @@ export async function checkQuicheClient(): Promise<boolean> {
       cmd: ["cargo", "run", "-p", "quiche_apps", "--bin", "quiche-client", "--", "--help"],
       stdout: "pipe",
       stderr: "pipe",
-      cwd: "../third_party/quiche/",
+      cwd: getQuicheDirectory(),
+      env: process.env,
     });
     await proc.exited;
     return proc.exitCode === 0;
@@ -240,7 +273,8 @@ export async function ensureQuicheBuilt(): Promise<void> {
     cmd: ["cargo", "build", "--release", "--features", "ffi,qlog"],
     stdout: "pipe",
     stderr: "pipe",
-    cwd: "../third_party/quiche/",
+    cwd: getQuicheDirectory(),
+    env: process.env, // Use the system's PATH, don't hardcode user-specific paths
   });
 
   await proc.exited;

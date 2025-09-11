@@ -13,6 +13,10 @@ pub const OnHeaders = *const fn (req: *Request, res: *Response) anyerror!void;
 pub const OnBodyChunk = *const fn (req: *Request, res: *Response, chunk: []const u8) anyerror!void;
 pub const OnBodyComplete = *const fn (req: *Request, res: *Response) anyerror!void;
 
+/// H3 DATAGRAM callback type for request-associated datagrams
+/// Receives the request context, response for sending datagrams back, and payload
+pub const OnH3Datagram = *const fn (req: *Request, res: *Response, payload: []const u8) anyerror!void;
+
 /// HTTP methods
 pub const Method = enum {
     GET,
@@ -23,6 +27,7 @@ pub const Method = enum {
     OPTIONS,
     PATCH,
     CONNECT,
+    CONNECT_UDP,
     TRACE,
     
     pub fn fromString(s: []const u8) ?Method {
@@ -34,6 +39,7 @@ pub const Method = enum {
         if (std.mem.eql(u8, s, "OPTIONS")) return .OPTIONS;
         if (std.mem.eql(u8, s, "PATCH")) return .PATCH;
         if (std.mem.eql(u8, s, "CONNECT")) return .CONNECT;
+        if (std.mem.eql(u8, s, "CONNECT-UDP")) return .CONNECT_UDP;
         if (std.mem.eql(u8, s, "TRACE")) return .TRACE;
         return null;
     }
@@ -48,6 +54,7 @@ pub const Method = enum {
             .OPTIONS => "OPTIONS",
             .PATCH => "PATCH",
             .CONNECT => "CONNECT",
+            .CONNECT_UDP => "CONNECT-UDP",
             .TRACE => "TRACE",
         };
     }
