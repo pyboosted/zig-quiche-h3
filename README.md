@@ -13,7 +13,7 @@ A Zig exploration of QUIC/HTTP‑3 built on Cloudflare’s quiche via its C FFI.
   - `h3/` — `config.zig`, `connection.zig`, `event.zig` (HTTP/3 protocol layer).
   - `http/` — `router.zig`, `request.zig`, `response.zig`, `json.zig` (HTTP abstractions).
   - `ffi/` — `quiche.zig` (C header bridge) and `../ffi.zig` (shared lib export).
-  - `examples/` — `udp_echo.zig`, `quic_server.zig`.
+  - `examples/` — `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`.
   - `tests.zig` — tiny sanity test printing `quiche` version.
 - `third_party/quiche/` — Git submodule; do not patch here.
 - `docs/` — design and plan notes; `qlogs/` — runtime qlog output.
@@ -38,18 +38,26 @@ A Zig exploration of QUIC/HTTP‑3 built on Cloudflare’s quiche via its C FFI.
 - Run smoke app: `zig build run` (prints `quiche` version)
 - UDP echo: `zig build echo` then send with `nc -u localhost 4433`
 - QUIC server: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`
-  - Test with quiche client: `cd third_party/quiche && cargo run -p quiche --bin quiche-client -- https://127.0.0.1:4433/ --no-verify`
-  - Test JSON endpoints: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/api/users --no-verify`
+  - Test with quiche client: `cd third_party/quiche && cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`
+  - Test JSON endpoints: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/api/users --no-verify --alpn h3`
+ - QUIC DATAGRAM echo example: `zig build quic-dgram-echo -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`
+ - HTTP/3 DATAGRAM route: server example exposes `GET /h3dgram/echo` with an H3 DATAGRAM echo callback
 - Tests: `zig build test`
+
+### E2E Tests (Bun)
+- Setup: install Bun 1.x, then `bun install` (at repo root)
+- Run: `bun test tests/e2e`
+- Stress: `H3_STRESS=1 bun test` (longer run)
+- Note: curl must include HTTP/3 support if you use curl-based helpers; otherwise use the quiche client above.
 
 ## Roadmap
 - M1: Event loop + UDP echo (done)
 - M2: QUIC server with handshake, timers, qlog, dual‑stack UDP (done)
 - M3: Minimal HTTP/3 request/response path (H3 frames + streams) (done)
 - M4: Dynamic routing with type-safe JSON serialization (done)
-- M5: Streaming bodies with backpressure handling
-- M6: DATAGRAM support (QUIC + H3), feature flags
-- M7: H3 DATAGRAM with flow‑id mapping
+- M5: Streaming bodies with backpressure handling (done)
+- M6: DATAGRAM support (QUIC + H3), feature flags (done)
+- M7: H3 DATAGRAM with flow‑id mapping (done)
 - M8: WebTransport (experimental)
 - M9: Interop + Performance
 - M10: Bun FFI integration
@@ -63,6 +71,8 @@ A Zig exploration of QUIC/HTTP‑3 built on Cloudflare’s quiche via its C FFI.
 - Dynamic routing: Pattern matching (`/api/users/:id`), wildcard paths (`/files/*`), parameter extraction.
 - Type-safe JSON: Uses `std.json.Stringify.valueAlloc()` for structured data serialization.
 - Request/Response API: Arena‑allocated per request, chainable response methods, zero‑cost cleanup.
+- Streaming bodies: Backpressure‑aware `write`/`writeAll`, zero‑copy file streaming, and FIN correctness for large transfers.
+- Datagrams: QUIC DATAGRAM echo example and HTTP/3 DATAGRAM route callback (`/h3dgram/echo`).
 - Memory optimizations: Eliminated header duplication, single JSON allocation via arena.
 - Shared library export (`zigquicheh3`) for simple FFI smoke tests; unit test prints `quiche` version.
 

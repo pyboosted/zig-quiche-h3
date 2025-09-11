@@ -4,7 +4,7 @@
 - `build.zig` — Zig build script; installs to `zig-out/bin/`.
 - `src/` — main code:
   - `net/` (event loop, UDP), `quic/` (config, connection, server), `ffi/` (quiche C FFI).
-  - `examples/`: `udp_echo.zig`, `quic_server.zig`.
+  - `examples/`: `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`.
   - `main.zig` (smoke binary), `tests.zig` (unit tests).
 - `third_party/quiche/` — Cloudflare quiche submodule (do not edit).
 - `docs/` — design notes; `qlogs/` — QUIC qlog output.
@@ -29,8 +29,13 @@
 
 ## Testing Guidelines
 - Unit tests live near code or in `src/tests.zig` using `test "…" {}`; name tests with short, imperative phrases.
-- Integration: run the server, then from `third_party/quiche`: `cargo run -p quiche --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn hq-interop`.
- - JS/TS tests (if present) use Bun 1.x: setup `bun install`; run `bun test`; coverage with `bun test --coverage`. Place tests as `*.test.ts` under `scripts/` or `tests/js/`.
+- Integration: run the server, then from `third_party/quiche`: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`.
+- JS/TS E2E tests use Bun 1.x and live under `tests/e2e/`:
+  - Setup: `bun install`
+  - Run: `bun test tests/e2e`
+  - Stress: `H3_STRESS=1 bun test`
+  - Coverage: `bun test --coverage`
+  - Note: curl helpers require HTTP/3 support; otherwise use the quiche client above.
 
 ## Commit & Pull Request Guidelines
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `chore:`. Keep subject ≤72 chars; add a body for context.
@@ -39,3 +44,22 @@
 ## Security & Configuration Tips
 - Do not commit private keys; example certs live under `third_party/quiche/quiche/examples/`.
 - Prefer release builds for performance: `-Dquiche-profile=release`. When linking system libs, set `-Dlink-ssl=true` and supply libev paths if used.
+
+## Agent Tips (to build faster and safer)
+- Init & build:
+  - `git submodule update --init --recursive`
+  - Prebuild quiche once: `zig build quiche -Dquiche-profile=release`
+  - Use system quiche when available: `-Dsystem-quiche=true`
+  - Link libev for server/examples: `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…`
+- Common run targets:
+  - Smoke: `zig build run`
+  - QUIC server: `zig build quic-server -- --port 4433 --cert … --key …`
+  - QUIC dgram echo: `zig build quic-dgram-echo -- --port 4433 --cert … --key …`
+- Coding surfaces to prefer:
+  - `Response` API: `status/header/write/writeAll/end/sendTrailers` (not the deprecated sendHead/sendBody docs pattern).
+  - H3 DATAGRAM: `router.routeH3Datagram()` and `Response.sendH3Datagram()`; QUIC DATAGRAM via `QuicServer.onDatagram()` and `sendDatagram()`.
+  - Don’t touch `third_party/`.
+- Housekeeping:
+  - Run `zig fmt .` before proposing patches.
+  - Keep links canonical (no tracking params) in docs.
+  - Use `rg` for fast code/search and read files in ≤250‑line chunks when tooling limits apply.
