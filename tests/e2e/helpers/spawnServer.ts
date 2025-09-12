@@ -79,7 +79,7 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
         stdout: "pipe",
         stderr: "pipe",
         env,
-        // No need to set cwd - we're using absolute paths
+        cwd: getProjectRoot(), // Run server from project root for consistent file resolution
     });
 
     // Create cleanup function

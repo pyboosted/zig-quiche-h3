@@ -325,7 +325,7 @@ Status: Completed ✓
   - E2E: `tests/e2e/basic/h3_dgram.test.ts`
 
 Milestone 8: WebTransport (Experimental) (Day 23–25)
-Status: Completed ✓ (Server); Client planned next milestone
+Status: Experimental — feature-flagged (enable with `-Dwith-webtransport=true` + `H3_WEBTRANSPORT=1`)
 
 Delivered (server):
 - Extended CONNECT session management (`:protocol = webtransport`) negotiated via SETTINGS.
@@ -343,6 +343,7 @@ Implementation notes:
  - WT REGISTER refusal: on over‑limit or invalid `REGISTER_WEBTRANSPORT_STREAM`, the server refuses the referenced stream by issuing `STOP_SENDING` (read) and `RESET_STREAM` (write) with configurable app error codes (`wt_app_err_stream_limit`, `wt_app_err_invalid_stream`).
 
 Config / Flags:
+- Build flag: `-Dwith-webtransport=true` to compile in WT (experimental)
 - Env flags: `H3_WEBTRANSPORT=1` (enable WT/H3 settings), `H3_WT_STREAMS=1` (enable WT streams loop).
 - Server config:
   - `wt_max_streams_uni` (default 32)

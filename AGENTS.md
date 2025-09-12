@@ -13,10 +13,10 @@
 - Init deps: `git submodule update --init --recursive`.
 - Build quiche (default when not using system lib): `zig build quiche` or simply `zig build` (runs Cargo for quiche).
 - Use system quiche: `zig build -Dsystem-quiche=true`.
-- Common flags: `-Dquiche-profile=release|debug`, `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…`, `-Dlink-ssl=true`.
+- Common flags: `-Dquiche-profile=release|debug`, `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…`, `-Dlink-ssl=true`, `-Dwith-webtransport=false|true` (default: true).
 - Build binary: `zig build` → `zig-out/bin/zig-quiche-h3`.
 - Smoke app: `zig build run` (prints quiche version).
-- Examples:
+- Examples (require `-Dwith-libev=true`):
   - UDP echo: `zig build echo` → send with `nc -u localhost 4433`.
   - QUIC server: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
 - Tests: `zig build test` or `zig test src/tests.zig`.
@@ -66,6 +66,7 @@
 - Coding surfaces to prefer:
   - `Response` API: `status/header/write/writeAll/end/sendTrailers` (not the deprecated sendHead/sendBody docs pattern).
   - H3 DATAGRAM: `router.routeH3Datagram()` and `Response.sendH3Datagram()`; QUIC DATAGRAM via `QuicServer.onDatagram()` and `sendDatagram()`.
+  - WebTransport: compiled in by default; use `H3_WEBTRANSPORT=1` at runtime. WT shims live under `src/quic/server/webtransport.zig`.
   - Don’t touch `third_party/`.
 - Housekeeping:
   - Run `zig fmt .` before proposing patches.

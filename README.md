@@ -37,10 +37,10 @@ A Zig exploration of QUIC/HTTP‑3 built on Cloudflare’s quiche via its C FFI.
   - Useful flags: `-Dquiche-profile=release|debug`, `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…`, `-Dlink-ssl=true`
 - Run smoke app: `zig build run` (prints `quiche` version)
 - UDP echo: `zig build echo` then send with `nc -u localhost 4433`
-- QUIC server: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`
+- QUIC server (requires `-Dwith-libev=true`): `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`
   - Test with quiche client: `cd third_party/quiche && cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`
   - Test JSON endpoints: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/api/users --no-verify --alpn h3`
- - QUIC DATAGRAM echo example: `zig build quic-dgram-echo -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`
+ - QUIC DATAGRAM echo example (requires `-Dwith-libev=true`): `zig build quic-dgram-echo -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`
  - HTTP/3 DATAGRAM route: server example exposes `GET /h3dgram/echo` with an H3 DATAGRAM echo callback
 - Tests: `zig build test`
 
@@ -49,6 +49,12 @@ A Zig exploration of QUIC/HTTP‑3 built on Cloudflare’s quiche via its C FFI.
 - Run: `bun test tests/e2e`
 - Stress: `H3_STRESS=1 bun test` (longer run)
 - Note: curl must include HTTP/3 support if you use curl-based helpers; otherwise use the quiche client above.
+
+## WebTransport (experimental)
+- Built-in by default; disable with `-Dwith-webtransport=false`.
+- At runtime, set `H3_WEBTRANSPORT=1` to enable Extended CONNECT negotiation.
+- Optional stream loops: `H3_WT_STREAMS=1` and `H3_WT_BIDI=1`.
+- Streams: incoming uni streams are bound by parsing the WT preface (0x54 + session_id); incoming bidi streams (when enabled) are bound via bidi preface (0x41 + session_id). Server can open with `openWtUniStream/openWtBidiStream` and send with `sendWtStream`/`sendWtStreamAll`; read with `readWtStreamAll`.
 
 ## Roadmap
 - M1: Event loop + UDP echo (done)

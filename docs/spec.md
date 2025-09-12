@@ -16,7 +16,7 @@ Where relevant I cite `quiche` sources and docs so you can jump straight to the 
   * **HTTP endpoints/handlers** for request/response streaming,
   * **HTTP/3 Datagram** (QUIC DATAGRAM) callbacks.
 * Provides **full HTTP/3 support to the extent `quiche` exposes it**: ALPN `h3`, HTTP/3 handshake & control streams, QPACK, headers/data/trailers, GOAWAY, priority update, stats, and HTTP/3 DATAGRAMs (when negotiated). (See `quiche::h3` module and the `Connection` methods and events we mirror. ([QUIC Docs][1]))
-* Adds initial, experimental support for **WebTransport over HTTP/3**: accept/establish sessions via Extended CONNECT and support session-bound DATAGRAMs. Note: peer-initiated WebTransport streams are not surfaced by the current `quiche` C FFI; stream support is deferred (see 5.7).
+* Adds initial, experimental support for **WebTransport over HTTP/3**: accept/establish sessions via Extended CONNECT and support session-bound DATAGRAMs. Note: peer-initiated WebTransport streams are not surfaced by the current `quiche` C FFI; stream support is limited (see 5.7). WebTransport is compiled in by default; you can opt out at build time.
 * Ships with a comprehensive test suite and **bench harness**, and includes interop & conformance tests using `quiche`’s own apps/tools and the community **QUIC Interop Runner**. ([Docs.rs][2], [GitHub][3])
 
 **Non-goals (phase 1).**
@@ -33,7 +33,7 @@ Where relevant I cite `quiche` sources and docs so you can jump straight to the 
 * **Zig**: 0.15.1. ([Zig Programming Language][7])
 * **quiche**: 0.24.6 (pinned submodule). Build with **`--features ffi`** to export the C ABI (`libquiche.a`), optionally **`pkg-config-meta`** for `quiche.pc`. `quiche` offers an **HTTP/3 module** (`quiche::h3`) and a **thin C API** in `include/quiche.h`. ([Docs.rs][2])
 * **TLS**: `quiche` uses **BoringSSL** by default (auto-built by Cargo) or can be built with **quictls/openssl** feature (0‑RTT not supported with openssl vendor). We follow `quiche` choice. ([Docs.rs][2])
-* **libev**: used as the default event loop backend (mirrors quiche C examples); alternative raw epoll/kqueue backend remains an option. Link as a system library (`ev`).
+* **libev**: used as the default event loop backend (mirrors quiche C examples); alternative raw epoll/kqueue backend remains an option. Link as a system library (`ev`). Example binaries that depend on the event loop are only built when you pass `-Dwith-libev=true`.
 
 ---
 
@@ -92,13 +92,14 @@ zig build -Dsystem-quiche=true
 Common flags:
 
 - `-Dquiche-profile=release|debug` to select Cargo profile when building vendored quiche.
-- `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…` to link libev as the default event backend.
+- `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…` to link libev and build example binaries (server, echo, etc.). Without this flag, examples are skipped, and core library/tests still build.
+- `-Dwith-webtransport=false|true` to toggle WebTransport features (default: true).
 - `-Dlink-ssl=true` when linking against OpenSSL/quictls instead of vendored BoringSSL.
 
 Examples and tests:
 
 - UDP echo: `zig build echo` (send with `nc -u localhost 4433`).
-- QUIC server example: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
+- QUIC server example (requires `-Dwith-libev=true`): `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
 - Unit tests: `zig build test` or `zig test src/tests.zig`.
 
 > **Why C FFI (not Rust JNI/`extern "Rust"`)?** The `quiche` team officially supports a **thin C API** consistent with the Rust API. Zig’s C-ABI interop is first-class and stable, so this is the cleanest, most robust bridge. ([GitHub][8])
@@ -344,21 +345,25 @@ This mirrors the **Rust example flow**—application configures QUIC/H3, `with_t
 
 ### 5.7 WebTransport over H3 (experimental)
 
+Note: WebTransport is experimental and compiled in by default. You can disable it with `-Dwith-webtransport=false`. At runtime, set `H3_WEBTRANSPORT=1` to negotiate Extended CONNECT. Optional stream loops can be enabled with `H3_WT_STREAMS=1` and bidirectional binding with `H3_WT_BIDI=1`.
+
 What works now (with `quiche` 0.24.6 C FFI):
 
 - Detect and accept WebTransport sessions using Extended CONNECT:
   - Gate on `H3Options.enable_extended_connect` and peer support via `quiche_h3_extended_connect_enabled_by_peer()`.
-  - On `:method = CONNECT` with `:protocol = webtransport`, route to a `WebTransportHandler` and accept the session by replying `:status = 200` on the request stream.
+  - On `:method = CONNECT` with `:protocol = webtransport`, route to a WebTransport route and accept the session by replying `:status = 200` on the request stream.
 - Session-bound DATAGRAMs:
   - When `quiche_h3_dgram_enabled_by_peer(conn)` is true, encode the H3 DATAGRAM flow-id using the WebTransport Session ID (the CONNECT request stream ID) and send/receive via `quiche_conn_dgram_send/recv`.
   - We surface these to the application through `WebTransportSession.sendDatagram()` and the existing datagram hook, associating payloads with the session.
+- Experimental WT streams (implemented in-library):
+  - Unidirectional: we parse the WT uni-stream preface `[0x54][session_id]` from peer‑initiated client uni streams (skipping H3 control/QPACK). On success we bind the stream to the session and invoke `on_wt_uni_open` then deliver data via `on_wt_stream_data`/`on_wt_stream_closed`.
+  - Bidirectional: when `H3_WT_BIDI=1`, we parse the bidi preface `[0x41][session_id]` on client‑initiated bidi streams and bind similarly. Server can open outgoing uni/bidi via `openWtUniStream/openWtBidiStream` (which write the preface) and send with `sendWtStream`/`sendWtStreamAll`; reads use `readWtStreamAll`.
+  - Per‑session limits are enforced via `wt_max_streams_uni` and `wt_max_streams_bidi` in `ServerConfig`. Backpressure is handled with per‑stream pending buffers and write‑quota `wt_write_quota_per_tick`.
 
-Limitations (upstream constraints):
+Notes and caveats (upstream constraints we work around):
 
-- WebTransport bidirectional/unidirectional streams are not exposed by the `quiche` H3 C FFI:
-  - Unknown unidirectional stream types are currently ignored by `quiche::h3` (see `stream::Type::Unknown` handling), and there is no C FFI to receive such streams.
-  - The H3 C API lacks a way to allocate new application streams for WT (beyond standard request/response), and server-initiated WT streams require writing a specific stream-type varint not supported by the H3 API.
-- As a result, our initial WT support is limited to session establishment + DATAGRAMs. Stream support is deferred until the upstream H3 API exposes extension streams/events, or we carry a patched `quiche`.
+- The `quiche` H3 C FFI does not surface extension stream events; we therefore scan raw QUIC stream iterators to detect incoming WT streams and parse the varint prefaces ourselves. This is an implementation detail that may evolve as upstream APIs grow.
+- We do not use capsules; bidi binding is performed via the per‑stream preface, and uni binding via the uni stream type preface.
 
 ### 5.5 HTTP/3 features covered (per `quiche`)
 

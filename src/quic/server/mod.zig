@@ -1,0 +1,1134 @@
+const std = @import("std");
+const quiche = @import("quiche");
+const connection = @import("connection");
+const config_mod = @import("config");
+const EventLoop = @import("event_loop").EventLoop;
+const udp = @import("udp");
+const h3 = @import("h3");
+const h3_datagram = @import("h3").datagram;
+const http = @import("http");
+const server_logging = @import("logging.zig");
+
+const c = quiche.c;
+const posix = std.posix;
+
+// Debug helpers are provided by server/logging.zig
+
+// Request state for streaming bodies
+pub const RequestState = struct {
+    arena: std.heap.ArenaAllocator,
+    request: http.Request,
+    response: http.Response,
+    handler: http.Handler,
+    body_complete: bool = false,
+    handler_invoked: bool = false, // Track if handler was already called
+    is_streaming: bool = false,
+
+    // User data for streaming handlers to store context
+    user_data: ?*anyopaque = null,
+
+    // Push-mode streaming callbacks (include Response pointer for bidirectional streaming)
+    on_headers: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
+    on_body_chunk: ?*const fn (req: *http.Request, res: *http.Response, chunk: []const u8) anyerror!void = null,
+    on_body_complete: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
+
+    // H3 DATAGRAM callback for request-associated datagrams
+    on_h3_dgram: ?*const fn (req: *http.Request, res: *http.Response, payload: []const u8) anyerror!void = null,
+
+    // WebTransport session flag
+    is_webtransport: bool = false,
+};
+
+// WT uni-stream preface accumulator lives in the WT facade now
+
+pub const OnDatagram = *const fn (server: *QuicServer, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) anyerror!void;
+
+pub const QuicServer = struct {
+    allocator: std.mem.Allocator,
+    config: config_mod.ServerConfig,
+    quiche_config: quiche.Config,
+    connections: connection.ConnectionTable,
+    event_loop: *EventLoop,
+    socket_v4: ?udp.UdpSocket = null,
+    socket_v6: ?udp.UdpSocket = null,
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    local_conn_id_len: usize = 16, // Use 16 bytes for our SCIDs
+    send_buf: [2048]u8 = undefined, // Buffer for sending packets
+    conn_id_seed: [32]u8, // HMAC-SHA256 key for connection ID derivation (like Rust)
+    timeout_timer_started: bool = false, // Track if periodic timer for checking connection timeouts is started
+
+    // HTTP/3 configuration
+    h3_config: ?h3.H3Config = null,
+
+    // HTTP routing
+    router: http.Router,
+    // Track per-connection stream state using a composite key so
+    // simultaneous connections with the same stream_id (e.g., 0)
+    // don't collide.
+    stream_states: std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80),
+
+    // H3 DATAGRAM flow_id mapping lives under embedded state `h3`
+
+    // Statistics (general)
+    connections_accepted: usize = 0,
+    packets_received: usize = 0,
+    packets_sent: usize = 0,
+
+    // Embedded state
+    datagram: DatagramStats = .{},
+    h3: H3State,
+    wt: WTState,
+
+    on_datagram: ?OnDatagram = null,
+    on_datagram_user: ?*anyopaque = null,
+
+    // Feature facades (Zig 0.15.1 lacks container-scope `usingnamespace` support here)
+    const DatagramFeature = @import("datagram.zig");
+    const D = DatagramFeature.Impl(@This());
+    const H3Core = @import("h3_core.zig");
+    const H3 = H3Core.Impl(@This());
+    const WTCore = @import("webtransport.zig");
+    const WT = WTCore.Impl(@This());
+
+    /// Build-time feature toggle for WebTransport
+    pub const WithWT: bool = @import("build_options").with_webtransport;
+
+    // H3 helpers are accessed directly via the H3 facade (no wrappers)
+
+    // Type definitions for stream state tracking
+    const StreamKey = struct { conn: *connection.Connection, stream_id: u64 };
+    const StreamKeyContext = struct {
+        pub fn hash(_: StreamKeyContext, key: StreamKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(std.mem.asBytes(&key.conn));
+            h.update(std.mem.asBytes(&key.stream_id));
+            return h.final();
+        }
+        pub fn eql(_: StreamKeyContext, a: StreamKey, b: StreamKey) bool {
+            return a.conn == b.conn and a.stream_id == b.stream_id;
+        }
+    };
+
+    // Type definitions for WebTransport session tracking
+    const SessionKey = struct { conn: *connection.Connection, session_id: u64 };
+    const SessionKeyContext = struct {
+        pub fn hash(_: SessionKeyContext, key: SessionKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(std.mem.asBytes(&key.conn));
+            h.update(std.mem.asBytes(&key.session_id));
+            return h.final();
+        }
+        pub fn eql(_: SessionKeyContext, a: SessionKey, b: SessionKey) bool {
+            return a.conn == b.conn and a.session_id == b.session_id;
+        }
+    };
+
+    // Embedded state structs
+    const DatagramStats = struct {
+        received: usize = 0,
+        sent: usize = 0,
+        dropped_send: usize = 0,
+    };
+
+    const H3State = struct {
+        dgram_flows: std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80),
+        dgrams_received: usize = 0,
+        dgrams_sent: usize = 0,
+        unknown_flow: usize = 0,
+        would_block: usize = 0,
+    };
+
+    const WTState = struct {
+        sessions: std.hash_map.HashMap(SessionKey, *h3.WebTransportSessionState, SessionKeyContext, 80),
+        dgram_map: std.hash_map.HashMap(FlowKey, *h3.WebTransportSessionState, FlowKeyContext, 80),
+        sessions_created: usize = 0,
+        sessions_closed: usize = 0,
+        dgrams_received: usize = 0,
+        dgrams_sent: usize = 0,
+        dgrams_would_block: usize = 0,
+        enable_streams: bool = false,
+        enable_bidi: bool = false,
+        streams: std.hash_map.HashMap(StreamKey, *h3.WebTransportSession.WebTransportStream, StreamKeyContext, 80),
+        uni_preface: std.hash_map.HashMap(StreamKey, WT.UniPreface, StreamKeyContext, 80),
+    };
+
+    // Type definitions for H3 DATAGRAM flow_id tracking
+    const FlowKey = struct { conn: *connection.Connection, flow_id: u64 };
+    const FlowKeyContext = struct {
+        pub fn hash(_: FlowKeyContext, key: FlowKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(std.mem.asBytes(&key.conn));
+            h.update(std.mem.asBytes(&key.flow_id));
+            return h.final();
+        }
+        pub fn eql(_: FlowKeyContext, a: FlowKey, b: FlowKey) bool {
+            return a.conn == b.conn and a.flow_id == b.flow_id;
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator, cfg: config_mod.ServerConfig) !*QuicServer {
+        // Validate config
+        try cfg.validate();
+
+        // Create qlog directory if needed
+        try cfg.ensureQlogDir();
+
+        // Create quiche config
+        var q_cfg = try quiche.Config.new(quiche.PROTOCOL_VERSION);
+        errdefer q_cfg.deinit();
+
+        // Load TLS certificates
+        const cert_path = try allocator.dupeZ(u8, cfg.cert_path);
+        defer allocator.free(cert_path);
+        const key_path = try allocator.dupeZ(u8, cfg.key_path);
+        defer allocator.free(key_path);
+
+        try q_cfg.loadCertChainFromPemFile(cert_path);
+        try q_cfg.loadPrivKeyFromPemFile(key_path);
+
+        // Set ALPN protocols with proper wire format
+        const alpn_wire = try quiche.encodeAlpn(allocator, cfg.alpn_protocols);
+        defer allocator.free(alpn_wire);
+        try q_cfg.setApplicationProtos(alpn_wire);
+
+        // Configure transport parameters
+        q_cfg.setMaxIdleTimeout(cfg.idle_timeout_ms);
+        q_cfg.setInitialMaxData(cfg.initial_max_data);
+        q_cfg.setInitialMaxStreamDataBidiLocal(cfg.initial_max_stream_data_bidi_local);
+        q_cfg.setInitialMaxStreamDataBidiRemote(cfg.initial_max_stream_data_bidi_remote);
+        q_cfg.setInitialMaxStreamDataUni(cfg.initial_max_stream_data_uni);
+        q_cfg.setInitialMaxStreamsBidi(cfg.initial_max_streams_bidi);
+        q_cfg.setInitialMaxStreamsUni(cfg.initial_max_streams_uni);
+        q_cfg.setMaxRecvUdpPayloadSize(cfg.max_recv_udp_payload_size);
+        q_cfg.setMaxSendUdpPayloadSize(cfg.max_send_udp_payload_size);
+
+        // Features
+        q_cfg.setDisableActiveMigration(cfg.disable_active_migration);
+        q_cfg.enablePacing(cfg.enable_pacing);
+        q_cfg.enableDgram(cfg.enable_dgram, cfg.dgram_recv_queue_len, cfg.dgram_send_queue_len);
+        q_cfg.grease(cfg.grease);
+
+        // Set congestion control
+        const cc_algo = try allocator.dupeZ(u8, cfg.cc_algorithm);
+        defer allocator.free(cc_algo);
+        if (q_cfg.setCcAlgorithmName(cc_algo)) |_| {
+            // ok
+        } else |err| {
+            std.debug.print("cc={s} unsupported ({any}); falling back to cubic\n", .{ cfg.cc_algorithm, err });
+            const fallback = try allocator.dupeZ(u8, "cubic");
+            defer allocator.free(fallback);
+            _ = q_cfg.setCcAlgorithmName(fallback) catch {};
+        }
+
+        // Create event loop
+        const loop = try EventLoop.initLibev(allocator);
+        errdefer loop.deinit();
+
+        // Create server
+        const server = try allocator.create(QuicServer);
+        errdefer allocator.destroy(server);
+
+        // Generate random HMAC seed for connection ID derivation
+        var conn_id_seed: [32]u8 = undefined;
+        std.crypto.random.bytes(&conn_id_seed);
+
+        server.* = .{
+            .allocator = allocator,
+            .config = cfg,
+            .quiche_config = q_cfg,
+            .connections = connection.ConnectionTable.init(allocator),
+            .event_loop = loop,
+            .conn_id_seed = conn_id_seed,
+            .router = http.Router.init(allocator),
+            .stream_states = std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80).init(allocator),
+            .h3 = .{ .dgram_flows = std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80).init(allocator) },
+            .wt = .{
+                .sessions = std.hash_map.HashMap(SessionKey, *h3.WebTransportSessionState, SessionKeyContext, 80).init(allocator),
+                .dgram_map = std.hash_map.HashMap(FlowKey, *h3.WebTransportSessionState, FlowKeyContext, 80).init(allocator),
+                .streams = std.hash_map.HashMap(StreamKey, *h3.WebTransportSession.WebTransportStream, StreamKeyContext, 80).init(allocator),
+                .uni_preface = std.hash_map.HashMap(StreamKey, WT.UniPreface, StreamKeyContext, 80).init(allocator),
+            },
+        };
+
+        // Create H3 config; WebTransport requires explicit build flag
+        const enable_wt_env = std.process.getEnvVarOwned(allocator, "H3_WEBTRANSPORT") catch null;
+        defer if (enable_wt_env) |wt| allocator.free(wt);
+        if (WithWT and enable_wt_env != null and std.mem.eql(u8, enable_wt_env.?, "1")) {
+            server.h3_config = try h3.H3Config.initWithWebTransport();
+            std.debug.print("WebTransport: enabled (H3_WEBTRANSPORT=1, -Dwith-webtransport=true)\n", .{});
+        } else {
+            if (!WithWT and enable_wt_env != null and std.mem.eql(u8, enable_wt_env.?, "1")) {
+                std.debug.print("WebTransport: disabled at build time; ignoring H3_WEBTRANSPORT=1\n", .{});
+            }
+            server.h3_config = try h3.H3Config.initWithDefaults();
+        }
+        errdefer if (server.h3_config) |*h| h.deinit();
+
+        // Enable WT streams if requested and feature compiled
+        const enable_wts = std.process.getEnvVarOwned(allocator, "H3_WT_STREAMS") catch null;
+        defer if (enable_wts) |wts| allocator.free(wts);
+        server.wt.enable_streams = (WithWT and enable_wts != null and std.mem.eql(u8, enable_wts.?, "1"));
+        if (enable_wts != null and std.mem.eql(u8, enable_wts.?, "1") and !WithWT) {
+            std.debug.print("WebTransport Streams: disabled at build time; ignoring H3_WT_STREAMS=1\n", .{});
+        } else if (server.wt.enable_streams) {
+            std.debug.print("WebTransport Streams: enabled (H3_WT_STREAMS=1)\n", .{});
+        }
+
+        // Enable WT bidi streams if requested and feature compiled
+        const enable_wtb = std.process.getEnvVarOwned(allocator, "H3_WT_BIDI") catch null;
+        defer if (enable_wtb) |wb| allocator.free(wb);
+        server.wt.enable_bidi = (WithWT and enable_wtb != null and std.mem.eql(u8, enable_wtb.?, "1"));
+        if (enable_wtb != null and std.mem.eql(u8, enable_wtb.?, "1") and !WithWT) {
+            std.debug.print("WebTransport Bidi Streams: disabled at build time; ignoring H3_WT_BIDI=1\n", .{});
+        } else if (server.wt.enable_bidi) {
+            std.debug.print("WebTransport Bidi Streams: enabled (H3_WT_BIDI=1)\n", .{});
+        }
+
+        // Enable debug logging if requested
+        if (cfg.enable_debug_logging) {
+            try quiche.enableDebugLogging(server_logging.debugLog, &server.config);
+        }
+
+        return server;
+    }
+
+    // Callback used by WebTransport sessions to report successful DATAGRAM sends
+    fn wtOnDatagramSent(ctx: *anyopaque, _bytes: usize) void {
+        _ = _bytes; // currently unused; future: track bytes sent
+        const self: *QuicServer = @ptrCast(@alignCast(ctx));
+        self.wt.dgrams_sent += 1;
+    }
+
+    pub fn deinit(self: *QuicServer) void {
+        self.stop();
+
+        // Clean up connections (including their H3 connections)
+        var it = self.connections.map.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.http3) |h3_ptr| {
+                const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
+                h3_conn.deinit();
+                self.allocator.destroy(h3_conn);
+            }
+        }
+        self.connections.deinit();
+
+        // Clean up stream states
+        var stream_iter = self.stream_states.iterator();
+        while (stream_iter.next()) |entry| {
+            entry.value_ptr.*.response.deinit();
+            entry.value_ptr.*.arena.deinit();
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.stream_states.deinit();
+
+        // Clean up H3 DATAGRAM flows (no values to free - they point to RequestState already freed above)
+        self.h3.dgram_flows.deinit();
+
+        // Clean up WebTransport sessions
+        var wt_it = self.wt.sessions.iterator();
+        while (wt_it.next()) |entry| {
+            entry.value_ptr.*.deinit(self.allocator);
+        }
+        self.wt.sessions.deinit();
+
+        // Clean up WebTransport datagram map (values already freed above)
+        self.wt.dgram_map.deinit();
+
+        // Clean up WT streams
+        var it_ws = self.wt.streams.iterator();
+        while (it_ws.next()) |entry| {
+            const s = entry.value_ptr.*;
+            s.allocator.destroy(s);
+        }
+        self.wt.streams.deinit();
+        self.wt.uni_preface.deinit();
+
+        // Clean up router
+        self.router.deinit();
+
+        if (self.h3_config) |*h| h.deinit();
+        self.quiche_config.deinit();
+        self.event_loop.deinit();
+        if (self.socket_v4) |*s| s.*.close();
+        if (self.socket_v6) |*s| s.*.close();
+        self.allocator.destroy(self);
+    }
+
+    /// Register a QUIC DATAGRAM handler
+    pub fn onDatagram(self: *QuicServer, cb: OnDatagram, user: ?*anyopaque) void {
+        D.onDatagram(self, cb, user);
+    }
+
+    /// Send a QUIC DATAGRAM on a connection, tracking counters
+    pub fn sendDatagram(self: *QuicServer, conn: *connection.Connection, data: []const u8) !void {
+        return D.sendDatagram(self, conn, data);
+    }
+
+    pub fn bind(self: *QuicServer) !void {
+        // Try to bind sockets based on configured bind_addr
+        var sockets: udp.BindResult = .{};
+        if (std.mem.eql(u8, self.config.bind_addr, "127.0.0.1") or std.mem.eql(u8, self.config.bind_addr, "localhost")) {
+            // Prefer loopback-only in restricted environments (CI/sandbox)
+            sockets.v6 = udp.bindUdp6Loopback(self.config.bind_port, true) catch null;
+            sockets.v4 = udp.bindUdp4Loopback(self.config.bind_port, true) catch null;
+        } else {
+            sockets = udp.bindAny(self.config.bind_port, true);
+        }
+        if (!sockets.hasAny()) return error.FailedToBind;
+
+        if (sockets.v6) |sock| {
+            self.socket_v6 = sock;
+            // Enlarge socket buffers for high-throughput scenarios
+            udp.setRecvBufferSize(sock.fd, 16 * 1024 * 1024) catch {};
+            udp.setSendBufferSize(sock.fd, 16 * 1024 * 1024) catch {};
+            try self.event_loop.addUdpIo(sock.fd, onUdpReadable, self);
+            std.debug.print("QUIC server bound to [::]:{d}\n", .{self.config.bind_port});
+        }
+
+        if (sockets.v4) |sock| {
+            self.socket_v4 = sock;
+            udp.setRecvBufferSize(sock.fd, 16 * 1024 * 1024) catch {};
+            udp.setSendBufferSize(sock.fd, 16 * 1024 * 1024) catch {};
+            try self.event_loop.addUdpIo(sock.fd, onUdpReadable, self);
+            std.debug.print("QUIC server bound to 0.0.0.0:{d}\n", .{self.config.bind_port});
+        }
+
+        // Start periodic timer for checking connection timeouts (50ms interval)
+        try self.event_loop.addTimer(0.05, 0.05, onTimeoutTimer, self);
+        self.timeout_timer_started = true;
+    }
+
+    pub fn run(self: *QuicServer) !void {
+        self.running.store(true, .release);
+
+        // Add signal handlers for graceful shutdown
+        try self.event_loop.addSigint(onSignal, self);
+        try self.event_loop.addSigterm(onSignal, self);
+
+        std.debug.print("QUIC server running (quiche {s})\n", .{quiche.version()});
+        std.debug.print("Test with: cargo run -p quiche --bin quiche-client -- https://127.0.0.1:{d}/ --no-verify --alpn hq-interop\n", .{self.config.bind_port});
+
+        self.event_loop.run();
+    }
+
+    pub fn stop(self: *QuicServer) void {
+        if (self.running.swap(false, .acq_rel)) {
+            // Note: libev will clean up timers when loop stops
+            self.event_loop.stop();
+        }
+    }
+
+    /// Register a route with the HTTP router
+    pub fn route(self: *QuicServer, method: http.Method, pattern: []const u8, handler: http.Handler) !void {
+        try self.router.route(method, pattern, handler);
+    }
+
+    /// Open a server-initiated WebTransport unidirectional stream for a session.
+    /// Writes the WT uni-stream preface (type + session_id). If backpressured,
+    /// the preface is queued and flushed when writable.
+    pub fn openWtUniStream(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        sess_state: *h3.WebTransportSessionState,
+    ) !*h3.WebTransportSession.WebTransportStream {
+        return WT.openWtUniStream(self, conn, sess_state);
+    }
+
+    /// Open a server-initiated WebTransport bidirectional stream for a session.
+    /// Writes the spec-accurate bidi preface [0x41][session_id] to bind the stream
+    /// to the session (no capsules). Callers may then use sendWtStream() to write data.
+    pub fn openWtBidiStream(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        sess_state: *h3.WebTransportSessionState,
+    ) !*h3.WebTransportSession.WebTransportStream {
+        return WT.openWtBidiStream(self, conn, sess_state);
+    }
+
+    // No capsule registration path; bidi binding uses per-stream preface.
+
+    /// Register a streaming route with push-mode callbacks
+    pub fn routeStreaming(
+        self: *QuicServer,
+        method: http.Method,
+        pattern: []const u8,
+        callbacks: struct {
+            on_headers: ?http.OnHeaders = null,
+            on_body_chunk: ?http.OnBodyChunk = null,
+            on_body_complete: ?http.OnBodyComplete = null,
+        },
+    ) !void {
+        try self.router.routeStreaming(method, pattern, .{
+            .on_headers = callbacks.on_headers,
+            .on_body_chunk = callbacks.on_body_chunk,
+            .on_body_complete = callbacks.on_body_complete,
+        });
+    }
+
+    fn onUdpReadable(fd: posix.socket_t, _revents: u32, user_data: *anyopaque) void {
+        _ = _revents;
+        const self: *QuicServer = @ptrCast(@alignCast(user_data));
+        self.processPackets(fd) catch |err| {
+            std.debug.print("Error processing packets: {}\n", .{err});
+        };
+    }
+
+    fn onTimeoutTimer(user_data: *anyopaque) void {
+        const self: *QuicServer = @ptrCast(@alignCast(user_data));
+        self.checkTimeouts() catch |err| {
+            std.debug.print("Error checking timeouts: {}\n", .{err});
+        };
+    }
+
+    // Derive connection ID using HMAC-SHA256 (like Rust implementation)
+    fn deriveConnId(self: *const QuicServer, dcid: []const u8) [16]u8 {
+        var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&self.conn_id_seed);
+        hmac.update(dcid);
+        var hash: [32]u8 = undefined;
+        hmac.final(&hash);
+
+        // Take first 16 bytes of HMAC output as connection ID
+        var conn_id: [16]u8 = undefined;
+        @memcpy(&conn_id, hash[0..16]);
+        return conn_id;
+    }
+
+    fn processPackets(self: *QuicServer, fd: posix.socket_t) !void {
+        // Batch receive to reduce syscall overhead
+        var bufs: [udp.MAX_BATCH][2048]u8 = undefined;
+        var views: [udp.MAX_BATCH]udp.RecvView = undefined;
+
+        while (true) {
+            // Prepare slices for this batch
+            var slices: [udp.MAX_BATCH][]u8 = undefined;
+            for (&slices, 0..) |*s, i| s.* = bufs[i][0..];
+
+            const nrecv = try udp.recvBatch(fd, slices[0..], views[0..]);
+            if (nrecv == 0) break; // WouldBlock or no data
+
+            self.packets_received += nrecv;
+
+            // Get local address once per batch (used for recv_info.to)
+            var local_addr: posix.sockaddr.storage = undefined;
+            var local_addr_len: posix.socklen_t = @sizeOf(@TypeOf(local_addr));
+            _ = posix.getsockname(fd, @ptrCast(&local_addr), &local_addr_len) catch {
+                // Failed to get local address; skip this batch
+                continue;
+            };
+
+            // Track touched connections to drain once per conn
+            var touched: [udp.MAX_BATCH]*connection.Connection = undefined;
+            var touched_len: usize = 0;
+
+            var i: usize = 0;
+            while (i < nrecv) : (i += 1) {
+                const pkt_buf = bufs[i][0..views[i].len];
+                var peer_addr = views[i].addr;
+                const peer_addr_len = views[i].addr_len;
+
+                // Parse QUIC header
+                var dcid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
+                var scid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
+                var dcid_len: usize = dcid.len;
+                var scid_len: usize = scid.len;
+                var version: u32 = 0;
+                var pkt_type: u8 = 0;
+                var token: [256]u8 = undefined;
+                var token_len: usize = token.len;
+
+                quiche.headerInfo(
+                    pkt_buf,
+                    self.local_conn_id_len,
+                    &version,
+                    &pkt_type,
+                    &scid,
+                    &scid_len,
+                    &dcid,
+                    &dcid_len,
+                    &token,
+                    &token_len,
+                ) catch {
+                    // Failed to parse packet header, skip
+                    continue;
+                };
+
+                // First, try to look up connection by the DCID as-is
+                // This handles subsequent packets where client uses our SCID as DCID
+                var key_dcid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
+                @memcpy(key_dcid[0..dcid_len], dcid[0..dcid_len]);
+
+                var key = connection.ConnectionKey{
+                    .dcid = key_dcid,
+                    .dcid_len = @intCast(dcid_len),
+                    .family = @as(*const posix.sockaddr, @ptrCast(&peer_addr)).family,
+                };
+
+                var conn = self.connections.get(key);
+
+                // Derive connection ID using HMAC (like Rust)
+                const derived_conn_id = self.deriveConnId(dcid[0..dcid_len]);
+
+                // If not found by DCID, try HMAC-derived ID (for first Initial packet)
+                if (conn == null) {
+                    @memcpy(key_dcid[0..16], &derived_conn_id);
+                    key = connection.ConnectionKey{
+                        .dcid = key_dcid,
+                        .dcid_len = 16,
+                        .family = @as(*const posix.sockaddr, @ptrCast(&peer_addr)).family,
+                    };
+                    conn = self.connections.get(key);
+                }
+
+                const is_new_conn = (conn == null);
+
+                if (is_new_conn) {
+                    // Only create new connections for Initial packets (type 1)
+                    // Other packet types should have an existing connection
+                    if (pkt_type != quiche.PacketType.Initial) {
+                        // Not an Initial packet but no connection found - drop it
+                        continue;
+                    }
+
+                    // Check if version is supported BEFORE creating connection
+                    if (!quiche.versionIsSupported(version)) {
+                        // Send version negotiation packet
+                        const vneg_len = quiche.negotiateVersion(
+                            scid[0..scid_len],
+                            dcid[0..dcid_len],
+                            &self.send_buf,
+                        ) catch {
+                            continue;
+                        };
+
+                        _ = posix.sendto(fd, self.send_buf[0..vneg_len], 0, @ptrCast(&peer_addr), peer_addr_len) catch {};
+                        continue; // Don't create connection for unsupported versions
+                    }
+
+                    // Only create connection for supported versions
+                    conn = try self.acceptConnection(
+                        &peer_addr,
+                        peer_addr_len,
+                        dcid[0..dcid_len],
+                        derived_conn_id, // Use HMAC-derived ID as our SCID
+                        fd,
+                        pkt_buf, // Pass the initial packet
+                    );
+                    if (conn == null) continue;
+
+                    // Initial packet was already processed in acceptConnection
+                    // Fall through to process H3 and writable streams
+                } else {
+                    // Process packet with existing connection
+                    const recv_info = c.quiche_recv_info{
+                        .from = @ptrCast(&peer_addr),
+                        .from_len = peer_addr_len,
+                        .to = @ptrCast(&local_addr),
+                        .to_len = local_addr_len,
+                    };
+
+                    _ = conn.?.conn.recv(pkt_buf, &recv_info) catch |err| {
+                        if (err == error.Done) {
+                            // This is normal - just means no more data to process
+                        } else if (err != error.CryptoFail) {
+                            // Log non-crypto errors (crypto errors are common during handshake)
+                            std.debug.print("quiche_conn_recv failed: {}\n", .{err});
+                        }
+                        // Don't skip to next packet - fall through to check connection state
+                    };
+                }
+
+                // Check if handshake completed
+                if (conn.?.conn.isEstablished() and !conn.?.handshake_logged) {
+                    var hex_buf: [40]u8 = undefined;
+                    const hex_dcid = try connection.formatCid(dcid[0..dcid_len], &hex_buf);
+
+                    // Build complete message first, then print once
+                    if (conn.?.conn.applicationProto()) |proto| {
+                        std.debug.print("✓ Handshake complete! DCID: {s}, ALPN: {s}\n", .{ hex_dcid, proto });
+
+                        // Create H3 connection if ALPN is "h3"
+                        if (std.mem.eql(u8, proto, "h3") and conn.?.http3 == null) {
+                            if (self.h3_config) |*h3_cfg| {
+                                const h3_conn = try self.allocator.create(h3.H3Connection);
+                                h3_conn.* = try h3.H3Connection.newWithTransport(
+                                    self.allocator,
+                                    &conn.?.conn,
+                                    h3_cfg,
+                                );
+                                conn.?.http3 = h3_conn;
+                                std.debug.print("✓ HTTP/3 connection created for DCID: {s}\n", .{hex_dcid});
+                            }
+                        } else if (!std.mem.eql(u8, proto, "h3")) {
+                            // Log when we're not using H3 (e.g., hq-interop)
+                            std.debug.print("  ALPN fallback: using {s} instead of h3\n", .{proto});
+                        }
+                    } else {
+                        std.debug.print("✓ Handshake complete! DCID: {s}\n", .{hex_dcid});
+                    }
+
+                    conn.?.handshake_logged = true;
+                }
+
+                // Record touched connection for post-batch processing (deduplicate crudely)
+                if (touched_len < touched.len) {
+                    var seen = false;
+                    var t: usize = 0;
+                    while (t < touched_len) : (t += 1) {
+                        if (touched[t] == conn.?) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (!seen) {
+                        touched[touched_len] = conn.?;
+                        touched_len += 1;
+                    }
+                }
+            }
+
+            // After processing the batch, walk touched connections once
+            var k: usize = 0;
+            while (k < touched_len) : (k += 1) {
+                const cconn = touched[k];
+                if (cconn.http3 != null) {
+                    H3.processH3(self, cconn) catch |err| {
+                        if (err != quiche.h3.Error.StreamBlocked) {
+                            std.debug.print("H3 processing error: {}\n", .{err});
+                        }
+                    };
+                }
+                // Drain any QUIC DATAGRAMs
+                D.processDatagrams(self, cconn) catch |err| {
+                    std.debug.print("Error processing datagrams: {}\n", .{err});
+                };
+                // Process WT streams (experimental) only when enabled
+                if (self.wt.enable_streams and self.wt.sessions.count() > 0) {
+                    WT.processReadableWtStreams(self, cconn) catch |err| {
+                        std.debug.print("Error processing WT streams: {}\n", .{err});
+                    };
+                }
+                H3.processWritableStreams(self, cconn) catch |err| {
+                    std.debug.print("Error processing writable streams: {}\n", .{err});
+                };
+                if (self.wt.enable_streams and self.wt.sessions.count() > 0) {
+                    WT.processWritableWtStreams(self, cconn) catch |err| {
+                        std.debug.print("Error processing WT writable streams: {}\n", .{err});
+                    };
+                }
+                try self.drainEgress(cconn);
+                const timeout_ms2 = cconn.conn.timeoutAsMillis();
+                try self.updateTimer(cconn, timeout_ms2);
+                if (cconn.conn.isClosed()) {
+                    self.closeConnection(cconn);
+                }
+            }
+        }
+    }
+
+    fn acceptConnection(
+        self: *QuicServer,
+        peer_addr: *const posix.sockaddr.storage,
+        peer_addr_len: posix.socklen_t,
+        dcid: []const u8,
+        scid: [16]u8, // Use the HMAC-derived ID as our SCID
+        fd: posix.socket_t,
+        initial_packet: []const u8, // Add the initial packet to process
+    ) !?*connection.Connection {
+        // Use provided SCID (HMAC-derived) instead of generating random one
+        const new_scid = scid;
+
+        // Get local address
+        var local_addr: posix.sockaddr.storage = undefined;
+        var local_addr_len: posix.socklen_t = @sizeOf(@TypeOf(local_addr));
+        _ = posix.getsockname(fd, @ptrCast(&local_addr), &local_addr_len) catch {
+            return null;
+        };
+
+        // Accept with quiche
+        var q_conn = quiche.accept(
+            &new_scid,
+            null, // No ODCID for now
+            @ptrCast(&local_addr),
+            local_addr_len,
+            @ptrCast(peer_addr),
+            peer_addr_len,
+            &self.quiche_config,
+        ) catch |err| {
+            std.debug.print("quiche_accept failed: {}\n", .{err});
+            return null;
+        };
+
+        // Set up qlog immediately
+        var qlog_path: ?[]u8 = null;
+        if (self.config.qlog_dir != null) {
+            const path = self.config.createQlogPath(self.allocator, &new_scid) catch null;
+            if (path) |p| {
+                // Create persistent strings for qlog - they need to remain valid for the connection lifetime
+                const title = try self.allocator.dupeZ(u8, "quic-server");
+                errdefer self.allocator.free(title);
+                const desc = try self.allocator.dupeZ(u8, "Zig QUIC Server M3 - HTTP/3");
+                errdefer self.allocator.free(desc);
+
+                if ((&q_conn).setQlogPath(p, title[0..title.len :0], desc[0..desc.len :0])) {
+                    qlog_path = p;
+                    std.debug.print("QLOG enabled: {s}\n", .{p});
+                    // quiche copies the strings internally, so we can free them now
+                    self.allocator.free(title);
+                    self.allocator.free(desc);
+                    // Note: We keep 'p' allocated and pass ownership to the connection
+                } else {
+                    // QLOG setup failed, clean up
+                    self.allocator.free(p);
+                    self.allocator.free(title);
+                    self.allocator.free(desc);
+                    std.debug.print("QLOG setup failed for connection\n", .{});
+                }
+            }
+        }
+
+        // Create connection object
+        const conn = try connection.createConnection(
+            self.allocator,
+            q_conn,
+            new_scid,
+            dcid,
+            peer_addr.*,
+            peer_addr_len,
+            self.config.bind_port,
+            fd,
+            qlog_path,
+        );
+
+        // Add to table
+        try self.connections.put(conn);
+        self.connections_accepted += 1;
+
+        // CRITICAL: Process the initial packet immediately after accept!
+        // This is what the Rust implementation does - call recv() right after accept()
+        const recv_info = c.quiche_recv_info{
+            .from = @ptrCast(@constCast(peer_addr)),
+            .from_len = peer_addr_len,
+            .to = @ptrCast(&local_addr),
+            .to_len = local_addr_len,
+        };
+
+        // recv needs a mutable buffer, so we need to copy
+        var packet_buf: [2048]u8 = undefined;
+        const packet_len = @min(initial_packet.len, packet_buf.len);
+        @memcpy(packet_buf[0..packet_len], initial_packet[0..packet_len]);
+
+        _ = conn.conn.recv(packet_buf[0..packet_len], &recv_info) catch {
+            // Don't fail connection creation - let it continue
+            return conn;
+        };
+
+        return conn;
+    }
+
+    fn drainEgress(self: *QuicServer, conn: *connection.Connection) !void {
+        // Batch up to udp.MAX_BATCH packets per flush
+        var out_bufs: [udp.MAX_BATCH][2048]u8 = undefined;
+        var send_views: [udp.MAX_BATCH]udp.SendView = undefined;
+        var count: usize = 0;
+
+        while (true) {
+            var send_info: c.quiche_send_info = undefined;
+
+            const written = conn.conn.send(&out_bufs[count], &send_info) catch |err| {
+                if (err == error.Done) break;
+                return err;
+            };
+
+            // Select destination address (path-aware)
+            const dest_ptr = if (send_info.to_len > 0)
+                @as(*const posix.sockaddr, @ptrCast(&send_info.to))
+            else
+                @as(*const posix.sockaddr, @ptrCast(&conn.peer_addr));
+            const dest_len: posix.socklen_t = if (send_info.to_len > 0) send_info.to_len else conn.peer_addr_len;
+
+            // Copy dest addr into view storage
+            var st: posix.sockaddr.storage = undefined;
+            const copy_len = @min(@as(usize, dest_len), @sizeOf(posix.sockaddr.storage));
+            @memcpy(@as([*]u8, @ptrCast(&st))[0..copy_len], @as([*]const u8, @ptrCast(dest_ptr))[0..copy_len]);
+
+            send_views[count] = .{
+                .data = out_bufs[count][0..written],
+                .addr = st,
+                .addr_len = dest_len,
+            };
+            count += 1;
+
+            if (count == udp.MAX_BATCH) {
+                self.packets_sent += try udp.sendBatch(conn.socket_fd, send_views[0..count]);
+                count = 0;
+            }
+        }
+
+        if (count > 0) {
+            self.packets_sent += try udp.sendBatch(conn.socket_fd, send_views[0..count]);
+        }
+    }
+
+    /// Send data on a WT stream with backpressure handling.
+    /// Wrapper that delegates to the WT facade.
+    pub fn sendWtStream(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        stream: *h3.WebTransportSession.WebTransportStream,
+        data: []const u8,
+        fin: bool,
+    ) !usize {
+        return WT.sendWtStream(self, conn, stream, data, fin);
+    }
+
+    /// Convenience helper: ensure all bytes are either sent immediately or
+    /// queued for later sending. Never returns WouldBlock — it enqueues the
+    /// remainder when immediate send can't progress.
+    pub fn sendWtStreamAll(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        stream: *h3.WebTransportSession.WebTransportStream,
+        data: []const u8,
+        fin: bool,
+    ) !void {
+        return WT.sendWtStreamAll(self, conn, stream, data, fin);
+    }
+
+    /// Drain all currently available bytes from a WT stream into `out`.
+    /// Returns the total bytes copied and whether a FIN was observed.
+    /// Stops when the stream reports Done (no more data now), when `out` is full,
+    /// or when FIN is received. Does not allocate.
+    pub fn readWtStreamAll(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        stream: *h3.WebTransportSession.WebTransportStream,
+        out: []u8,
+    ) !struct { n: usize, fin: bool } {
+        return WT.readWtStreamAll(self, conn, stream, out);
+    }
+
+    // ------------------------ Tests ------------------------
+    test "cleanup removes stream state and H3 DATAGRAM flow mapping" {
+        const allocator = std.testing.allocator;
+
+        // Prepare a minimal server instance with just the fields we need
+        var server: QuicServer = undefined;
+        server.allocator = allocator;
+        server.stream_states = std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80).init(allocator);
+        server.h3 = .{ .dgram_flows = std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80).init(allocator) };
+
+        // Create a dummy connection
+        const conn_ptr = try allocator.create(connection.Connection);
+        defer allocator.destroy(conn_ptr);
+
+        const test_stream_id: u64 = 5;
+        const flow_id = h3_datagram.flowIdForStream(test_stream_id);
+
+        // Create a minimal RequestState with a Response safe for deinit()
+        const state = try allocator.create(RequestState);
+        state.* = .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .request = undefined,
+            .response = .{
+                .h3_conn = @ptrFromInt(1),
+                .quic_conn = @ptrFromInt(1),
+                .stream_id = test_stream_id,
+                .headers_sent = false,
+                .ended = false,
+                .status_code = 200,
+                .header_buffer = std.ArrayList(quiche.h3.Header){},
+                .allocator = allocator,
+                .is_head_request = false,
+                .partial_response = null,
+            },
+            .handler = undefined,
+            .body_complete = false,
+            .handler_invoked = false,
+            .is_streaming = false,
+            .user_data = null,
+            .on_headers = null,
+            .on_body_chunk = null,
+            .on_body_complete = null,
+            // Set a non-null callback so cleanup also purges flow mapping
+            .on_h3_dgram = @ptrFromInt(1),
+        };
+
+        // Insert entries into both maps
+        try server.stream_states.put(.{ .conn = conn_ptr, .stream_id = test_stream_id }, state);
+        try server.h3.dgram_flows.put(.{ .conn = conn_ptr, .flow_id = flow_id }, state);
+
+        // Sanity: entries exist
+        try std.testing.expect(server.stream_states.get(.{ .conn = conn_ptr, .stream_id = test_stream_id }) != null);
+        try std.testing.expect(server.h3.dgram_flows.get(.{ .conn = conn_ptr, .flow_id = flow_id }) != null);
+
+        // Act: cleanup
+        H3.cleanupStreamState(&server, conn_ptr, test_stream_id, state);
+
+        // Verify: both entries are removed
+        try std.testing.expect(server.stream_states.get(.{ .conn = conn_ptr, .stream_id = test_stream_id }) == null);
+        try std.testing.expect(server.h3.dgram_flows.get(.{ .conn = conn_ptr, .flow_id = flow_id }) == null);
+
+        // Deinit maps
+        server.stream_states.deinit();
+        server.h3.dgram_flows.deinit();
+    }
+
+    /// Increment H3 DATAGRAM sent counter (for use by callbacks)
+    pub fn incrementH3DatagramSent(self: *QuicServer) void {
+        self.h3.dgrams_sent += 1;
+    }
+
+    fn onTimeout(self: *QuicServer, conn: *connection.Connection) void {
+        conn.conn.onTimeout();
+
+        // Drain egress after timeout using the connection's socket
+        self.drainEgress(conn) catch {};
+
+        if (conn.conn.isClosed()) {
+            self.closeConnection(conn);
+        }
+    }
+
+    fn closeConnection(self: *QuicServer, conn: *connection.Connection) void {
+        // Clean up any pending stream states for this connection first
+        var to_remove = std.ArrayList(StreamKey){};
+        defer to_remove.deinit(self.allocator);
+        {
+            var it = self.stream_states.iterator();
+            while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (key.conn == conn) {
+                    // Copy key for removal after iteration
+                    to_remove.append(self.allocator, key) catch {};
+                }
+            }
+        }
+        for (to_remove.items) |k| {
+            if (self.stream_states.fetchRemove(k)) |kv| {
+                H3.cleanupStreamState(self, conn, k.stream_id, kv.value);
+            }
+        }
+
+        // Purge any remaining H3 DATAGRAM flow mappings for this connection
+        {
+            var it2 = self.h3.dgram_flows.iterator();
+            var flow_keys_to_remove = std.ArrayList(FlowKey){};
+            defer flow_keys_to_remove.deinit(self.allocator);
+            while (it2.next()) |entry| {
+                const fk = entry.key_ptr.*;
+                if (fk.conn == conn) {
+                    flow_keys_to_remove.append(self.allocator, fk) catch {};
+                }
+            }
+            for (flow_keys_to_remove.items) |fk| {
+                _ = self.h3.dgram_flows.remove(fk);
+            }
+        }
+
+        // Clean up WebTransport sessions for this connection
+        {
+            var wt_it = self.wt.sessions.iterator();
+            var wt_keys_to_remove = std.ArrayList(SessionKey){};
+            defer wt_keys_to_remove.deinit(self.allocator);
+            while (wt_it.next()) |entry| {
+                const sk = entry.key_ptr.*;
+                if (sk.conn == conn) {
+                    wt_keys_to_remove.append(self.allocator, sk) catch {};
+                }
+            }
+            for (wt_keys_to_remove.items) |sk| {
+                if (self.wt.sessions.fetchRemove(sk)) |kv| {
+                    // Remove from datagram map
+                    _ = self.wt.dgram_map.remove(.{ .conn = conn, .flow_id = sk.session_id });
+                    // Clean up session state
+                    kv.value.deinit(self.allocator);
+                    self.wt.sessions_closed += 1;
+                }
+            }
+        }
+
+        // Log stats
+        var stats: c.quiche_stats = undefined;
+        conn.conn.stats(&stats);
+
+        var hex_buf: [40]u8 = undefined;
+        const hex_dcid = connection.formatCid(conn.dcid[0..conn.dcid_len], &hex_buf) catch "???";
+
+        // Check for peer error details
+        if (conn.conn.peerError()) |peer_err| {
+            std.debug.print("Connection closed {s}: recv={d} sent={d} lost={d} peer_error={{app={}, code=0x{x}, reason=\"{s}\"}}\n", .{
+                hex_dcid,
+                stats.recv,
+                stats.sent,
+                stats.lost,
+                peer_err.is_app,
+                peer_err.error_code,
+                peer_err.reason,
+            });
+        } else {
+            std.debug.print("Connection closed {s}: recv={d} sent={d} lost={d}\n", .{
+                hex_dcid,
+                stats.recv,
+                stats.sent,
+                stats.lost,
+            });
+        }
+
+        // Clean up H3 connection if it exists
+        if (conn.http3) |h3_ptr| {
+            const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
+            h3_conn.deinit();
+            self.allocator.destroy(h3_conn);
+            conn.http3 = null;
+        }
+
+        // Remove from table and cleanup
+        const key = conn.getKey();
+        if (self.connections.remove(key)) |removed| {
+            removed.deinit(self.allocator);
+            self.allocator.destroy(removed);
+        }
+    }
+
+    // expireIdleWtSessions lives in the WT facade
+
+    fn onSignal(signum: c_int, user_data: *anyopaque) void {
+        const self: *QuicServer = @ptrCast(@alignCast(user_data));
+        const sig_name = if (signum == posix.SIG.INT) "SIGINT" else "SIGTERM";
+        std.debug.print("\n{s} received, shutting down...\n", .{sig_name});
+
+        // Print final stats
+        std.debug.print("Stats: connections={d}, packets_in={d}, packets_out={d}\n", .{
+            self.connections_accepted,
+            self.packets_received,
+            self.packets_sent,
+        });
+
+        // QUIC DATAGRAM stats
+        std.debug.print("  QUIC dgrams: recv={d}, sent={d}, dropped_on_send={d}\n", .{
+            self.datagram.received,
+            self.datagram.sent,
+            self.datagram.dropped_send,
+        });
+
+        // H3 DATAGRAM stats
+        std.debug.print("  H3 dgrams: recv={d}, sent={d}, unknown_flow={d}, would_block={d}\n", .{
+            self.h3.dgrams_received,
+            self.h3.dgrams_sent,
+            self.h3.unknown_flow,
+            self.h3.would_block,
+        });
+
+        // WebTransport stats
+        std.debug.print("  WebTransport: sessions={{created={d}, closed={d}}}, dgrams={{recv={d}, sent={d}, would_block={d}}}\n", .{
+            self.wt.sessions_created,
+            self.wt.sessions_closed,
+            self.wt.dgrams_received,
+            self.wt.dgrams_sent,
+            self.wt.dgrams_would_block,
+        });
+
+        self.stop();
+    }
+};

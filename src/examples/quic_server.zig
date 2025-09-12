@@ -194,9 +194,14 @@ fn registerRoutes(server: *QuicServer) !void {
     if (std.process.getEnvVarOwned(server.allocator, "H3_WEBTRANSPORT")) |wt| {
         defer server.allocator.free(wt);
         if (std.mem.eql(u8, wt, "1")) {
-            try server.router.routeWebTransport("/wt/echo", wtEchoOnSession, wtEchoOnDatagram);
-            std.debug.print("WebTransport routes registered:\n", .{});
-            std.debug.print("  CONNECT /wt/echo (WebTransport session)\n", .{});
+            if (server.router.routeWebTransport("/wt/echo", wtEchoOnSession, wtEchoOnDatagram)) |_| {
+                std.debug.print("WebTransport routes registered:\n", .{});
+                std.debug.print("  CONNECT /wt/echo (WebTransport session)\n", .{});
+            } else |err| {
+                if (err == error.FeatureDisabled) {
+                    std.debug.print("WebTransport disabled at build time; skipping WT routes.\n", .{});
+                } else return err;
+            }
         }
     } else |_| {}
 
@@ -227,7 +232,6 @@ fn indexHandler(req: *http.Request, res: *http.Response) !void {
         \\<head><title>QUIC/HTTP3 Server</title></head>
         \\<body>
         \\<h1>Welcome to Zig QUIC/HTTP3 Server!</h1>
-        \\<p>Milestone 4: Dynamic Routing</p>
         \\<ul>
         \\  <li><a href="/api/users">/api/users</a> - List users</li>
         \\  <li><a href="/api/users/123">/api/users/123</a> - Get user by ID</li>
