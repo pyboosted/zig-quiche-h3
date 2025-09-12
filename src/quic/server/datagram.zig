@@ -2,12 +2,13 @@ const std = @import("std");
 const h3 = @import("h3");
 const h3_datagram = @import("h3").datagram;
 const connection = @import("connection");
+const errors = @import("errors");
 const server_logging = @import("logging.zig");
 
 pub fn Impl(comptime S: type) type {
     return struct {
         const Self = S;
-        const ServerOnDatagram = *const fn (server: *Self, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) anyerror!void;
+        const ServerOnDatagram = *const fn (server: *Self, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) errors.DatagramError!void;
 
         /// Register a QUIC DATAGRAM handler
         pub fn onDatagram(self: *Self, cb: ServerOnDatagram, user: ?*anyopaque) void {

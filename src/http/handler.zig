@@ -1,34 +1,35 @@
 const std = @import("std");
+const errors = @import("errors");
 
 // Forward declarations for Request and Response types
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 
 /// HTTP handler function type
-pub const Handler = *const fn (*Request, *Response) anyerror!void;
+pub const Handler = *const fn (*Request, *Response) errors.HandlerError!void;
 
 /// Streaming callback types for push-mode request body handling
 /// These callbacks receive Response pointer for bidirectional streaming
-pub const OnHeaders = *const fn (req: *Request, res: *Response) anyerror!void;
-pub const OnBodyChunk = *const fn (req: *Request, res: *Response, chunk: []const u8) anyerror!void;
-pub const OnBodyComplete = *const fn (req: *Request, res: *Response) anyerror!void;
+pub const OnHeaders = *const fn (req: *Request, res: *Response) errors.StreamingError!void;
+pub const OnBodyChunk = *const fn (req: *Request, res: *Response, chunk: []const u8) errors.StreamingError!void;
+pub const OnBodyComplete = *const fn (req: *Request, res: *Response) errors.StreamingError!void;
 
 /// H3 DATAGRAM callback type for request-associated datagrams
 /// Receives the request context, response for sending datagrams back, and payload
-pub const OnH3Datagram = *const fn (req: *Request, res: *Response, payload: []const u8) anyerror!void;
+pub const OnH3Datagram = *const fn (req: *Request, res: *Response, payload: []const u8) errors.DatagramError!void;
 
 /// WebTransport session handler called when a new WebTransport session is established
 /// The session pointer is opaque to avoid circular dependencies
-pub const OnWebTransportSession = *const fn (req: *Request, sess: *anyopaque) anyerror!void;
+pub const OnWebTransportSession = *const fn (req: *Request, sess: *anyopaque) errors.WebTransportError!void;
 
 /// WebTransport datagram handler for session-bound datagrams
 /// Called when a datagram is received for an active WebTransport session
-pub const OnWebTransportDatagram = *const fn (sess: *anyopaque, payload: []const u8) anyerror!void;
+pub const OnWebTransportDatagram = *const fn (sess: *anyopaque, payload: []const u8) errors.WebTransportError!void;
 
 /// WebTransport stream callbacks
-pub const OnWebTransportUniOpen = *const fn (sess: *anyopaque, stream: *anyopaque) anyerror!void;
-pub const OnWebTransportBidiOpen = *const fn (sess: *anyopaque, stream: *anyopaque) anyerror!void;
-pub const OnWebTransportStreamData = *const fn (stream: *anyopaque, data: []const u8, fin: bool) anyerror!void;
+pub const OnWebTransportUniOpen = *const fn (sess: *anyopaque, stream: *anyopaque) errors.WebTransportStreamError!void;
+pub const OnWebTransportBidiOpen = *const fn (sess: *anyopaque, stream: *anyopaque) errors.WebTransportStreamError!void;
+pub const OnWebTransportStreamData = *const fn (stream: *anyopaque, data: []const u8, fin: bool) errors.WebTransportStreamError!void;
 pub const OnWebTransportStreamClosed = *const fn (stream: *anyopaque) void;
 
 /// HTTP methods
@@ -178,21 +179,16 @@ pub const Status = enum(u16) {
     }
 };
 
-/// Map common errors to HTTP status codes
-pub fn errorToStatus(err: anyerror) u16 {
-    return switch (err) {
-        error.NotFound => @intFromEnum(Status.NotFound),
-        error.MethodNotAllowed => @intFromEnum(Status.MethodNotAllowed),
-        error.BadRequest => @intFromEnum(Status.BadRequest),
-        error.PayloadTooLarge => @intFromEnum(Status.PayloadTooLarge),
-        error.RequestHeaderFieldsTooLarge => @intFromEnum(Status.RequestHeaderFieldsTooLarge),
-        error.Unauthorized => @intFromEnum(Status.Unauthorized),
-        error.Forbidden => @intFromEnum(Status.Forbidden),
-        error.RequestTimeout => @intFromEnum(Status.RequestTimeout),
-        error.TooManyRequests => @intFromEnum(Status.TooManyRequests),
-        else => @intFromEnum(Status.InternalServerError),
-    };
-}
+/// Re-export of the centralized error->status mapper
+pub const errorToStatus = errors.errorToStatus;
+
+/// Re-export error unions for downstream convenience
+pub const HandlerError = errors.HandlerError;
+pub const StreamingError = errors.StreamingError;
+pub const DatagramError = errors.DatagramError;
+pub const WebTransportError = errors.WebTransportError;
+pub const WebTransportStreamError = errors.WebTransportStreamError;
+pub const GeneratorError = errors.GeneratorError;
 
 /// Common HTTP headers
 pub const Headers = struct {

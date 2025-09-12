@@ -52,7 +52,7 @@ pub const PartialResponse = struct {
 
     pub const GeneratorSource = struct {
         context: *anyopaque,
-        generateFn: *const fn (ctx: *anyopaque, buf: []u8) anyerror!usize,
+        generateFn: *const fn (ctx: *anyopaque, buf: []u8) @import("errors").GeneratorError!usize,
         buffer: []u8, // Owned reusable buffer
         gen_len: usize, // Valid data length in buffer
         gen_sent: usize, // Bytes sent from current buffer
@@ -111,7 +111,7 @@ pub const PartialResponse = struct {
     pub fn initGenerator(
         allocator: std.mem.Allocator,
         context: *anyopaque,
-        generateFn: *const fn (ctx: *anyopaque, buf: []u8) anyerror!usize,
+        generateFn: *const fn (ctx: *anyopaque, buf: []u8) @import("errors").GeneratorError!usize,
         buffer_size: usize,
         total_size: ?usize,
         fin_on_complete: bool,

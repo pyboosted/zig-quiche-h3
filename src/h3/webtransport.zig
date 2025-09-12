@@ -2,6 +2,7 @@ const std = @import("std");
 const quiche = @import("quiche");
 const h3_datagram = @import("datagram.zig");
 const h3_conn_mod = @import("connection.zig");
+const errors = @import("errors");
 
 /// WebTransport session representing an established WebTransport connection
 /// Session ID is the CONNECT stream ID per WebTransport over HTTP/3 spec
@@ -186,10 +187,10 @@ pub const WebTransportSessionState = struct {
     request_headers: []const quiche.h3.Header,
 
     /// Handler callbacks
-    on_datagram: ?*const fn (sess: *anyopaque, payload: []const u8) anyerror!void = null,
-    on_uni_open: ?*const fn (sess: *anyopaque, stream: *anyopaque) anyerror!void = null,
-    on_bidi_open: ?*const fn (sess: *anyopaque, stream: *anyopaque) anyerror!void = null,
-    on_stream_data: ?*const fn (stream: *anyopaque, data: []const u8, fin: bool) anyerror!void = null,
+    on_datagram: ?*const fn (sess: *anyopaque, payload: []const u8) errors.WebTransportError!void = null,
+    on_uni_open: ?*const fn (sess: *anyopaque, stream: *anyopaque) errors.WebTransportStreamError!void = null,
+    on_bidi_open: ?*const fn (sess: *anyopaque, stream: *anyopaque) errors.WebTransportStreamError!void = null,
+    on_stream_data: ?*const fn (stream: *anyopaque, data: []const u8, fin: bool) errors.WebTransportStreamError!void = null,
     on_stream_closed: ?*const fn (stream: *anyopaque) void = null,
 
     /// Arena allocator for session lifetime
@@ -201,7 +202,7 @@ pub const WebTransportSessionState = struct {
         allocator: std.mem.Allocator,
         session: *WebTransportSession,
         headers: []const quiche.h3.Header,
-        on_datagram: ?*const fn (sess: *anyopaque, payload: []const u8) anyerror!void,
+        on_datagram: ?*const fn (sess: *anyopaque, payload: []const u8) errors.WebTransportError!void,
     ) !*WebTransportSessionState {
         const state = try allocator.create(WebTransportSessionState);
         state.* = .{

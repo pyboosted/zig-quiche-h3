@@ -192,12 +192,29 @@ pub const Response = struct {
     pub fn sendH3Datagram(self: *Response, payload: []const u8) !void;
 };
 
-pub const HttpHandler = *const fn (*Request, *Response) anyerror!void;
+// Typed error unions are used across the API for compile-time safety.
+// See: HandlerError, StreamingError, DatagramError, WebTransportError.
+pub const HttpHandler = *const fn (*Request, *Response) HandlerError!void;
 
 /// HTTP/3 DATAGRAM callback associated to a request route
-pub const OnH3Datagram = *const fn (*Request, *Response, []const u8) anyerror!void;
+pub const OnH3Datagram = *const fn (*Request, *Response, []const u8) DatagramError!void;
 /// QUIC DATAGRAM callback (connection-scoped)
-pub const OnDatagram = *const fn (*Server, *Connection, []const u8, ?*anyopaque) anyerror!void;
+pub const OnDatagram = *const fn (*Server, *Connection, []const u8, ?*anyopaque) DatagramError!void;
+
+// Error types used by handlers and callbacks
+pub const HandlerError = error{
+    HeadersAlreadySent, ResponseEnded, StreamBlocked, InvalidState,
+    PayloadTooLarge, NotFound, MethodNotAllowed, BadRequest,
+    Unauthorized, Forbidden, RequestTimeout, TooManyRequests,
+    InternalServerError, OutOfMemory,
+};
+pub const StreamingError = error{ StreamBlocked, ResponseEnded, HeadersAlreadySent, InvalidState, PayloadTooLarge, OutOfMemory };
+pub const DatagramError = error{ WouldBlock, DatagramTooLarge, ConnectionClosed, Done, OutOfMemory };
+pub const WebTransportError = error{ SessionClosed, StreamBlocked, InvalidState, WouldBlock, OutOfMemory };
+pub const WebTransportStreamError = error{ StreamClosed, StreamReset, FlowControl, WouldBlock, InvalidState, OutOfMemory };
+pub const GeneratorError = error{ EndOfStream, ReadError, OutOfMemory };
+
+pub fn errorToStatus(err: HandlerError || StreamingError || DatagramError || WebTransportError || WebTransportStreamError || GeneratorError) u16;
 
 /// Event backend abstraction to allow swapping libev / raw epoll/kqueue /
 /// (future) Zig std.io based loops without changing the public API.
@@ -229,7 +246,7 @@ pub const WebTransportSession = struct {
     pub fn close(self: *WebTransportSession, code: u64, reason: []const u8) !void;
 };
 
-pub const WebTransportHandler = fn (req: *Request, sess: *WebTransportSession) anyerror!void;
+pub const WebTransportHandler = fn (req: *Request, sess: *WebTransportSession) WebTransportError!void;
 ```
 
 **Notes & mapping to `quiche`:**
@@ -252,7 +269,7 @@ var server = try Server.init(allocator, .{
 
 // Simple GET endpoint.
 try server.route(.GET, "/hello", struct {
-    pub fn handler(_: *Request, res: *Response) !void {
+    pub fn handler(_: *Request, res: *Response) HandlerError!void {
         try res.status(200);
         try res.header("content-type", "text/plain");
         try res.writeAll("Hello, HTTP/3!\n");
@@ -262,7 +279,7 @@ try server.route(.GET, "/hello", struct {
 
 // QUIC DATAGRAM echo (connection-scoped)
 server.onDatagram(struct {
-    fn dgramEcho(srv: *Server, conn: *Connection, payload: []const u8, _: ?*anyopaque) !void {
+    fn dgramEcho(srv: *Server, conn: *Connection, payload: []const u8, _: ?*anyopaque) DatagramError!void {
         // Best-effort echo; drop if backpressured
         srv.sendDatagram(conn, payload) catch |err| switch (err) {
             error.WouldBlock => {},
@@ -273,7 +290,7 @@ server.onDatagram(struct {
 
 // HTTP/3 DATAGRAM echo bound to a request route
 try server.route(.GET, "/h3dgram/echo", struct {
-    pub fn handler(_: *Request, res: *Response) !void {
+    pub fn handler(_: *Request, res: *Response) HandlerError!void {
         // Normal response body or just headers; H3 dgrams handled by callback below
         try res.status(200);
         try res.header("content-type", "text/plain");
@@ -282,9 +299,12 @@ try server.route(.GET, "/h3dgram/echo", struct {
     }
 }.handler);
 try server.router.routeH3Datagram(.GET, "/h3dgram/echo", struct {
-    pub fn onDgram(_: *Request, res: *Response, payload: []const u8) !void {
+    pub fn onDgram(_: *Request, res: *Response, payload: []const u8) DatagramError!void {
         // Echo back via request-associated H3 DATAGRAM
-        try res.sendH3Datagram(payload);
+        res.sendH3Datagram(payload) catch |err| switch (err) {
+            error.WouldBlock => {}, // drop on backpressure
+            else => return err,
+        };
     }
 }.onDgram);
 

@@ -59,13 +59,13 @@ pub fn main() !void {
     try server.run();
 }
 
-fn indexHandler(_: *http.Request, res: *http.Response) !void {
+fn indexHandler(_: *http.Request, res: *http.Response) http.HandlerError!void {
     try res.header(http.Headers.ContentType, http.MimeTypes.TextPlain);
     try res.writeAll("ok\n");
     try res.end(null);
 }
 
-fn datagramEcho(server: *QuicServer, conn: *connection.Connection, payload: []const u8, _: ?*anyopaque) !void {
+fn datagramEcho(server: *QuicServer, conn: *connection.Connection, payload: []const u8, _: ?*anyopaque) http.DatagramError!void {
     // Echo back, ignore transient backpressure
     server.sendDatagram(conn, payload) catch |err| switch (err) {
         error.WouldBlock => return,

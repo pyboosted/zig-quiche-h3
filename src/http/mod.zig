@@ -14,6 +14,7 @@ pub const Router = router.Router;
 pub const Request = request.Request;
 pub const Response = response.Response;
 pub const Handler = handler.Handler;
+pub const HandlerError = handler.HandlerError;
 pub const Method = handler.Method;
 pub const Status = handler.Status;
 pub const Headers = handler.Headers;
@@ -25,6 +26,15 @@ pub const MatchResult = router.MatchResult;
 pub const OnHeaders = handler.OnHeaders;
 pub const OnBodyChunk = handler.OnBodyChunk;
 pub const OnBodyComplete = handler.OnBodyComplete;
+pub const StreamingError = handler.StreamingError;
+
+// Datagram & WebTransport error types
+pub const DatagramError = handler.DatagramError;
+pub const WebTransportError = handler.WebTransportError;
+pub const WebTransportStreamError = handler.WebTransportStreamError;
+
+// Generator error type
+pub const GeneratorError = handler.GeneratorError;
 
 // Utility functions
 pub const errorToStatus = handler.errorToStatus;

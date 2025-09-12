@@ -223,7 +223,7 @@ fn registerRoutes(server: *QuicServer) !void {
 }
 
 // Handler functions
-fn indexHandler(req: *http.Request, res: *http.Response) !void {
+fn indexHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     _ = req;
 
     const html =
@@ -246,7 +246,7 @@ fn indexHandler(req: *http.Request, res: *http.Response) !void {
     try res.end(null);
 }
 
-fn listUsersHandler(req: *http.Request, res: *http.Response) !void {
+fn listUsersHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     _ = req;
 
     // Use proper JSON serialization with an array of structs
@@ -259,7 +259,7 @@ fn listUsersHandler(req: *http.Request, res: *http.Response) !void {
     try res.jsonValue(users);
 }
 
-fn getUserHandler(req: *http.Request, res: *http.Response) !void {
+fn getUserHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     const id = req.getParam("id") orelse return error.BadRequest;
 
     // Use proper JSON serialization with struct
@@ -273,7 +273,7 @@ fn getUserHandler(req: *http.Request, res: *http.Response) !void {
     try res.jsonValue(user);
 }
 
-fn createUserHandler(req: *http.Request, res: *http.Response) !void {
+fn createUserHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     // Read request body
     const body = try req.readAll(1024 * 1024); // 1MB max
 
@@ -293,7 +293,7 @@ fn createUserHandler(req: *http.Request, res: *http.Response) !void {
     }
 }
 
-fn filesHandler(req: *http.Request, res: *http.Response) !void {
+fn filesHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     const wildcard_path = req.getParam("*") orelse "";
 
     // Use proper JSON serialization
@@ -307,7 +307,7 @@ fn filesHandler(req: *http.Request, res: *http.Response) !void {
     try res.jsonValue(response);
 }
 
-fn echoHandler(req: *http.Request, res: *http.Response) !void {
+fn echoHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     // Read request body
     const body = try req.readAll(1024 * 1024); // 1MB max
 
@@ -339,7 +339,7 @@ fn echoHandler(req: *http.Request, res: *http.Response) !void {
 }
 
 // Simple trailers example: send a short body, then a trailer and FIN
-fn trailersDemoHandler(req: *http.Request, res: *http.Response) !void {
+fn trailersDemoHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     _ = req;
     try res.header(http.Headers.ContentType, "text/plain");
     const body = "Hello, trailers!\n";
@@ -355,7 +355,7 @@ fn trailersDemoHandler(req: *http.Request, res: *http.Response) !void {
 }
 
 // Streaming handlers for Milestone 5
-fn downloadHandler(req: *http.Request, res: *http.Response) !void {
+fn downloadHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     const file_path = req.getParam("*") orelse "";
 
     // Build absolute path (safely, avoiding path traversal)
@@ -538,7 +538,7 @@ const OneGBContext = struct {
     total_size: usize,
 };
 
-fn generate1GB(ctx: *anyopaque, buf: []u8) anyerror!usize {
+fn generate1GB(ctx: *anyopaque, buf: []u8) http.GeneratorError!usize {
     const context = @as(*OneGBContext, @ptrCast(@alignCast(ctx)));
 
     if (context.total_written >= context.total_size) {
@@ -559,7 +559,7 @@ fn generate1GB(ctx: *anyopaque, buf: []u8) anyerror!usize {
     return written;
 }
 
-fn stream1GBHandler(req: *http.Request, res: *http.Response) !void {
+fn stream1GBHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     const allocator = req.arena.allocator();
 
     // Create generator context
@@ -583,7 +583,7 @@ fn stream1GBHandler(req: *http.Request, res: *http.Response) !void {
     try res.processPartialResponse();
 }
 
-fn streamTestHandler(req: *http.Request, res: *http.Response) !void {
+fn streamTestHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     // Generate test data with checksum
     const allocator = req.arena.allocator();
     const test_size = 10 * 1024 * 1024; // 10MB
@@ -624,7 +624,7 @@ const UploadContext = struct {
     compute_hash: bool,
 };
 
-fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) !void {
+fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) http.StreamingError!void {
     _ = res; // Response not used in headers callback for this handler
     // Called when headers complete - can send early response or validate
     const content_length = req.contentLength();
@@ -648,7 +648,7 @@ fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) !void {
     }
 }
 
-fn uploadStreamOnChunk(req: *http.Request, res: *http.Response, chunk: []const u8) !void {
+fn uploadStreamOnChunk(req: *http.Request, res: *http.Response, chunk: []const u8) http.StreamingError!void {
     _ = res; // Not sending response during chunks
 
     // Retrieve context from user_data
@@ -673,7 +673,7 @@ fn uploadStreamOnChunk(req: *http.Request, res: *http.Response, chunk: []const u
     }
 }
 
-fn uploadStreamOnComplete(req: *http.Request, res: *http.Response) !void {
+fn uploadStreamOnComplete(req: *http.Request, res: *http.Response) http.StreamingError!void {
     // Retrieve and finalize context from user_data
     const ctx = if (req.user_data) |ptr|
         @as(*UploadContext, @ptrCast(@alignCast(ptr)))
@@ -721,7 +721,7 @@ fn uploadStreamOnComplete(req: *http.Request, res: *http.Response) !void {
 }
 
 // Echo upload handlers - demonstrate bidirectional streaming
-fn uploadEchoOnHeaders(req: *http.Request, res: *http.Response) !void {
+fn uploadEchoOnHeaders(req: *http.Request, res: *http.Response) http.StreamingError!void {
     _ = req;
 
     // Start response immediately - bidirectional streaming
@@ -746,7 +746,7 @@ fn uploadEchoOnChunk(req: *http.Request, res: *http.Response, chunk: []const u8)
     };
 }
 
-fn uploadEchoOnComplete(req: *http.Request, res: *http.Response) !void {
+fn uploadEchoOnComplete(req: *http.Request, res: *http.Response) http.StreamingError!void {
     _ = req;
 
     // Send final chunk and close stream
@@ -761,7 +761,7 @@ fn uploadEchoOnComplete(req: *http.Request, res: *http.Response) !void {
 }
 
 // H3 DATAGRAM handlers (M7)
-fn h3dgramEchoHandler(req: *http.Request, res: *http.Response) !void {
+fn h3dgramEchoHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     _ = req; // Request info not needed
 
     // Send HTTP response explaining H3 DATAGRAM echo endpoint
@@ -786,7 +786,7 @@ fn h3dgramEchoHandler(req: *http.Request, res: *http.Response) !void {
     try res.end(null);
 }
 
-fn h3dgramEchoCallback(req: *http.Request, res: *http.Response, payload: []const u8) !void {
+fn h3dgramEchoCallback(req: *http.Request, res: *http.Response, payload: []const u8) http.DatagramError!void {
     _ = req; // Request not needed for echo
 
     std.debug.print("H3 DGRAM callback: received {} bytes, echoing back\n", .{payload.len});
@@ -802,7 +802,7 @@ fn h3dgramEchoCallback(req: *http.Request, res: *http.Response, payload: []const
 }
 
 // WebTransport handlers (M8)
-fn wtEchoOnSession(req: *http.Request, sess: *anyopaque) !void {
+fn wtEchoOnSession(req: *http.Request, sess: *anyopaque) http.WebTransportError!void {
     const wt_session = @as(*h3.WebTransportSession, @ptrCast(@alignCast(sess)));
     std.debug.print("WebTransport session established: path={s} session_id={}\n", .{ req.path_decoded, wt_session.session_id });
 
@@ -810,7 +810,7 @@ fn wtEchoOnSession(req: *http.Request, sess: *anyopaque) !void {
     // The 200 response has already been sent by the server
 }
 
-fn wtEchoOnDatagram(sess: *anyopaque, payload: []const u8) !void {
+fn wtEchoOnDatagram(sess: *anyopaque, payload: []const u8) http.WebTransportError!void {
     const wt_session = @as(*h3.WebTransportSession, @ptrCast(@alignCast(sess)));
 
     // Echo the datagram back

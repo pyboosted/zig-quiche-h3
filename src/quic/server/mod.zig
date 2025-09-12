@@ -7,6 +7,7 @@ const udp = @import("udp");
 const h3 = @import("h3");
 const h3_datagram = @import("h3").datagram;
 const http = @import("http");
+const errors = @import("errors");
 const server_logging = @import("logging.zig");
 
 const c = quiche.c;
@@ -28,12 +29,12 @@ pub const RequestState = struct {
     user_data: ?*anyopaque = null,
 
     // Push-mode streaming callbacks (include Response pointer for bidirectional streaming)
-    on_headers: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
-    on_body_chunk: ?*const fn (req: *http.Request, res: *http.Response, chunk: []const u8) anyerror!void = null,
-    on_body_complete: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
+    on_headers: ?http.OnHeaders = null,
+    on_body_chunk: ?http.OnBodyChunk = null,
+    on_body_complete: ?http.OnBodyComplete = null,
 
     // H3 DATAGRAM callback for request-associated datagrams
-    on_h3_dgram: ?*const fn (req: *http.Request, res: *http.Response, payload: []const u8) anyerror!void = null,
+    on_h3_dgram: ?http.OnH3Datagram = null,
 
     // WebTransport session flag
     is_webtransport: bool = false,
@@ -41,7 +42,7 @@ pub const RequestState = struct {
 
 // WT uni-stream preface accumulator lives in the WT facade now
 
-pub const OnDatagram = *const fn (server: *QuicServer, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) anyerror!void;
+pub const OnDatagram = *const fn (server: *QuicServer, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) errors.DatagramError!void;
 
 pub const QuicServer = struct {
     allocator: std.mem.Allocator,

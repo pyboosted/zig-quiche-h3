@@ -163,6 +163,13 @@ pub fn build(b: *std.Build) void {
     h3_mod.addImport("quiche", quiche_ffi_mod);
     // h3 module does not directly import build_options
 
+    // Centralized error unions module
+    const errors_mod = b.createModule(.{
+        .root_source_file = b.path("src/errors.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // HTTP module for routing and request/response handling
     const http_mod = b.createModule(.{
         .root_source_file = b.path("src/http/mod.zig"),
@@ -171,6 +178,7 @@ pub fn build(b: *std.Build) void {
     });
     http_mod.addImport("quiche", quiche_ffi_mod);
     http_mod.addImport("h3", h3_mod);
+    http_mod.addImport("errors", errors_mod);
     // http module no longer needs build_options
 
     const server_mod = b.createModule(.{
@@ -185,6 +193,7 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("udp", udp_mod);
     server_mod.addImport("h3", h3_mod);
     server_mod.addImport("http", http_mod);
+    server_mod.addImport("errors", errors_mod);
     server_mod.addOptions("build_options", build_opts);
 
     // QUIC server executable (requires libev)
