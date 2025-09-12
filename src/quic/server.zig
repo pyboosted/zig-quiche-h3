@@ -50,9 +50,18 @@ const RequestState = struct {
     on_headers: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
     on_body_chunk: ?*const fn (req: *http.Request, res: *http.Response, chunk: []const u8) anyerror!void = null,
     on_body_complete: ?*const fn (req: *http.Request, res: *http.Response) anyerror!void = null,
-    
+
     // H3 DATAGRAM callback for request-associated datagrams
     on_h3_dgram: ?*const fn (req: *http.Request, res: *http.Response, payload: []const u8) anyerror!void = null,
+
+    // WebTransport session flag
+    is_webtransport: bool = false,
+};
+
+// Small accumulator for WT uni-stream preface bytes (type + session_id)
+const WtUniPreface = struct {
+    buf: [32]u8 = undefined,
+    len: usize = 0,
 };
 
 pub const OnDatagram = *const fn (server: *QuicServer, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) anyerror!void;
@@ -80,7 +89,7 @@ pub const QuicServer = struct {
     // simultaneous connections with the same stream_id (e.g., 0)
     // don't collide.
     stream_states: std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80),
-    
+
     // H3 DATAGRAM flow_id mapping (flow_id -> RequestState for active requests)
     h3_dgram_flows: std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80),
 
@@ -91,12 +100,29 @@ pub const QuicServer = struct {
     dgrams_received: usize = 0,
     dgrams_sent: usize = 0,
     dgrams_dropped_send: usize = 0,
-    
+
     // H3 DATAGRAM statistics
     h3_dgrams_received: usize = 0,
     h3_dgrams_sent: usize = 0,
     h3_dgrams_unknown_flow: usize = 0,
     h3_dgrams_would_block: usize = 0,
+
+    // WebTransport session management
+    wt_sessions: std.hash_map.HashMap(SessionKey, *h3.WebTransportSessionState, SessionKeyContext, 80),
+    wt_dgram_map: std.hash_map.HashMap(FlowKey, *h3.WebTransportSessionState, FlowKeyContext, 80),
+
+    // WebTransport statistics
+    wt_sessions_created: usize = 0,
+    wt_sessions_closed: usize = 0,
+    wt_dgrams_received: usize = 0,
+    wt_dgrams_sent: usize = 0,
+    wt_dgrams_would_block: usize = 0,
+
+    // WebTransport streams (experimental)
+    enable_wt_streams: bool = false,
+    enable_wt_bidi: bool = false,
+    wt_streams: std.hash_map.HashMap(StreamKey, *h3.WebTransportSession.WebTransportStream, StreamKeyContext, 80),
+    wt_uni_preface: std.hash_map.HashMap(StreamKey, WtUniPreface, StreamKeyContext, 80),
 
     on_datagram: ?OnDatagram = null,
     on_datagram_user: ?*anyopaque = null,
@@ -114,7 +140,21 @@ pub const QuicServer = struct {
             return a.conn == b.conn and a.stream_id == b.stream_id;
         }
     };
-    
+
+    // Type definitions for WebTransport session tracking
+    const SessionKey = struct { conn: *connection.Connection, session_id: u64 };
+    const SessionKeyContext = struct {
+        pub fn hash(_: SessionKeyContext, key: SessionKey) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(std.mem.asBytes(&key.conn));
+            h.update(std.mem.asBytes(&key.session_id));
+            return h.final();
+        }
+        pub fn eql(_: SessionKeyContext, a: SessionKey, b: SessionKey) bool {
+            return a.conn == b.conn and a.session_id == b.session_id;
+        }
+    };
+
     // Type definitions for H3 DATAGRAM flow_id tracking
     const FlowKey = struct { conn: *connection.Connection, flow_id: u64 };
     const FlowKeyContext = struct {
@@ -205,11 +245,39 @@ pub const QuicServer = struct {
             .router = http.Router.init(allocator),
             .stream_states = std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80).init(allocator),
             .h3_dgram_flows = std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80).init(allocator),
+            .wt_sessions = std.hash_map.HashMap(SessionKey, *h3.WebTransportSessionState, SessionKeyContext, 80).init(allocator),
+            .wt_dgram_map = std.hash_map.HashMap(FlowKey, *h3.WebTransportSessionState, FlowKeyContext, 80).init(allocator),
+            .wt_streams = std.hash_map.HashMap(StreamKey, *h3.WebTransportSession.WebTransportStream, StreamKeyContext, 80).init(allocator),
+            .wt_uni_preface = std.hash_map.HashMap(StreamKey, WtUniPreface, StreamKeyContext, 80).init(allocator),
         };
 
-        // Create H3 config
-        server.h3_config = try h3.H3Config.initWithDefaults();
+        // Create H3 config with optional WebTransport support
+        const enable_wt = std.process.getEnvVarOwned(allocator, "H3_WEBTRANSPORT") catch null;
+        defer if (enable_wt) |wt| allocator.free(wt);
+
+        if (enable_wt != null and std.mem.eql(u8, enable_wt.?, "1")) {
+            server.h3_config = try h3.H3Config.initWithWebTransport();
+            std.debug.print("WebTransport: enabled (H3_WEBTRANSPORT=1)\n", .{});
+        } else {
+            server.h3_config = try h3.H3Config.initWithDefaults();
+        }
         errdefer if (server.h3_config) |*h| h.deinit();
+
+        // Enable WT streams if requested
+        const enable_wts = std.process.getEnvVarOwned(allocator, "H3_WT_STREAMS") catch null;
+        defer if (enable_wts) |wts| allocator.free(wts);
+        server.enable_wt_streams = (enable_wts != null and std.mem.eql(u8, enable_wts.?, "1"));
+        if (server.enable_wt_streams) {
+            std.debug.print("WebTransport Streams: enabled (H3_WT_STREAMS=1)\n", .{});
+        }
+
+        // Enable WT bidi streams if requested
+        const enable_wtb = std.process.getEnvVarOwned(allocator, "H3_WT_BIDI") catch null;
+        defer if (enable_wtb) |wb| allocator.free(wb);
+        server.enable_wt_bidi = (enable_wtb != null and std.mem.eql(u8, enable_wtb.?, "1"));
+        if (server.enable_wt_bidi) {
+            std.debug.print("WebTransport Bidi Streams: enabled (H3_WT_BIDI=1)\n", .{});
+        }
 
         // Enable debug logging if requested
         if (cfg.enable_debug_logging) {
@@ -217,6 +285,13 @@ pub const QuicServer = struct {
         }
 
         return server;
+    }
+
+    // Callback used by WebTransport sessions to report successful DATAGRAM sends
+    fn wtOnDatagramSent(ctx: *anyopaque, _bytes: usize) void {
+        _ = _bytes; // currently unused; future: track bytes sent
+        const self: *QuicServer = @ptrCast(@alignCast(ctx));
+        self.wt_dgrams_sent += 1;
     }
 
     pub fn deinit(self: *QuicServer) void {
@@ -241,9 +316,28 @@ pub const QuicServer = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.stream_states.deinit();
-        
+
         // Clean up H3 DATAGRAM flows (no values to free - they point to RequestState already freed above)
         self.h3_dgram_flows.deinit();
+
+        // Clean up WebTransport sessions
+        var wt_it = self.wt_sessions.iterator();
+        while (wt_it.next()) |entry| {
+            entry.value_ptr.*.deinit(self.allocator);
+        }
+        self.wt_sessions.deinit();
+
+        // Clean up WebTransport datagram map (values already freed above)
+        self.wt_dgram_map.deinit();
+
+        // Clean up WT streams
+        var it_ws = self.wt_streams.iterator();
+        while (it_ws.next()) |entry| {
+            const s = entry.value_ptr.*;
+            s.allocator.destroy(s);
+        }
+        self.wt_streams.deinit();
+        self.wt_uni_preface.deinit();
 
         // Clean up router
         self.router.deinit();
@@ -338,6 +432,115 @@ pub const QuicServer = struct {
         try self.router.route(method, pattern, handler);
     }
 
+    /// Open a server-initiated WebTransport unidirectional stream for a session.
+    /// Writes the WT uni-stream preface (type + session_id). If backpressured,
+    /// the preface is queued and flushed when writable.
+    pub fn openWtUniStream(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        sess_state: *h3.WebTransportSessionState,
+    ) !*h3.WebTransportSession.WebTransportStream {
+        if (self.countWtStreamsForSession(conn, sess_state.session.session_id, .uni) >= self.config.wt_max_streams_uni) {
+            return error.StreamLimit;
+        }
+        // Enforce simple per-session limit via connection parameter for now
+        // (optional refinement: dedicated wt_max_streams_uni)
+        // Allocate new local uni stream id
+        const stream_id = conn.allocLocalUniStreamId();
+
+        // Create stream object and register mapping
+        const wt_stream = try self.allocator.create(h3.WebTransportSession.WebTransportStream);
+        wt_stream.* = .{
+            .stream_id = stream_id,
+            .dir = .uni,
+            .role = .outgoing,
+            .session_id = sess_state.session.session_id,
+            .allocator = self.allocator,
+        };
+        try self.wt_streams.put(.{ .conn = conn, .stream_id = stream_id }, wt_stream);
+
+        // Encode preface: [stream_type][session_id]
+        var preface: [16]u8 = undefined;
+        var off: usize = 0;
+        off += try h3_datagram.encodeVarint(preface[off..], h3.WebTransportSession.UNI_STREAM_TYPE);
+        off += try h3_datagram.encodeVarint(preface[off..], sess_state.session.session_id);
+
+        // Try to send immediately
+        const sent = conn.conn.streamSend(stream_id, preface[0..off], false) catch |err| {
+            if (err == quiche.QuicheError.Done or err == quiche.QuicheError.FlowControl or err == quiche.QuicheError.StreamLimit) {
+                // Queue the entire preface to flush later
+                try wt_stream.pending.appendSlice(self.allocator, preface[0..off]);
+                return wt_stream;
+            }
+            // Remove mapping on fatal errors
+            _ = self.wt_streams.remove(.{ .conn = conn, .stream_id = stream_id });
+            self.allocator.destroy(wt_stream);
+            return err;
+        };
+
+        if (sent < off) {
+            // Partial write, queue the remainder
+            try wt_stream.pending.appendSlice(self.allocator, preface[sent..off]);
+        }
+
+        sess_state.last_activity_ms = std.time.milliTimestamp();
+        return wt_stream;
+    }
+
+    /// Open a server-initiated WebTransport bidirectional stream for a session.
+    /// Writes the spec-accurate bidi preface [0x41][session_id] to bind the stream
+    /// to the session (no capsules). Callers may then use sendWtStream() to write data.
+    pub fn openWtBidiStream(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        sess_state: *h3.WebTransportSessionState,
+    ) !*h3.WebTransportSession.WebTransportStream {
+        if (!self.enable_wt_bidi) return error.FeatureDisabled;
+        if (self.countWtStreamsForSession(conn, sess_state.session.session_id, .bidi) >= self.config.wt_max_streams_bidi) {
+            return error.StreamLimit;
+        }
+
+        // Allocate a local bidi stream id (server-initiated)
+        const stream_id = conn.allocLocalBidiStreamId();
+
+        // Create stream object
+        const wt_stream = try self.allocator.create(h3.WebTransportSession.WebTransportStream);
+        wt_stream.* = .{
+            .stream_id = stream_id,
+            .dir = .bidi,
+            .role = .outgoing,
+            .session_id = sess_state.session.session_id,
+            .allocator = self.allocator,
+        };
+        try self.wt_streams.put(.{ .conn = conn, .stream_id = stream_id }, wt_stream);
+
+        // Encode bidi preface: [WEBTRANSPORT_STREAM (0x41)][session_id]
+        var preface: [16]u8 = undefined;
+        var off: usize = 0;
+        off += try h3_datagram.encodeVarint(preface[off..], h3.WebTransportSession.BIDI_STREAM_TYPE);
+        off += try h3_datagram.encodeVarint(preface[off..], sess_state.session.session_id);
+
+        const sent = conn.conn.streamSend(stream_id, preface[0..off], false) catch |err| {
+            if (err == quiche.QuicheError.Done or err == quiche.QuicheError.FlowControl or err == quiche.QuicheError.StreamLimit) {
+                try wt_stream.pending.appendSlice(self.allocator, preface[0..off]);
+            } else {
+                _ = self.wt_streams.remove(.{ .conn = conn, .stream_id = stream_id });
+                self.allocator.destroy(wt_stream);
+                return err;
+            }
+            sess_state.last_activity_ms = std.time.milliTimestamp();
+            return wt_stream;
+        };
+        if (sent < off) {
+            try wt_stream.pending.appendSlice(self.allocator, preface[sent..off]);
+        }
+
+        sess_state.last_activity_ms = std.time.milliTimestamp();
+        return wt_stream;
+    }
+
+    // No capsule registration path; bidi binding uses per-stream preface.
+
     /// Register a streaming route with push-mode callbacks
     pub fn routeStreaming(
         self: *QuicServer,
@@ -417,158 +620,164 @@ pub const QuicServer = struct {
                 var peer_addr = views[i].addr;
                 const peer_addr_len = views[i].addr_len;
 
-            // Parse QUIC header
-            var dcid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
-            var scid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
-            var dcid_len: usize = dcid.len;
-            var scid_len: usize = scid.len;
-            var version: u32 = 0;
-            var pkt_type: u8 = 0;
-            var token: [256]u8 = undefined;
-            var token_len: usize = token.len;
+                // Parse QUIC header
+                var dcid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
+                var scid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
+                var dcid_len: usize = dcid.len;
+                var scid_len: usize = scid.len;
+                var version: u32 = 0;
+                var pkt_type: u8 = 0;
+                var token: [256]u8 = undefined;
+                var token_len: usize = token.len;
 
-            quiche.headerInfo(
-                pkt_buf,
-                self.local_conn_id_len,
-                &version,
-                &pkt_type,
-                &scid,
-                &scid_len,
-                &dcid,
-                &dcid_len,
-                &token,
-                &token_len,
-            ) catch {
-                // Failed to parse packet header, skip
-                continue;
-            };
+                quiche.headerInfo(
+                    pkt_buf,
+                    self.local_conn_id_len,
+                    &version,
+                    &pkt_type,
+                    &scid,
+                    &scid_len,
+                    &dcid,
+                    &dcid_len,
+                    &token,
+                    &token_len,
+                ) catch {
+                    // Failed to parse packet header, skip
+                    continue;
+                };
 
-            // First, try to look up connection by the DCID as-is
-            // This handles subsequent packets where client uses our SCID as DCID
-            var key_dcid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
-            @memcpy(key_dcid[0..dcid_len], dcid[0..dcid_len]);
+                // First, try to look up connection by the DCID as-is
+                // This handles subsequent packets where client uses our SCID as DCID
+                var key_dcid: [quiche.MAX_CONN_ID_LEN]u8 = undefined;
+                @memcpy(key_dcid[0..dcid_len], dcid[0..dcid_len]);
 
-            var key = connection.ConnectionKey{
-                .dcid = key_dcid,
-                .dcid_len = @intCast(dcid_len),
-                .family = @as(*const posix.sockaddr, @ptrCast(&peer_addr)).family,
-            };
-
-            var conn = self.connections.get(key);
-
-            // Derive connection ID using HMAC (like Rust)
-            const derived_conn_id = self.deriveConnId(dcid[0..dcid_len]);
-
-            // If not found by DCID, try HMAC-derived ID (for first Initial packet)
-            if (conn == null) {
-                @memcpy(key_dcid[0..16], &derived_conn_id);
-                key = connection.ConnectionKey{
+                var key = connection.ConnectionKey{
                     .dcid = key_dcid,
-                    .dcid_len = 16,
+                    .dcid_len = @intCast(dcid_len),
                     .family = @as(*const posix.sockaddr, @ptrCast(&peer_addr)).family,
                 };
-                conn = self.connections.get(key);
-            }
 
-            const is_new_conn = (conn == null);
+                var conn = self.connections.get(key);
 
-            if (is_new_conn) {
-                // Only create new connections for Initial packets (type 1)
-                // Other packet types should have an existing connection
-                if (pkt_type != quiche.PacketType.Initial) {
-                    // Not an Initial packet but no connection found - drop it
-                    continue;
+                // Derive connection ID using HMAC (like Rust)
+                const derived_conn_id = self.deriveConnId(dcid[0..dcid_len]);
+
+                // If not found by DCID, try HMAC-derived ID (for first Initial packet)
+                if (conn == null) {
+                    @memcpy(key_dcid[0..16], &derived_conn_id);
+                    key = connection.ConnectionKey{
+                        .dcid = key_dcid,
+                        .dcid_len = 16,
+                        .family = @as(*const posix.sockaddr, @ptrCast(&peer_addr)).family,
+                    };
+                    conn = self.connections.get(key);
                 }
 
-                // Check if version is supported BEFORE creating connection
-                if (!quiche.versionIsSupported(version)) {
-                    // Send version negotiation packet
-                    const vneg_len = quiche.negotiateVersion(
-                        scid[0..scid_len],
-                        dcid[0..dcid_len],
-                        &self.send_buf,
-                    ) catch {
+                const is_new_conn = (conn == null);
+
+                if (is_new_conn) {
+                    // Only create new connections for Initial packets (type 1)
+                    // Other packet types should have an existing connection
+                    if (pkt_type != quiche.PacketType.Initial) {
+                        // Not an Initial packet but no connection found - drop it
                         continue;
+                    }
+
+                    // Check if version is supported BEFORE creating connection
+                    if (!quiche.versionIsSupported(version)) {
+                        // Send version negotiation packet
+                        const vneg_len = quiche.negotiateVersion(
+                            scid[0..scid_len],
+                            dcid[0..dcid_len],
+                            &self.send_buf,
+                        ) catch {
+                            continue;
+                        };
+
+                        _ = posix.sendto(fd, self.send_buf[0..vneg_len], 0, @ptrCast(&peer_addr), peer_addr_len) catch {};
+                        continue; // Don't create connection for unsupported versions
+                    }
+
+                    // Only create connection for supported versions
+                    conn = try self.acceptConnection(
+                        &peer_addr,
+                        peer_addr_len,
+                        dcid[0..dcid_len],
+                        derived_conn_id, // Use HMAC-derived ID as our SCID
+                        fd,
+                        pkt_buf, // Pass the initial packet
+                    );
+                    if (conn == null) continue;
+
+                    // Initial packet was already processed in acceptConnection
+                    // Fall through to process H3 and writable streams
+                } else {
+                    // Process packet with existing connection
+                    const recv_info = c.quiche_recv_info{
+                        .from = @ptrCast(&peer_addr),
+                        .from_len = peer_addr_len,
+                        .to = @ptrCast(&local_addr),
+                        .to_len = local_addr_len,
                     };
 
-                    _ = posix.sendto(fd, self.send_buf[0..vneg_len], 0, @ptrCast(&peer_addr), peer_addr_len) catch {};
-                    continue; // Don't create connection for unsupported versions
-                }
-
-                // Only create connection for supported versions
-                conn = try self.acceptConnection(
-                    &peer_addr,
-                    peer_addr_len,
-                    dcid[0..dcid_len],
-                    derived_conn_id, // Use HMAC-derived ID as our SCID
-                    fd,
-                    pkt_buf, // Pass the initial packet
-                );
-                if (conn == null) continue;
-
-                // Initial packet was already processed in acceptConnection
-                // Fall through to process H3 and writable streams
-            } else {
-                // Process packet with existing connection
-                const recv_info = c.quiche_recv_info{
-                    .from = @ptrCast(&peer_addr),
-                    .from_len = peer_addr_len,
-                    .to = @ptrCast(&local_addr),
-                    .to_len = local_addr_len,
-                };
-
-                _ = conn.?.conn.recv(pkt_buf, &recv_info) catch |err| {
-                    if (err == error.Done) {
-                        // This is normal - just means no more data to process
-                    } else if (err != error.CryptoFail) {
-                        // Log non-crypto errors (crypto errors are common during handshake)
-                        std.debug.print("quiche_conn_recv failed: {}\n", .{err});
-                    }
-                    // Don't skip to next packet - fall through to check connection state
-                };
-            }
-
-            // Check if handshake completed
-            if (conn.?.conn.isEstablished() and !conn.?.handshake_logged) {
-                var hex_buf: [40]u8 = undefined;
-                const hex_dcid = try connection.formatCid(dcid[0..dcid_len], &hex_buf);
-
-                // Build complete message first, then print once
-                if (conn.?.conn.applicationProto()) |proto| {
-                    std.debug.print("✓ Handshake complete! DCID: {s}, ALPN: {s}\n", .{ hex_dcid, proto });
-
-                    // Create H3 connection if ALPN is "h3"
-                    if (std.mem.eql(u8, proto, "h3") and conn.?.http3 == null) {
-                        if (self.h3_config) |*h3_cfg| {
-                            const h3_conn = try self.allocator.create(h3.H3Connection);
-                            h3_conn.* = try h3.H3Connection.newWithTransport(
-                                self.allocator,
-                                &conn.?.conn,
-                                h3_cfg,
-                            );
-                            conn.?.http3 = h3_conn;
-                            std.debug.print("✓ HTTP/3 connection created for DCID: {s}\n", .{hex_dcid});
+                    _ = conn.?.conn.recv(pkt_buf, &recv_info) catch |err| {
+                        if (err == error.Done) {
+                            // This is normal - just means no more data to process
+                        } else if (err != error.CryptoFail) {
+                            // Log non-crypto errors (crypto errors are common during handshake)
+                            std.debug.print("quiche_conn_recv failed: {}\n", .{err});
                         }
-                    } else if (!std.mem.eql(u8, proto, "h3")) {
-                        // Log when we're not using H3 (e.g., hq-interop)
-                        std.debug.print("  ALPN fallback: using {s} instead of h3\n", .{proto});
+                        // Don't skip to next packet - fall through to check connection state
+                    };
+                }
+
+                // Check if handshake completed
+                if (conn.?.conn.isEstablished() and !conn.?.handshake_logged) {
+                    var hex_buf: [40]u8 = undefined;
+                    const hex_dcid = try connection.formatCid(dcid[0..dcid_len], &hex_buf);
+
+                    // Build complete message first, then print once
+                    if (conn.?.conn.applicationProto()) |proto| {
+                        std.debug.print("✓ Handshake complete! DCID: {s}, ALPN: {s}\n", .{ hex_dcid, proto });
+
+                        // Create H3 connection if ALPN is "h3"
+                        if (std.mem.eql(u8, proto, "h3") and conn.?.http3 == null) {
+                            if (self.h3_config) |*h3_cfg| {
+                                const h3_conn = try self.allocator.create(h3.H3Connection);
+                                h3_conn.* = try h3.H3Connection.newWithTransport(
+                                    self.allocator,
+                                    &conn.?.conn,
+                                    h3_cfg,
+                                );
+                                conn.?.http3 = h3_conn;
+                                std.debug.print("✓ HTTP/3 connection created for DCID: {s}\n", .{hex_dcid});
+                            }
+                        } else if (!std.mem.eql(u8, proto, "h3")) {
+                            // Log when we're not using H3 (e.g., hq-interop)
+                            std.debug.print("  ALPN fallback: using {s} instead of h3\n", .{proto});
+                        }
+                    } else {
+                        std.debug.print("✓ Handshake complete! DCID: {s}\n", .{hex_dcid});
                     }
-                } else {
-                    std.debug.print("✓ Handshake complete! DCID: {s}\n", .{hex_dcid});
+
+                    conn.?.handshake_logged = true;
                 }
 
-                conn.?.handshake_logged = true;
-            }
-
-            // Record touched connection for post-batch processing (deduplicate crudely)
-            if (touched_len < touched.len) {
-                var seen = false;
-                var t: usize = 0;
-                while (t < touched_len) : (t += 1) {
-                    if (touched[t] == conn.?) { seen = true; break; }
+                // Record touched connection for post-batch processing (deduplicate crudely)
+                if (touched_len < touched.len) {
+                    var seen = false;
+                    var t: usize = 0;
+                    while (t < touched_len) : (t += 1) {
+                        if (touched[t] == conn.?) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (!seen) {
+                        touched[touched_len] = conn.?;
+                        touched_len += 1;
+                    }
                 }
-                if (!seen) { touched[touched_len] = conn.?; touched_len += 1; }
-            }
             }
 
             // After processing the batch, walk touched connections once
@@ -586,9 +795,20 @@ pub const QuicServer = struct {
                 self.processDatagrams(cconn) catch |err| {
                     std.debug.print("Error processing datagrams: {}\n", .{err});
                 };
+                // Process WT streams (experimental) only when enabled
+                if (self.enable_wt_streams and self.wt_sessions.count() > 0) {
+                    self.processReadableWtStreams(cconn) catch |err| {
+                        std.debug.print("Error processing WT streams: {}\n", .{err});
+                    };
+                }
                 self.processWritableStreams(cconn) catch |err| {
                     std.debug.print("Error processing writable streams: {}\n", .{err});
                 };
+                if (self.enable_wt_streams and self.wt_sessions.count() > 0) {
+                    self.processWritableWtStreams(cconn) catch |err| {
+                        std.debug.print("Error processing WT writable streams: {}\n", .{err});
+                    };
+                }
                 try self.drainEgress(cconn);
                 const timeout_ms2 = cconn.conn.timeoutAsMillis();
                 try self.updateTimer(cconn, timeout_ms2);
@@ -596,7 +816,7 @@ pub const QuicServer = struct {
                     self.closeConnection(cconn);
                 }
             }
-    }
+        }
     }
 
     fn acceptConnection(
@@ -841,11 +1061,115 @@ pub const QuicServer = struct {
                                 state.on_body_chunk = found.route.on_body_chunk;
                                 state.on_body_complete = found.route.on_body_complete;
                             } else {
-                                state.handler = found.route.handler;
+                                if (found.route.handler) |h| {
+                                    state.handler = h;
+                                } else {
+                                    // Misconfigured route without handler
+                                    self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 500) catch {};
+                                    state.arena.deinit();
+                                    self.allocator.destroy(state);
+                                    continue;
+                                }
                             }
-                            
+
                             // Copy H3 DATAGRAM callback if present
                             state.on_h3_dgram = found.route.on_h3_dgram;
+
+                            // Check for WebTransport session establishment
+                            if (found.route.is_webtransport and method == .CONNECT) {
+                                // Check for :protocol = webtransport
+                                const protocol = state.request.h3Protocol();
+                                if (protocol != null and std.mem.eql(u8, protocol.?, "webtransport")) {
+                                    // Check if Extended CONNECT is enabled by peer
+                                    if (!h3_conn.extendedConnectEnabledByPeer()) {
+                                        // Return 421 Misdirection Required
+                                        try self.sendErrorResponse(h3_conn, &conn.conn, result.stream_id, 421);
+                                        _ = self.stream_states.remove(.{ .conn = conn, .stream_id = result.stream_id });
+                                        state.arena.deinit();
+                                        self.allocator.destroy(state);
+                                        continue;
+                                    }
+
+                                    // Create WebTransport session
+                                    const session_id = result.stream_id; // Session ID is the CONNECT stream ID
+                                    // Cast opaque http3 pointer to typed H3Connection
+                                    const h3_conn_ptr: *h3.H3Connection = @ptrCast(@alignCast(h3_ptr));
+                                    const wt_session = try h3.WebTransportSession.init(
+                                        self.allocator,
+                                        session_id,
+                                        &conn.conn,
+                                        h3_conn_ptr,
+                                        state.request.path_decoded,
+                                    );
+                                    // Wire accounting callback for DATAGRAM sends
+                                    wt_session.on_datagram_sent = wtOnDatagramSent;
+                                    wt_session.on_datagram_ctx = self;
+
+                                    // Create session state first (with no headers), so we can
+                                    // allocate request header copies in its arena and avoid
+                                    // depending on the transient request arena.
+                                    var session_state = try h3.WebTransportSessionState.init(
+                                        self.allocator,
+                                        wt_session,
+                                        &[_]quiche.h3.Header{},
+                                        found.route.on_wt_datagram,
+                                    );
+                                    // Wire stream callbacks from route if present
+                                    session_state.on_uni_open = found.route.on_wt_uni_open;
+                                    session_state.on_bidi_open = found.route.on_wt_bidi_open;
+                                    session_state.on_stream_data = found.route.on_wt_stream_data;
+                                    session_state.on_stream_closed = found.route.on_wt_stream_closed;
+
+                                    // Duplicate headers into the session's arena for correct lifetime
+                                    const sess_alloc = session_state.arena.allocator();
+                                    const wt_headers = try sess_alloc.alloc(quiche.h3.Header, req_headers.len);
+                                    for (req_headers, 0..) |h, i| {
+                                        const name_copy = try sess_alloc.dupe(u8, h.name);
+                                        const value_copy = try sess_alloc.dupe(u8, h.value);
+                                        wt_headers[i] = .{
+                                            .name = name_copy.ptr,
+                                            .name_len = name_copy.len,
+                                            .value = value_copy.ptr,
+                                            .value_len = value_copy.len,
+                                        };
+                                    }
+                                    session_state.request_headers = wt_headers;
+                                    session_state.last_activity_ms = std.time.milliTimestamp();
+
+                                    // Register session
+                                    try self.wt_sessions.put(.{ .conn = conn, .session_id = session_id }, session_state);
+
+                                    // Register datagram flow mapping
+                                    if (found.route.on_wt_datagram != null) {
+                                        try self.wt_dgram_map.put(.{ .conn = conn, .flow_id = session_id }, session_state);
+                                    }
+
+                                    self.wt_sessions_created += 1;
+
+                                    // Send 200 OK response to accept the WebTransport session
+                                    const accept_headers = [_]quiche.h3.Header{
+                                        .{ .name = ":status", .name_len = 7, .value = "200", .value_len = 3 },
+                                    };
+
+                                    try h3_conn.sendResponse(&conn.conn, result.stream_id, &accept_headers, false);
+
+                                    // Invoke session handler
+                                    if (found.route.on_wt_session) |on_session| {
+                                        on_session(&state.request, wt_session) catch |err| {
+                                            std.debug.print("WebTransport session handler error: {}\n", .{err});
+                                        };
+                                    }
+
+                                    // Keep the state for stream lifetime tracking
+                                    state.is_webtransport = true;
+
+                                    // Free the transient request state now that the session owns its data
+                                    state.arena.deinit();
+                                    self.allocator.destroy(state);
+
+                                    continue; // WebTransport sessions don't use regular response handling
+                                }
+                            }
 
                             // Initialize response
                             state.response = http.Response.init(
@@ -855,12 +1179,12 @@ pub const QuicServer = struct {
                                 result.stream_id,
                                 method == .HEAD,
                             );
-                            
+
                             // H3 DATAGRAM sent counter is available via incrementH3DatagramSent() for applications that need tracking
 
                             // Store state (keyed by connection + stream id)
                             try self.stream_states.put(.{ .conn = conn, .stream_id = result.stream_id }, state);
-                            
+
                             // If route has H3 DATAGRAM callback, create flow_id mapping
                             if (state.on_h3_dgram != null) {
                                 // Derive flow_id similar to quiche's driver behavior
@@ -884,10 +1208,9 @@ pub const QuicServer = struct {
                                 // Persist on response so sends use the correct flow_id
                                 state.response.h3_flow_id = flow_id;
 
-                                self.debugPrint("[DEBUG] Creating H3 DATAGRAM flow mapping: conn={*}, stream_id={}, flow_id={}, route={s}\n", 
-                                    .{conn, result.stream_id, flow_id, found.route.raw_pattern});
+                                debugPrint(self, "[DEBUG] Creating H3 DATAGRAM flow mapping: conn={*}, stream_id={}, flow_id={}, route={s}\n", .{ conn, result.stream_id, flow_id, found.route.raw_pattern });
                                 try self.h3_dgram_flows.put(.{ .conn = conn, .flow_id = flow_id }, state);
-                                self.debugPrint("[DEBUG] Flow mapping created successfully\n", .{});
+                                debugPrint(self, "[DEBUG] Flow mapping created successfully\n", .{});
                             }
 
                             // Handle immediate invocation based on route type
@@ -945,6 +1268,7 @@ pub const QuicServer = struct {
                     // Note: Body data (if any) will arrive in subsequent Data events
                 },
                 .Data => {
+                    // No WT capsules on CONNECT; body handled below
                     // Handle body data (drain all available data for this event)
                     if (self.stream_states.get(.{ .conn = conn, .stream_id = result.stream_id })) |state| {
                         var buf: [64 * 1024]u8 = undefined;
@@ -999,9 +1323,26 @@ pub const QuicServer = struct {
                 .Finished => {
                     std.debug.print("  Stream {} finished\n", .{result.stream_id});
 
+                    // Check for WebTransport session cleanup
+                    if (self.wt_sessions.fetchRemove(.{ .conn = conn, .session_id = result.stream_id })) |entry| {
+                        const session_state = entry.value;
+
+                        // Remove from datagram map
+                        _ = self.wt_dgram_map.remove(.{ .conn = conn, .flow_id = result.stream_id });
+
+                        // Mark session as closed
+                        session_state.session.state = .closed;
+
+                        // Clean up session state
+                        session_state.deinit(self.allocator);
+
+                        self.wt_sessions_closed += 1;
+                        std.debug.print("  WebTransport session {} closed\n", .{result.stream_id});
+                    }
+
                     // If we have state and haven't invoked handler yet, do it now
                     if (self.stream_states.get(.{ .conn = conn, .stream_id = result.stream_id })) |state| {
-                        if (!state.body_complete) {
+                        if (!state.body_complete and !state.is_webtransport) {
                             state.body_complete = true;
                             state.request.setBodyComplete();
 
@@ -1106,7 +1447,7 @@ pub const QuicServer = struct {
                             const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
                             _ = self.h3_dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
                         }
-                        
+
                         state.response.deinit();
                         state.arena.deinit();
                         self.allocator.destroy(state);
@@ -1120,7 +1461,7 @@ pub const QuicServer = struct {
                             const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
                             _ = self.h3_dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
                         }
-                        
+
                         state.response.deinit();
                         state.arena.deinit();
                         self.allocator.destroy(state);
@@ -1231,6 +1572,10 @@ pub const QuicServer = struct {
                 self.processDatagrams(conn) catch |err| {
                     std.debug.print("Error processing datagrams in timer: {}\n", .{err});
                 };
+                // Expire idle WT sessions (no activity)
+                if (self.enable_wt_streams or self.enable_wt_bidi) {
+                    try self.expireIdleWtSessions(conn, now);
+                }
             }
 
             // Check if this connection has timed out
@@ -1248,7 +1593,7 @@ pub const QuicServer = struct {
     fn processDatagrams(self: *QuicServer, conn: *connection.Connection) !void {
         // Try to read all pending datagrams
         var small_buf: [2048]u8 = undefined;
-        
+
         while (true) {
             // Optional size hint
             const hint = conn.conn.dgramRecvFrontLen();
@@ -1268,14 +1613,14 @@ pub const QuicServer = struct {
                 if (err == error.Done) {
                     return; // no more
                 }
-                self.debugPrint("[DEBUG] dgramRecv error: {}\n", .{err});
+                debugPrint(self, "[DEBUG] dgramRecv error: {}\n", .{err});
                 return err;
             };
 
             const payload = buf[0..read];
             self.dgrams_received += 1;
             // Basic log for debugging/tests
-            if (self.appDebug()) {
+            if (appDebug(self)) {
                 std.debug.print("[DEBUG] DATAGRAM recv len={d}, first bytes: ", .{payload.len});
                 for (payload[0..@min(16, payload.len)]) |b| {
                     std.debug.print("{x:0>2} ", .{b});
@@ -1288,18 +1633,18 @@ pub const QuicServer = struct {
             if (conn.http3) |h3_ptr| {
                 const h3_conn = @as(*h3.H3Connection, @ptrCast(@alignCast(h3_ptr)));
                 const h3_enabled = h3_conn.dgramEnabledByPeer(&conn.conn);
-                self.debugPrint("[DEBUG] H3 connection exists, dgramEnabledByPeer={}\n", .{h3_enabled});
-                
+                debugPrint(self, "[DEBUG] H3 connection exists, dgramEnabledByPeer={}\n", .{h3_enabled});
+
                 if (h3_enabled) {
                     handled_as_h3 = self.processH3Datagram(conn, payload) catch |err| blk: {
                         // On parse error, fall back to QUIC DATAGRAM (configurable behavior)
-                        self.debugPrint("[DEBUG] H3 DATAGRAM parse error: {}, falling back to QUIC\n", .{err});
+                        debugPrint(self, "[DEBUG] H3 DATAGRAM parse error: {}, falling back to QUIC\n", .{err});
                         break :blk false;
                     };
-                    self.debugPrint("[DEBUG] Handled as H3 DATAGRAM: {}\n", .{handled_as_h3});
+                    debugPrint(self, "[DEBUG] Handled as H3 DATAGRAM: {}\n", .{handled_as_h3});
                 }
             } else {
-                self.debugPrint("[DEBUG] No H3 connection for this QUIC connection\n", .{});
+                debugPrint(self, "[DEBUG] No H3 connection for this QUIC connection\n", .{});
             }
 
             // Fall back to QUIC DATAGRAM callback if not handled as H3 DATAGRAM
@@ -1314,70 +1659,93 @@ pub const QuicServer = struct {
             if (use_heap) self.allocator.free(buf);
         }
     }
-    
+
     /// Process H3 DATAGRAM payload (with varint flow_id prefix)
     /// Returns true if successfully handled as H3 DATAGRAM, false if should fall back to QUIC
     fn processH3Datagram(self: *QuicServer, conn: *connection.Connection, payload: []const u8) !bool {
-        self.debugPrint("[DEBUG] processH3Datagram: attempting to decode varint from {} bytes\n", .{payload.len});
-        
+        debugPrint(self, "[DEBUG] processH3Datagram: attempting to decode varint from {} bytes\n", .{payload.len});
+
         // Decode varint flow_id from the payload
         const varint_result = h3_datagram.decodeVarint(payload) catch |err| {
             // Invalid varint format - not an H3 DATAGRAM
-            self.debugPrint("[DEBUG] Failed to decode varint: {}\n", .{err});
+            debugPrint(self, "[DEBUG] Failed to decode varint: {}\n", .{err});
             return false;
         };
-        
+
         const flow_id = varint_result.value;
         const payload_offset = varint_result.consumed;
-        self.debugPrint("[DEBUG] Decoded flow_id={}, consumed {} bytes\n", .{flow_id, payload_offset});
-        
+        debugPrint(self, "[DEBUG] Decoded flow_id={}, consumed {} bytes\n", .{ flow_id, payload_offset });
+
         if (payload_offset >= payload.len) {
             // No payload after flow_id
-            self.debugPrint("[DEBUG] Empty H3 DATAGRAM payload after flow_id\n", .{});
+            debugPrint(self, "[DEBUG] Empty H3 DATAGRAM payload after flow_id\n", .{});
             self.h3_dgrams_received += 1; // Count it but don't process empty payload
             return true;
         }
-        
+
         const h3_payload = payload[payload_offset..];
-        self.debugPrint("[DEBUG] H3 DATAGRAM payload size: {} bytes\n", .{h3_payload.len});
-        
+        debugPrint(self, "[DEBUG] H3 DATAGRAM payload size: {} bytes\n", .{h3_payload.len});
+
         // Look up the request state for this flow_id
         const flow_key = FlowKey{ .conn = conn, .flow_id = flow_id };
-        self.debugPrint("[DEBUG] Looking up flow_key: conn={*}, flow_id={}\n", .{conn, flow_id});
-        
+        debugPrint(self, "[DEBUG] Looking up flow_key: conn={*}, flow_id={}\n", .{ conn, flow_id });
+
         if (self.h3_dgram_flows.get(flow_key)) |state| {
-            self.debugPrint("[DEBUG] Found flow mapping for flow_id={}\n", .{flow_id});
+            debugPrint(self, "[DEBUG] Found flow mapping for flow_id={}\n", .{flow_id});
             self.h3_dgrams_received += 1;
-            
+
             if (state.on_h3_dgram) |callback| {
                 // Debug log for H3 DATAGRAM
-                self.debugPrint("[DEBUG] H3 DGRAM recv flow={d} len={d}, invoking callback\n", .{ flow_id, h3_payload.len });
-                
+                debugPrint(self, "[DEBUG] H3 DGRAM recv flow={d} len={d}, invoking callback\n", .{ flow_id, h3_payload.len });
+
                 // Invoke the H3 DATAGRAM callback
                 callback(&state.request, &state.response, h3_payload) catch |err| {
-                    // Count would_block errors for H3 DATAGRAM sends  
+                    // Count would_block errors for H3 DATAGRAM sends
                     if (err == error.WouldBlock) {
                         self.h3_dgrams_would_block += 1;
-                        self.debugPrint("[DEBUG] H3 DATAGRAM callback returned WouldBlock\n", .{});
+                        debugPrint(self, "[DEBUG] H3 DATAGRAM callback returned WouldBlock\n", .{});
                     } else {
-                        self.debugPrint("[DEBUG] H3 DATAGRAM callback error: {}\n", .{err});
+                        debugPrint(self, "[DEBUG] H3 DATAGRAM callback error: {}\n", .{err});
                     }
                     // Don't propagate callback errors - continue processing
                 };
-                self.debugPrint("[DEBUG] H3 DATAGRAM callback completed\n", .{});
+                debugPrint(self, "[DEBUG] H3 DATAGRAM callback completed\n", .{});
             } else {
                 // Route matched but no H3 DATAGRAM callback registered
-                self.debugPrint("[DEBUG] H3 DGRAM recv flow={d} len={d} - no callback registered\n", .{ flow_id, h3_payload.len });
+                debugPrint(self, "[DEBUG] H3 DGRAM recv flow={d} len={d} - no callback registered\n", .{ flow_id, h3_payload.len });
             }
-            
+
+            return true;
+        }
+
+        // Check WebTransport session datagram map
+        if (self.wt_dgram_map.get(flow_key)) |session_state| {
+            debugPrint(self, "[DEBUG] Found WebTransport session for flow_id={}\n", .{flow_id});
+            self.wt_dgrams_received += 1;
+
+            if (session_state.on_datagram) |callback| {
+                debugPrint(self, "[DEBUG] WT DGRAM recv session={d} len={d}, invoking callback\n", .{ flow_id, h3_payload.len });
+
+                // Invoke the WebTransport datagram callback
+                callback(session_state.session, h3_payload) catch |err| {
+                    if (err == error.WouldBlock) {
+                        self.wt_dgrams_would_block += 1;
+                        debugPrint(self, "[DEBUG] WebTransport DATAGRAM callback returned WouldBlock\n", .{});
+                    } else {
+                        debugPrint(self, "[DEBUG] WebTransport DATAGRAM callback error: {}\n", .{err});
+                    }
+                };
+                debugPrint(self, "[DEBUG] WebTransport DATAGRAM callback completed\n", .{});
+            }
+
             return true;
         } else {
             // Unknown flow_id - drop and count
             self.h3_dgrams_unknown_flow += 1;
-            self.debugPrint("[DEBUG] H3 DGRAM recv unknown flow_id={d} len={d} - dropped\n", .{ flow_id, h3_payload.len });
-            
+            debugPrint(self, "[DEBUG] H3 DGRAM recv unknown flow_id={d} len={d} - dropped\n", .{ flow_id, h3_payload.len });
+
             // Debug: print all registered flow_ids for this connection
-            if (self.appDebug()) {
+            if (appDebug(self)) {
                 std.debug.print("[DEBUG] Registered flow_ids for conn={*}:\n", .{conn});
                 var it = self.h3_dgram_flows.iterator();
                 while (it.next()) |entry| {
@@ -1386,9 +1754,384 @@ pub const QuicServer = struct {
                     }
                 }
             }
-            
+
             return true; // Still handled as H3 DATAGRAM (just dropped)
         }
+    }
+
+    /// Process readable QUIC streams for WebTransport unidirectional streams.
+    /// This is experimental, behind H3_WT_STREAMS=1. We only attempt to bind
+    /// uni streams after H3 is active and at least one WT session exists.
+    fn processReadableWtStreams(self: *QuicServer, conn: *connection.Connection) !void {
+        while (conn.conn.streamReadableNext()) |stream_id| {
+            // Handle unidirectional client-initiated WT streams
+            if ((stream_id & 0x2) == 1) {
+                // uni streams
+                // Only peer-initiated (client) uni streams are candidates
+                if ((stream_id & 0x1) != 0) continue; // not client-initiated
+                // Skip the first 3 client-initiated uni streams used by H3 (control, QPACK enc/dec)
+                const client_uni_index = stream_id >> 2; // 0-based index over client uni streams (2,6,10,...)
+                if (client_uni_index < 3) continue;
+            } else {
+                // Bidirectional
+                // Only peer-initiated (client) bidi considered for binding here
+                if ((stream_id & 0x1) != 0) continue; // server-initiated -> we created it
+            }
+            // Only peer-initiated (client) uni streams are candidates
+            if ((stream_id & 0x1) != 0) continue; // not client-initiated
+            // Skip the first 3 client-initiated uni streams used by H3 (control, QPACK enc/dec)
+            const client_uni_index = stream_id >> 2; // 0-based index over client uni streams (2,6,10,...)
+            if (client_uni_index < 3) continue;
+
+            const sk = StreamKey{ .conn = conn, .stream_id = stream_id };
+            // If already bound, deliver data
+            if (self.wt_streams.get(sk)) |wt_stream| {
+                // Read and deliver data to session handler
+                var buf: [4096]u8 = undefined;
+                while (true) {
+                    const res = conn.conn.streamRecv(stream_id, &buf) catch |err| {
+                        if (err == quiche.QuicheError.Done) break; // no more data
+                        try quiche.mapError(@intCast(0)); // no-op to satisfy type; log below
+                        std.debug.print("WT stream recv error on {}: {}\n", .{ stream_id, err });
+                        break;
+                    };
+                    if (res.n == 0 and !res.fin) break;
+                    if (res.n > 0) {
+                        self.deliverWtStreamData(conn, wt_stream, buf[0..res.n], false) catch |e| {
+                            if (e != error.WouldBlock) std.debug.print("WT stream data cb error: {}\n", .{e});
+                        };
+                    }
+                    if (res.fin) {
+                        self.deliverWtStreamData(conn, wt_stream, &[_]u8{}, true) catch {};
+                        // Closed; notify and cleanup
+                        self.closeWtStream(conn, wt_stream);
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            if ((stream_id & 0x2) == 1) {
+                // Try to bind as a WT uni stream: read preface (type + session_id)
+                try self.tryBindIncomingUniStream(conn, stream_id);
+            } else if (self.enable_wt_bidi) {
+                // Try to bind as a WT bidi stream: read WEBTRANSPORT_STREAM (0x41) + session_id
+                try self.tryBindIncomingBidiStream(conn, stream_id);
+            }
+        }
+    }
+
+    fn tryBindIncomingBidiStream(self: *QuicServer, conn: *connection.Connection, stream_id: u64) !void {
+        // Validate it is a client-initiated bidirectional stream
+        if ((stream_id & 0x2) != 0) return; // not bidirectional
+        if ((stream_id & 0x1) != 0) return; // not client-initiated
+
+        const sk = StreamKey{ .conn = conn, .stream_id = stream_id };
+        var tmp: [64]u8 = undefined;
+        const res = conn.conn.streamRecv(stream_id, &tmp) catch |err| {
+            if (err == quiche.QuicheError.Done) return; // nothing to read yet
+            return err;
+        };
+
+        // Accumulate preface (reuse WtUniPreface struct for small buffer)
+        var preface_buf: [32]u8 = undefined;
+        var preface_len: usize = 0;
+        if (self.wt_uni_preface.get(sk)) |p| {
+            @memcpy(preface_buf[0..p.len], p.buf[0..p.len]);
+            preface_len = p.len;
+            _ = self.wt_uni_preface.remove(sk);
+        }
+        const to_copy = @min(preface_buf.len - preface_len, res.n);
+        @memcpy(preface_buf[preface_len .. preface_len + to_copy], tmp[0..to_copy]);
+        preface_len += to_copy;
+
+        // Parse bidi preface: 0x41 + session_id
+        const v1 = h3.datagram.decodeVarint(preface_buf[0..preface_len]) catch |e| {
+            if (e == error.BufferTooShort) {
+                var st = WtUniPreface{ .len = preface_len };
+                @memcpy(st.buf[0..preface_len], preface_buf[0..preface_len]);
+                try self.wt_uni_preface.put(sk, st);
+                return;
+            }
+            return;
+        };
+        if (v1.value != h3.WebTransportSession.BIDI_STREAM_TYPE) {
+            // Not a WT bidi preface; ignore
+            return;
+        }
+        if (v1.consumed >= preface_len) return; // need more
+        const v2 = h3.datagram.decodeVarint(preface_buf[v1.consumed .. preface_len]) catch |e| {
+            if (e == error.BufferTooShort) {
+                var st2 = WtUniPreface{ .len = preface_len };
+                @memcpy(st2.buf[0..preface_len], preface_buf[0..preface_len]);
+                try self.wt_uni_preface.put(sk, st2);
+                return;
+            }
+            return;
+        };
+        const session_id = v2.value;
+
+        // Verify session exists and limit
+        if (self.countWtStreamsForSession(conn, session_id, .bidi) >= self.config.wt_max_streams_bidi) {
+            conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.read, self.config.wt_app_err_stream_limit) catch {};
+            conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.write, self.config.wt_app_err_stream_limit) catch {};
+            return;
+        }
+        const sess_key = SessionKey{ .conn = conn, .session_id = session_id };
+        const sess_state = self.wt_sessions.get(sess_key) orelse return;
+
+        // Bind stream
+        const wt_stream = try self.allocator.create(h3.WebTransportSession.WebTransportStream);
+        wt_stream.* = .{
+            .stream_id = stream_id,
+            .dir = .bidi,
+            .role = .incoming,
+            .session_id = session_id,
+            .allocator = self.allocator,
+        };
+        try self.wt_streams.put(sk, wt_stream);
+        if (sess_state.on_bidi_open) |cb| {
+            cb(sess_state.session, wt_stream) catch |err| {
+                std.debug.print("WT bidi open cb error: {}\\n", .{err});
+            };
+        }
+
+        // Deliver any extra bytes beyond preface
+        if (res.n > (v1.consumed + v2.consumed)) {
+            const extra = tmp[v1.consumed + v2.consumed .. res.n];
+            self.deliverWtStreamData(conn, wt_stream, extra, res.fin) catch {};
+        }
+        if (res.fin) self.closeWtStream(conn, wt_stream);
+    }
+
+    fn processWritableWtStreams(self: *QuicServer, conn: *connection.Connection) !void {
+        var remaining: isize = @intCast(@as(i64, @min(self.config.wt_write_quota_per_tick, @as(usize, std.math.maxInt(i64)))));
+        while (conn.conn.streamWritableNext()) |stream_id| {
+            const sk = StreamKey{ .conn = conn, .stream_id = stream_id };
+            if (self.wt_streams.get(sk)) |wt_stream| {
+                if (wt_stream.pending.items.len == 0) continue;
+                const buf = wt_stream.pending.items;
+                const written = conn.conn.streamSend(stream_id, buf, wt_stream.fin_on_flush) catch |err| {
+                    if (err == quiche.QuicheError.Done) continue; // still blocked
+                    // On other errors, drop stream
+                    std.debug.print("WT stream send error on {}: {}\n", .{ stream_id, err });
+                    _ = self.wt_streams.remove(sk);
+                    wt_stream.allocator.destroy(wt_stream);
+                    continue;
+                };
+                if (written > 0) {
+                    remaining -= @intCast(@as(i64, @min(@as(usize, written), @as(usize, std.math.maxInt(i64)))));
+                    if (remaining <= 0) return; // quota exhausted for this tick
+                    // Remove written prefix
+                    if (written >= buf.len) {
+                        wt_stream.pending.clearRetainingCapacity();
+                        // If FIN was pending and all data flushed, keep mapped; closed by peer later
+                    } else {
+                        // shift remaining
+                        @memmove(buf[0..buf.len - written], buf[written..]);
+                        wt_stream.pending.items = buf[0 .. buf.len - written];
+                    }
+                }
+            }
+        }
+        // No capsule flushing is needed; WT uses per-stream prefaces only.
+    }
+
+    /// Send data on a WT stream with backpressure handling.
+    /// Returns bytes written immediately. If backpressured, queues data and returns error.WouldBlock.
+    pub fn sendWtStream(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        stream: *h3.WebTransportSession.WebTransportStream,
+        data: []const u8,
+        fin: bool,
+    ) !usize {
+        if (stream.pending.items.len == 0) {
+            const n = conn.conn.streamSend(stream.stream_id, data, fin) catch |err| {
+                if (err == quiche.QuicheError.Done or err == quiche.QuicheError.FlowControl) {
+                    if (data.len > self.config.wt_stream_pending_max) return error.WouldBlock;
+                    try stream.pending.appendSlice(self.allocator, data);
+                    if (fin) stream.fin_on_flush = true;
+                    return error.WouldBlock;
+                }
+                return err;
+            };
+            if (n < data.len) {
+                const rem = data.len - n;
+                if (rem + stream.pending.items.len > self.config.wt_stream_pending_max) return error.WouldBlock;
+                try stream.pending.appendSlice(self.allocator, data[n..]);
+                if (fin) stream.fin_on_flush = true;
+            }
+            if (self.wt_sessions.get(.{ .conn = conn, .session_id = stream.session_id })) |st| st.last_activity_ms = std.time.milliTimestamp();
+            return n;
+        }
+        if (data.len + stream.pending.items.len > self.config.wt_stream_pending_max) return error.WouldBlock;
+        try stream.pending.appendSlice(self.allocator, data);
+        if (fin) stream.fin_on_flush = true;
+        if (self.wt_sessions.get(.{ .conn = conn, .session_id = stream.session_id })) |st| st.last_activity_ms = std.time.milliTimestamp();
+        return error.WouldBlock;
+    }
+
+    /// Convenience helper: ensure all bytes are either sent immediately or
+    /// queued for later sending. Never returns WouldBlock — it enqueues the
+    /// remainder when immediate send can't progress.
+    pub fn sendWtStreamAll(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        stream: *h3.WebTransportSession.WebTransportStream,
+        data: []const u8,
+        fin: bool,
+    ) !void {
+        if (data.len == 0 and !fin) return;
+        const n = self.sendWtStream(conn, stream, data, fin) catch |err| {
+            if (err == error.WouldBlock) return; // already enqueued
+            return err;
+        };
+        if (n < data.len) {
+            // Remaining bytes already enqueued by sendWtStream; nothing else to do
+            return;
+        }
+    }
+
+    /// Drain all currently available bytes from a WT stream into `out`.
+    /// Returns the total bytes copied and whether a FIN was observed.
+    /// Stops when the stream reports Done (no more data now), when `out` is full,
+    /// or when FIN is received. Does not allocate.
+    pub fn readWtStreamAll(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        stream: *h3.WebTransportSession.WebTransportStream,
+        out: []u8,
+    ) !struct { n: usize, fin: bool } {
+        _ = self;
+        var total: usize = 0;
+        var saw_fin = false;
+        if (out.len == 0) return .{ .n = 0, .fin = false };
+        while (total < out.len) {
+            const res = conn.conn.streamRecv(stream.stream_id, out[total..]) catch |err| {
+                if (err == quiche.QuicheError.Done) break; // no more data right now
+                return err;
+            };
+            if (res.n == 0 and !res.fin) break; // nothing more currently
+            total += res.n;
+            if (res.fin) { saw_fin = true; break; }
+            if (res.n == 0) break; // avoid tight loop
+        }
+        return .{ .n = total, .fin = saw_fin };
+    }
+
+    fn tryBindIncomingUniStream(self: *QuicServer, conn: *connection.Connection, stream_id: u64) !void {
+        // Validate it is a client-initiated unidirectional stream beyond H3 control/QPACK streams
+        if ((stream_id & 0x2) == 0) return; // not unidirectional
+        if ((stream_id & 0x1) != 0) return; // not client-initiated
+        if ((stream_id >> 2) < 3) return; // likely H3 control/QPACK stream
+        const sk = StreamKey{ .conn = conn, .stream_id = stream_id };
+        var tmp: [64]u8 = undefined;
+        const res = conn.conn.streamRecv(stream_id, &tmp) catch |err| {
+            if (err == quiche.QuicheError.Done) return; // nothing to read yet
+            return err;
+        };
+        var preface_buf: [32]u8 = undefined;
+        var preface_len: usize = 0;
+        if (self.wt_uni_preface.get(sk)) |p| {
+            // Copy previously buffered bytes
+            @memcpy(preface_buf[0..p.len], p.buf[0..p.len]);
+            preface_len = p.len;
+            _ = self.wt_uni_preface.remove(sk);
+        }
+        const to_copy = @min(preface_buf.len - preface_len, res.n);
+        @memcpy(preface_buf[preface_len .. preface_len + to_copy], tmp[0..to_copy]);
+        preface_len += to_copy;
+
+        // Try to parse preface
+        const parsed = h3.WebTransportSession.parseUniPreface(preface_buf[0..preface_len]) catch |e| {
+            if (e == error.BufferTooShort) {
+                // Persist for next read
+                var st = WtUniPreface{ .len = preface_len };
+                @memcpy(st.buf[0..preface_len], preface_buf[0..preface_len]);
+                try self.wt_uni_preface.put(sk, st);
+                return;
+            }
+            // Unexpected stream type or parse error: ignore further processing
+            // We cannot safely re-inject bytes; log and return.
+            std.debug.print("Ignoring unknown unidirectional stream {} (not WT)\n", .{stream_id});
+            return;
+        };
+
+        // Locate session
+        const sess_key = SessionKey{ .conn = conn, .session_id = parsed.session_id };
+        const sess_state = self.wt_sessions.get(sess_key) orelse {
+            std.debug.print("WT uni stream {} references unknown session {}\n", .{ stream_id, parsed.session_id });
+            return;
+        };
+
+        // Enforce per-session uni stream limit
+        if (self.countWtStreamsForSession(conn, parsed.session_id, .uni) >= self.config.wt_max_streams_uni) {
+            std.debug.print("WT uni stream limit reached for session {}\n", .{parsed.session_id});
+            return;
+        }
+
+        // Create stream object
+        const wt_stream = try self.allocator.create(h3.WebTransportSession.WebTransportStream);
+        wt_stream.* = .{
+            .stream_id = stream_id,
+            .dir = .uni,
+            .role = .incoming,
+            .session_id = parsed.session_id,
+            .allocator = self.allocator,
+        };
+        try self.wt_streams.put(sk, wt_stream);
+
+        // Notify open
+        if (sess_state.on_uni_open) |cb| {
+            cb(sess_state.session, wt_stream) catch |err| {
+                std.debug.print("WT uni open callback error: {}\n", .{err});
+            };
+        }
+
+        // Deliver any bytes beyond the preface
+        if (res.n > parsed.consumed) {
+            const leftover = tmp[parsed.consumed..res.n];
+            self.deliverWtStreamData(conn, wt_stream, leftover, res.fin) catch |err| {
+                if (err != error.WouldBlock) std.debug.print("WT stream data cb error: {}\n", .{err});
+            };
+            if (res.fin) self.closeWtStream(conn, wt_stream);
+        } else if (res.fin) {
+            // FIN immediately after preface
+            self.deliverWtStreamData(conn, wt_stream, &[_]u8{}, true) catch {};
+            self.closeWtStream(conn, wt_stream);
+        }
+    }
+
+    fn countWtStreamsForSession(self: *QuicServer, conn: *connection.Connection, session_id: u64, dir: h3.WebTransportSession.StreamDir) usize {
+        var count: usize = 0;
+        var it = self.wt_streams.iterator();
+        while (it.next()) |entry| {
+            if (entry.key_ptr.conn == conn and entry.value_ptr.*.session_id == session_id and entry.value_ptr.*.dir == dir) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    fn deliverWtStreamData(self: *QuicServer, conn: *connection.Connection, stream: *h3.WebTransportSession.WebTransportStream, data: []const u8, fin: bool) !void {
+        if (self.wt_sessions.get(.{ .conn = conn, .session_id = stream.session_id })) |st| {
+            st.last_activity_ms = std.time.milliTimestamp();
+            if (st.on_stream_data) |cb| cb(stream, data, fin) catch |err| return err;
+        }
+    }
+
+    fn closeWtStream(self: *QuicServer, conn: *connection.Connection, stream: *h3.WebTransportSession.WebTransportStream) void {
+        // Notify closed and remove mapping
+        var it = self.wt_sessions.iterator();
+        while (it.next()) |entry| {
+            if (entry.key_ptr.conn == conn and entry.key_ptr.session_id == stream.session_id) {
+                if (entry.value_ptr.*.on_stream_closed) |cb| cb(stream);
+                break;
+            }
+        }
+        _ = self.wt_streams.remove(.{ .conn = conn, .stream_id = stream.stream_id });
+        stream.allocator.destroy(stream);
     }
 
     /// Helper function to clean up both stream state and flow_id mapping
@@ -1401,7 +2144,7 @@ pub const QuicServer = struct {
             const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
             _ = self.h3_dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
         }
-        
+
         // Clean up state memory
         state.response.deinit();
         state.arena.deinit();
@@ -1526,6 +2269,28 @@ pub const QuicServer = struct {
             }
         }
 
+        // Clean up WebTransport sessions for this connection
+        {
+            var wt_it = self.wt_sessions.iterator();
+            var wt_keys_to_remove = std.ArrayList(SessionKey){};
+            defer wt_keys_to_remove.deinit(self.allocator);
+            while (wt_it.next()) |entry| {
+                const sk = entry.key_ptr.*;
+                if (sk.conn == conn) {
+                    wt_keys_to_remove.append(self.allocator, sk) catch {};
+                }
+            }
+            for (wt_keys_to_remove.items) |sk| {
+                if (self.wt_sessions.fetchRemove(sk)) |kv| {
+                    // Remove from datagram map
+                    _ = self.wt_dgram_map.remove(.{ .conn = conn, .flow_id = sk.session_id });
+                    // Clean up session state
+                    kv.value.deinit(self.allocator);
+                    self.wt_sessions_closed += 1;
+                }
+            }
+        }
+
         // Log stats
         var stats: c.quiche_stats = undefined;
         conn.conn.stats(&stats);
@@ -1569,6 +2334,31 @@ pub const QuicServer = struct {
         }
     }
 
+    fn expireIdleWtSessions(self: *QuicServer, conn: *connection.Connection, now_ms: i64) !void {
+        var to_remove = std.ArrayList(SessionKey){};
+        defer to_remove.deinit(self.allocator);
+        var it = self.wt_sessions.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (key.conn != conn) continue;
+            const st = entry.value_ptr.*;
+            if (st.last_activity_ms == 0) continue;
+            const idle = now_ms - st.last_activity_ms;
+            if (idle >= @as(i64, @intCast(self.config.wt_session_idle_ms))) {
+                // FIN the CONNECT stream to close the session if still active
+                _ = st.session.h3_conn.sendBody(&conn.conn, st.session.session_id, "", true) catch {};
+                to_remove.append(self.allocator, key) catch {};
+            }
+        }
+        for (to_remove.items) |k| {
+            if (self.wt_sessions.fetchRemove(k)) |kv| {
+                _ = self.wt_dgram_map.remove(.{ .conn = conn, .flow_id = k.session_id });
+                kv.value.deinit(self.allocator);
+                self.wt_sessions_closed += 1;
+            }
+        }
+    }
+
     fn onSignal(signum: c_int, user_data: *anyopaque) void {
         const self: *QuicServer = @ptrCast(@alignCast(user_data));
         const sig_name = if (signum == posix.SIG.INT) "SIGINT" else "SIGTERM";
@@ -1579,6 +2369,30 @@ pub const QuicServer = struct {
             self.connections_accepted,
             self.packets_received,
             self.packets_sent,
+        });
+
+        // QUIC DATAGRAM stats
+        std.debug.print("  QUIC dgrams: recv={d}, sent={d}, dropped_on_send={d}\n", .{
+            self.dgrams_received,
+            self.dgrams_sent,
+            self.dgrams_dropped_send,
+        });
+
+        // H3 DATAGRAM stats
+        std.debug.print("  H3 dgrams: recv={d}, sent={d}, unknown_flow={d}, would_block={d}\n", .{
+            self.h3_dgrams_received,
+            self.h3_dgrams_sent,
+            self.h3_dgrams_unknown_flow,
+            self.h3_dgrams_would_block,
+        });
+
+        // WebTransport stats
+        std.debug.print("  WebTransport: sessions={{created={d}, closed={d}}}, dgrams={{recv={d}, sent={d}, would_block={d}}}\n", .{
+            self.wt_sessions_created,
+            self.wt_sessions_closed,
+            self.wt_dgrams_received,
+            self.wt_dgrams_sent,
+            self.wt_dgrams_would_block,
         });
 
         self.stop();

@@ -36,7 +36,7 @@ pub fn main() !void {
         .bind_addr = "127.0.0.1",
         .cert_path = cert_path,
         .key_path = key_path,
-        .alpn_protocols = &.{ "h3" },
+        .alpn_protocols = &.{"h3"},
         .enable_debug_logging = false,
         .enable_pacing = true,
         .cc_algorithm = "cubic",

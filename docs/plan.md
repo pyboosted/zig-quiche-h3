@@ -325,12 +325,50 @@ Status: Completed ✓
   - E2E: `tests/e2e/basic/h3_dgram.test.ts`
 
 Milestone 8: WebTransport (Experimental) (Day 23–25)
-Status: Planned
-- Extended CONNECT session management (`:protocol = webtransport`).
-- Session‑bound DATAGRAMs (session id = CONNECT stream id). No WT streams yet (blocked by C FFI).
-- Tests (planned):
-  - CLI test client performs WT handshake; session DATAGRAM echo
-  - Stretch: browser WT handshake with trusted cert/Alt‑Svc
+Status: Completed ✓ (Server); Client planned next milestone
+
+Delivered (server):
+- Extended CONNECT session management (`:protocol = webtransport`) negotiated via SETTINGS.
+- Session‑bound H3 DATAGRAMs (flow_id = CONNECT stream id), echo handler example.
+- Unidirectional WT Streams (experimental, gated by `H3_WT_STREAMS=1`):
+  - Incoming uni streams: parse preface (stream_type + session_id), bind to session, deliver data via callbacks.
+  - Outgoing uni streams: `openWtUniStream()` sends preface and returns a stream handle; `sendWtStream()` handles backpressure.
+- Bidi streams: binding via per-stream preface (no capsules).
+
+Implementation notes:
+- FFI: QUIC stream APIs (`streamRecv/send/shutdown`, readable/writable iteration, capacity) on `quiche.Connection`.
+- H3: `H3Connection.extendedConnectEnabledByPeer()` wrapped; `WebTransportSession.close()` now FINs the CONNECT stream.
+- Server: per‑session WT maps, cleanup on stream and connection close, write‑quota per tick (`wt_write_quota_per_tick`).
+- Router: `routeWebTransport()` extended with stream callbacks.
+ - WT REGISTER refusal: on over‑limit or invalid `REGISTER_WEBTRANSPORT_STREAM`, the server refuses the referenced stream by issuing `STOP_SENDING` (read) and `RESET_STREAM` (write) with configurable app error codes (`wt_app_err_stream_limit`, `wt_app_err_invalid_stream`).
+
+Config / Flags:
+- Env flags: `H3_WEBTRANSPORT=1` (enable WT/H3 settings), `H3_WT_STREAMS=1` (enable WT streams loop).
+- Server config:
+  - `wt_max_streams_uni` (default 32)
+  - `wt_max_streams_bidi` (default 32)
+  - `wt_write_quota_per_tick` (default 64 KiB)
+  - (removed) capsule quotas; not needed without legacy path
+
+Public APIs:
+- Router WT stream callbacks (optional): `.on_wt_uni_open`, `.on_wt_bidi_open`, `.on_wt_stream_data`, `.on_wt_stream_closed`.
+- Server: `openWtUniStream(conn, session_state)`, `openWtBidiStream(conn, session_state)`, `sendWtStream(conn, stream, data, fin)`, `queueWtRegisterCapsule(session_state, stream_id)`.
+
+Testing status:
+- Current `wt-client` is a stub (no real handshake); server paths validated by build‑time scaffolding and unit‑level pieces. Real interop and a full client will be implemented next.
+
+Interop checklist (for next milestone):
+- Verify ALPN `h3` and Alt-Svc advert when testing with Chrome; serve certs trusted by the OS (or configure Chrome with allow-insecure-localhost for dev).
+- Confirm Extended CONNECT negotiated (`extended_connect_enabled_by_peer` true) via server logs.
+- With a quiche-based test client:
+  - Establish WT session (CONNECT + `:protocol=webtransport`), receive 200.
+  - Open a client bidi stream with the bidi preface (0x41 + session_id); send/recv data.
+  - Open a client uni stream with WT preface (stream-type + session_id), verify server binds + receives.
+  - Send/receive DATAGRAMs with varint flow_id = CONNECT id.
+- With Chrome WebTransport:
+  - Serve Alt-Svc: `h3=":4433"` on an HTTPS origin; ensure HTTP/3.
+  - Use WebTransport JS API to open session; create uni/bidi streams; verify callbacks fire and data E2E succeeds.
+- Observe qlogs for stream events; compare with expectations.
 
 Milestone 9: Interop + Performance (Day 26–28)
 Status: Planned

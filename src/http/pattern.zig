@@ -16,7 +16,7 @@ pub const CompiledPattern = struct {
     segments: []Segment,
     specificity_score: i32,
     allocator: std.mem.Allocator,
-    
+
     pub fn deinit(self: *CompiledPattern) void {
         for (self.segments) |*segment| {
             switch (segment.*) {
@@ -36,10 +36,10 @@ pub const CompiledPattern = struct {
 ///   "/files/*" -> [literal("files"), wildcard]
 pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !CompiledPattern {
     if (pattern.len == 0) return error.EmptyPattern;
-    
+
     var segments = std.ArrayList(Segment){};
     defer segments.deinit(allocator);
-    
+
     // Handle root path specially
     if (std.mem.eql(u8, pattern, "/")) {
         const literal = try allocator.dupe(u8, "/");
@@ -49,7 +49,7 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !CompiledPatte
         var iter = std.mem.tokenizeScalar(u8, pattern, '/');
         while (iter.next()) |segment| {
             if (segment.len == 0) continue;
-            
+
             if (segment[0] == ':') {
                 // Parameter segment
                 if (segment.len == 1) return error.EmptyParameterName;
@@ -68,17 +68,17 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !CompiledPatte
             }
         }
     }
-    
+
     if (segments.items.len == 0) {
         return error.NoSegments;
     }
-    
+
     // Calculate specificity score for routing priority
     const score = calculateSpecificity(segments.items);
-    
+
     const owned_segments = try allocator.alloc(Segment, segments.items.len);
     @memcpy(owned_segments, segments.items);
-    
+
     return CompiledPattern{
         .segments = owned_segments,
         .specificity_score = score,
@@ -93,7 +93,7 @@ fn calculateSpecificity(segments: []const Segment) i32 {
     var literal_count: i32 = 0;
     var param_count: i32 = 0;
     var wildcard_count: i32 = 0;
-    
+
     for (segments) |segment| {
         switch (segment) {
             .literal => literal_count += 1,
@@ -101,7 +101,7 @@ fn calculateSpecificity(segments: []const Segment) i32 {
             .wildcard => wildcard_count += 1,
         }
     }
-    
+
     // Score formula: prioritize literals, penalize params and wildcards
     // Each literal: +1000, each param: -10, each wildcard: -100
     // Plus total segments * 10 for length priority
@@ -123,29 +123,29 @@ pub fn match(
             return std.mem.eql(u8, path, "/");
         }
     }
-    
+
     // Tokenize the path
     var path_segments = std.ArrayList([]const u8){};
     defer path_segments.deinit(allocator);
-    
+
     if (!std.mem.eql(u8, path, "/")) {
         var iter = std.mem.tokenizeScalar(u8, path, '/');
         while (iter.next()) |segment| {
             try path_segments.append(allocator, segment);
         }
     }
-    
+
     // Check non-wildcard segments
     var pattern_idx: usize = 0;
     var path_idx: usize = 0;
-    
+
     while (pattern_idx < pattern.segments.len) : (pattern_idx += 1) {
         const pattern_segment = pattern.segments[pattern_idx];
-        
+
         switch (pattern_segment) {
             .literal => |expected| {
                 if (path_idx >= path_segments.items.len) return false;
-                
+
                 const actual = path_segments.items[path_idx];
                 if (!std.mem.eql(u8, expected, actual)) {
                     return false;
@@ -154,7 +154,7 @@ pub fn match(
             },
             .param => |name| {
                 if (path_idx >= path_segments.items.len) return false;
-                
+
                 const value = path_segments.items[path_idx];
                 // Store the parameter value (caller owns the map and its allocator)
                 try params.put(allocator, name, value);
@@ -166,14 +166,14 @@ pub fn match(
                 if (path_idx < path_segments.items.len) {
                     var wildcard_parts = std.ArrayList(u8){};
                     defer wildcard_parts.deinit(allocator);
-                    
+
                     var first = true;
                     while (path_idx < path_segments.items.len) : (path_idx += 1) {
                         if (!first) try wildcard_parts.append(allocator, '/');
                         try wildcard_parts.appendSlice(allocator, path_segments.items[path_idx]);
                         first = false;
                     }
-                    
+
                     // Store wildcard match as "*" parameter
                     const wildcard_value = try allocator.dupe(u8, wildcard_parts.items);
                     try params.put(allocator, "*", wildcard_value);
@@ -182,7 +182,7 @@ pub fn match(
             },
         }
     }
-    
+
     // All pattern segments matched, check if all path segments were consumed
     return path_idx == path_segments.items.len;
 }
@@ -190,7 +190,7 @@ pub fn match(
 // Tests
 test "pattern compilation" {
     const allocator = std.testing.allocator;
-    
+
     // Test root path
     {
         var pattern = try compile(allocator, "/");
@@ -198,7 +198,7 @@ test "pattern compilation" {
         try std.testing.expectEqual(@as(usize, 1), pattern.segments.len);
         try std.testing.expect(pattern.segments[0] == .literal);
     }
-    
+
     // Test literal segments
     {
         var pattern = try compile(allocator, "/api/users");
@@ -208,7 +208,7 @@ test "pattern compilation" {
         try std.testing.expectEqualStrings("api", pattern.segments[0].literal);
         try std.testing.expectEqualStrings("users", pattern.segments[1].literal);
     }
-    
+
     // Test parameter segments
     {
         var pattern = try compile(allocator, "/api/users/:id");
@@ -217,7 +217,7 @@ test "pattern compilation" {
         try std.testing.expect(pattern.segments[2] == .param);
         try std.testing.expectEqualStrings("id", pattern.segments[2].param);
     }
-    
+
     // Test wildcard
     {
         var pattern = try compile(allocator, "/files/*");
@@ -225,7 +225,7 @@ test "pattern compilation" {
         try std.testing.expectEqual(@as(usize, 2), pattern.segments.len);
         try std.testing.expect(pattern.segments[1] == .wildcard);
     }
-    
+
     // Test wildcard not at end error
     {
         const result = compile(allocator, "/files/*/extra");
@@ -235,25 +235,25 @@ test "pattern compilation" {
 
 test "pattern matching" {
     const allocator = std.testing.allocator;
-    
+
     // Test exact match
     {
         var pattern = try compile(allocator, "/api/users");
         defer pattern.deinit();
-        
+
         var params = std.StringHashMapUnmanaged([]const u8){};
         defer params.deinit(allocator);
-        
+
         const matched = try match(allocator, &pattern, "/api/users", &params);
         try std.testing.expect(matched);
         try std.testing.expectEqual(@as(usize, 0), params.count());
     }
-    
+
     // Test parameter extraction
     {
         var pattern = try compile(allocator, "/api/users/:id");
         defer pattern.deinit();
-        
+
         var params = std.StringHashMapUnmanaged([]const u8){};
         defer params.deinit(allocator);
         defer {
@@ -262,18 +262,18 @@ test "pattern matching" {
                 allocator.free(entry.value_ptr.*);
             }
         }
-        
+
         const matched = try match(allocator, &pattern, "/api/users/123", &params);
         try std.testing.expect(matched);
         try std.testing.expectEqual(@as(usize, 1), params.count());
         try std.testing.expectEqualStrings("123", params.get("id").?);
     }
-    
+
     // Test wildcard matching
     {
         var pattern = try compile(allocator, "/files/*");
         defer pattern.deinit();
-        
+
         var params = std.StringHashMapUnmanaged([]const u8){};
         defer params.deinit(allocator);
         defer {
@@ -282,7 +282,7 @@ test "pattern matching" {
                 allocator.free(entry.value_ptr.*);
             }
         }
-        
+
         const matched = try match(allocator, &pattern, "/files/path/to/file.txt", &params);
         try std.testing.expect(matched);
         try std.testing.expectEqualStrings("path/to/file.txt", params.get("*").?);
@@ -291,17 +291,17 @@ test "pattern matching" {
 
 test "specificity scoring" {
     const allocator = std.testing.allocator;
-    
+
     // More specific patterns should have higher scores
     var exact = try compile(allocator, "/api/users/profile");
     defer exact.deinit();
-    
+
     var with_param = try compile(allocator, "/api/users/:id");
     defer with_param.deinit();
-    
+
     var with_wildcard = try compile(allocator, "/api/*");
     defer with_wildcard.deinit();
-    
+
     try std.testing.expect(exact.specificity_score > with_param.specificity_score);
     try std.testing.expect(with_param.specificity_score > with_wildcard.specificity_score);
 }

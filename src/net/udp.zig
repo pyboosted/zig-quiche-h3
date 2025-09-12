@@ -120,7 +120,7 @@ pub fn sendBatch(fd: posix.socket_t, views: []const SendView) !usize {
 
 pub const UdpSocket = struct {
     fd: std.posix.socket_t,
-    
+
     pub fn close(self: *UdpSocket) void {
         // Best-effort close; ignore errors.
         // Set fd to -1 to prevent double-close if struct is copied
@@ -157,7 +157,7 @@ pub fn bindUdp4Any(port: u16, nonblock: bool) !UdpSocket {
     // This avoids race conditions between socket() and fcntl()
     const base_type = posix.SOCK.DGRAM | posix.SOCK.CLOEXEC;
     const sock_type: u32 = if (nonblock) base_type | posix.SOCK.NONBLOCK else base_type;
-    
+
     const fd = try posix.socket(posix.AF.INET, sock_type, posix.IPPROTO.UDP);
     errdefer posix.close(fd);
 
@@ -193,7 +193,7 @@ pub fn bindUdp6AnyDual(port: u16, nonblock: bool) !UdpSocket {
     // Use atomic socket flags for non-blocking and close-on-exec
     const base_type = posix.SOCK.DGRAM | posix.SOCK.CLOEXEC;
     const sock_type: u32 = if (nonblock) base_type | posix.SOCK.NONBLOCK else base_type;
-    
+
     const fd = try posix.socket(posix.AF.INET6, sock_type, posix.IPPROTO.UDP);
     errdefer posix.close(fd);
 
@@ -238,11 +238,11 @@ pub fn bindUdp6Loopback(port: u16, nonblock: bool) !UdpSocket {
 pub const BindResult = struct {
     v6: ?UdpSocket = null,
     v4: ?UdpSocket = null,
-    
+
     pub fn hasAny(self: BindResult) bool {
         return self.v6 != null or self.v4 != null;
     }
-    
+
     pub fn close(self: *BindResult) void {
         if (self.v6) |*sock| sock.close();
         if (self.v4) |*sock| sock.close();
@@ -254,7 +254,7 @@ pub const BindResult = struct {
 /// Returns a struct with both sockets (one or both may be null).
 pub fn bindAny(port: u16, nonblock: bool) BindResult {
     var result = BindResult{};
-    
+
     // Try IPv6 dual-stack first
     if (bindUdp6AnyDual(port, nonblock)) |sock6| {
         result.v6 = sock6;
@@ -273,7 +273,7 @@ pub fn bindAny(port: u16, nonblock: bool) BindResult {
             // Both failed, result will have no sockets
         }
     }
-    
+
     return result;
 }
 

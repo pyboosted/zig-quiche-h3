@@ -26,6 +26,15 @@
 - Filenames: `snake_case.zig`. Types: `TitleCase`. Functions/vars: `lowerCamelCase`. Use doc comments `///`.
 - Keep modules small; avoid cyclic imports. Never modify `third_party/` sources.
 - Zig 0.15.1+ required. Use `callconv(.c)` (lowercase `.c`). `std.ArrayList` is unmanaged in 0.15—pass an allocator (or use `std.ArrayListUnmanaged`).
+- VS Code: Configure 4-space tabs for Zig files in `.vscode/settings.json`:
+  ```json
+  "[zig]": {
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.detectIndentation": false,
+    "editor.formatOnSave": true
+  }
+  ```
 
 ## Testing Guidelines
 - Unit tests live near code or in `src/tests.zig` using `test "…" {}`; name tests with short, imperative phrases.
@@ -63,3 +72,4 @@
 ## Security & Configuration Tips
 - Do not commit private keys; example certs live under `third_party/quiche/quiche/examples/`.
 - Prefer release builds for performance: `-Dquiche-profile=release`. When linking system libs, set `-Dlink-ssl=true` and supply libev paths if used.
+- Do not ever skip tests until i ask directly

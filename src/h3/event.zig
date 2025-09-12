@@ -22,16 +22,16 @@ fn headerCallback(
     argp: ?*anyopaque,
 ) callconv(.c) c_int {
     const collector = @as(*HeaderCollector, @ptrCast(@alignCast(argp orelse return -1)));
-    
+
     // Create copies of the header data
     const name_slice = collector.allocator.dupe(u8, name[0..name_len]) catch return -1;
     const value_slice = collector.allocator.dupe(u8, value[0..value_len]) catch return -1;
-    
+
     collector.headers.append(collector.allocator, Header{
         .name = name_slice,
         .value = value_slice,
     }) catch return -1;
-    
+
     return 0; // Continue iteration
 }
 
@@ -45,14 +45,14 @@ pub fn collectHeaders(allocator: std.mem.Allocator, event: *quiche.c.quiche_h3_e
         }
         headers.deinit(allocator);
     }
-    
+
     var collector = HeaderCollector{
         .headers = &headers,
         .allocator = allocator,
     };
-    
+
     try quiche.h3.eventForEachHeader(event, headerCallback, &collector);
-    
+
     return headers.toOwnedSlice(allocator);
 }
 
@@ -75,7 +75,7 @@ pub const RequestInfo = struct {
 
 pub fn parseRequestHeaders(headers: []const Header) RequestInfo {
     var info = RequestInfo{};
-    
+
     for (headers) |h| {
         if (std.mem.eql(u8, h.name, ":method")) {
             info.method = h.value;
@@ -87,6 +87,6 @@ pub fn parseRequestHeaders(headers: []const Header) RequestInfo {
             info.scheme = h.value;
         }
     }
-    
+
     return info;
 }

@@ -1,5 +1,55 @@
 const std = @import("std");
 
+fn linkCommon(
+    target: std.Build.ResolvedTarget,
+    comp: *std.Build.Step.Compile,
+    link_ssl: bool,
+    with_libev: bool,
+    libev_lib_dir: ?[]const u8,
+    needs_cpp: bool,
+) void {
+    if (with_libev) {
+        comp.linkSystemLibrary("ev");
+        if (libev_lib_dir) |libdir| comp.addLibraryPath(.{ .cwd_relative = libdir });
+    }
+    comp.linkLibC();
+    switch (target.result.os.tag) {
+        .linux => {
+            if (needs_cpp) comp.linkSystemLibrary("stdc++");
+            comp.linkSystemLibrary("pthread");
+            comp.linkSystemLibrary("dl");
+        },
+        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
+            if (needs_cpp) comp.linkSystemLibrary("c++");
+            // macOS frameworks sometimes needed by ring/BoringSSL
+            comp.linkFramework("Security");
+            comp.linkFramework("CoreFoundation");
+        },
+        else => {},
+    }
+    if (link_ssl) {
+        comp.linkSystemLibrary("ssl");
+        comp.linkSystemLibrary("crypto");
+    }
+}
+
+fn addQuicheLink(
+    b: *std.Build,
+    comp: *std.Build.Step.Compile,
+    use_system_quiche: bool,
+    quiche_lib_path: std.Build.LazyPath,
+    cargo_step: ?*std.Build.Step.Run,
+) void {
+    if (use_system_quiche) {
+        comp.linkSystemLibrary("quiche");
+    } else {
+        comp.addObjectFile(quiche_lib_path);
+        const verify = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
+        comp.step.dependOn(&verify.step);
+    }
+    if (cargo_step) |c| comp.step.dependOn(&c.step);
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -46,41 +96,8 @@ pub fn build(b: *std.Build) void {
     // Include path for quiche C FFI header
     exe_mod.addIncludePath(b.path(quiche_include_dir));
 
-    if (use_system_quiche) {
-        exe.linkSystemLibrary("quiche");
-    } else {
-        // Link the quiche static library built via Cargo with `--features ffi`.
-        exe.addObjectFile(quiche_lib_path);
-        // Verify the library exists (fast failure if missing)
-        const verify_quiche = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
-        exe.step.dependOn(&verify_quiche.step);
-    }
-
-    if (with_libev) {
-        exe.linkSystemLibrary("ev");
-        if (libev_lib_dir) |libdir| exe.addLibraryPath(.{ .cwd_relative = libdir });
-    }
-    exe.linkLibC();
-
-    // Platform-specific C++ runtime and common deps for linking vendored BoringSSL objects.
-    switch (target.result.os.tag) {
-        .linux => {
-            exe.linkSystemLibrary("stdc++");
-            exe.linkSystemLibrary("pthread");
-            exe.linkSystemLibrary("dl");
-        },
-        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
-            exe.linkSystemLibrary("c++");
-            // macOS frameworks sometimes needed by ring/BoringSSL
-            exe.linkFramework("Security");
-            exe.linkFramework("CoreFoundation");
-        },
-        else => {},
-    }
-    if (link_ssl) {
-        exe.linkSystemLibrary("ssl");
-        exe.linkSystemLibrary("crypto");
-    }
+    addQuicheLink(b, exe, use_system_quiche, quiche_lib_path, cargo_step);
+    linkCommon(target, exe, link_ssl, with_libev, libev_lib_dir, true);
 
     b.installArtifact(exe);
 
@@ -89,7 +106,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run the demo executable");
     run_step.dependOn(&run_cmd.step);
-    
+
     // Create shared modules first (used by both M1 and M2)
     // Event loop module with proper include paths
     const event_loop_mod = b.createModule(.{
@@ -101,14 +118,14 @@ pub fn build(b: *std.Build) void {
     if (libev_include_dir) |inc| {
         event_loop_mod.addIncludePath(.{ .cwd_relative = inc });
     }
-    
+
     // UDP module
     const udp_mod = b.createModule(.{
         .root_source_file = b.path("src/net/udp.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
+
     // Milestone 2: QUIC Server
     // Create modules for QUIC components
     const quiche_ffi_mod = b.createModule(.{
@@ -117,20 +134,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     quiche_ffi_mod.addIncludePath(b.path(quiche_include_dir));
-    
+
     const connection_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/connection.zig"),
         .target = target,
         .optimize = optimize,
     });
     connection_mod.addImport("quiche", quiche_ffi_mod);
-    
+
     const config_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/config.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
+
     // H3 module for HTTP/3 support
     const h3_mod = b.createModule(.{
         .root_source_file = b.path("src/h3/mod.zig"),
@@ -138,7 +155,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     h3_mod.addImport("quiche", quiche_ffi_mod);
-    
+
     // HTTP module for routing and request/response handling
     const http_mod = b.createModule(.{
         .root_source_file = b.path("src/http/mod.zig"),
@@ -147,7 +164,7 @@ pub fn build(b: *std.Build) void {
     });
     http_mod.addImport("quiche", quiche_ffi_mod);
     http_mod.addImport("h3", h3_mod);
-    
+
     const server_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/server.zig"),
         .target = target,
@@ -160,7 +177,7 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("udp", udp_mod);
     server_mod.addImport("h3", h3_mod);
     server_mod.addImport("http", http_mod);
-    
+
     // QUIC server executable
     const quic_server_mod = b.createModule(.{
         .root_source_file = b.path("src/examples/quic_server.zig"),
@@ -171,56 +188,19 @@ pub fn build(b: *std.Build) void {
     quic_server_mod.addImport("config", config_mod);
     quic_server_mod.addImport("http", http_mod);
     quic_server_mod.addImport("connection", connection_mod);
-    
+    quic_server_mod.addImport("h3", h3_mod);
+
     const quic_server = b.addExecutable(.{
         .name = "quic-server",
         .root_module = quic_server_mod,
     });
-    
+
     // Link quiche and dependencies
-    if (use_system_quiche) {
-        quic_server.linkSystemLibrary("quiche");
-    } else {
-        quic_server.addObjectFile(quiche_lib_path);
-        const verify_quiche_server = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
-        quic_server.step.dependOn(&verify_quiche_server.step);
-    }
-    
-    // Link libev
-    if (with_libev) {
-        quic_server.linkSystemLibrary("ev");
-        if (libev_lib_dir) |libdir| quic_server.addLibraryPath(.{ .cwd_relative = libdir });
-    }
-    
-    quic_server.linkLibC();
-    
-    // Platform-specific dependencies
-    switch (target.result.os.tag) {
-        .linux => {
-            quic_server.linkSystemLibrary("stdc++");
-            quic_server.linkSystemLibrary("pthread");
-            quic_server.linkSystemLibrary("dl");
-        },
-        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
-            quic_server.linkSystemLibrary("c++");
-            quic_server.linkFramework("Security");
-            quic_server.linkFramework("CoreFoundation");
-        },
-        else => {},
-    }
-    
-    if (link_ssl) {
-        quic_server.linkSystemLibrary("ssl");
-        quic_server.linkSystemLibrary("crypto");
-    }
-    
-    // Ensure quiche is built first if needed
-    if (cargo_step) |c| {
-        quic_server.step.dependOn(&c.step);
-    }
-    
+    addQuicheLink(b, quic_server, use_system_quiche, quiche_lib_path, cargo_step);
+    linkCommon(target, quic_server, link_ssl, with_libev, libev_lib_dir, true);
+
     b.installArtifact(quic_server);
-    
+
     // Run command for QUIC server
     const run_quic_server = b.addRunArtifact(quic_server);
     if (b.args) |args| run_quic_server.addArgs(args);
@@ -237,42 +217,42 @@ pub fn build(b: *std.Build) void {
     dgram_echo_mod.addImport("config", config_mod);
     dgram_echo_mod.addImport("http", http_mod);
     dgram_echo_mod.addImport("connection", connection_mod);
+    dgram_echo_mod.addImport("h3", h3_mod);
 
     const dgram_echo = b.addExecutable(.{ .name = "quic-dgram-echo", .root_module = dgram_echo_mod });
-    if (use_system_quiche) {
-        dgram_echo.linkSystemLibrary("quiche");
-    } else {
-        dgram_echo.addObjectFile(quiche_lib_path);
-        const verify_quiche_dgram = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
-        dgram_echo.step.dependOn(&verify_quiche_dgram.step);
-    }
-    if (with_libev) {
-        dgram_echo.linkSystemLibrary("ev");
-        if (libev_lib_dir) |libdir| dgram_echo.addLibraryPath(.{ .cwd_relative = libdir });
-    }
-    dgram_echo.linkLibC();
-    switch (target.result.os.tag) {
-        .linux => {
-            dgram_echo.linkSystemLibrary("stdc++");
-            dgram_echo.linkSystemLibrary("pthread");
-            dgram_echo.linkSystemLibrary("dl");
-        },
-        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
-            dgram_echo.linkSystemLibrary("c++");
-            dgram_echo.linkFramework("Security");
-            dgram_echo.linkFramework("CoreFoundation");
-        },
-        else => {},
-    }
-    if (link_ssl) {
-        dgram_echo.linkSystemLibrary("ssl");
-        dgram_echo.linkSystemLibrary("crypto");
-    }
+    addQuicheLink(b, dgram_echo, use_system_quiche, quiche_lib_path, cargo_step);
+    linkCommon(target, dgram_echo, link_ssl, with_libev, libev_lib_dir, true);
     b.installArtifact(dgram_echo);
     const run_dgram = b.addRunArtifact(dgram_echo);
     if (b.args) |args| run_dgram.addArgs(args);
     const dgram_step = b.step("quic-dgram-echo", "Run QUIC DATAGRAM echo example");
     dgram_step.dependOn(&run_dgram.step);
+
+    // WebTransport test client
+    const wt_client_mod = b.createModule(.{
+        .root_source_file = b.path("src/examples/wt_client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    wt_client_mod.addImport("quiche", quiche_ffi_mod);
+    wt_client_mod.addImport("h3", h3_mod);
+    wt_client_mod.addImport("net", udp_mod);
+
+    const wt_client = b.addExecutable(.{
+        .name = "wt-client",
+        .root_module = wt_client_mod,
+    });
+
+    addQuicheLink(b, wt_client, use_system_quiche, quiche_lib_path, cargo_step);
+    linkCommon(target, wt_client, link_ssl, with_libev, libev_lib_dir, true);
+
+    b.installArtifact(wt_client);
+
+    // Run command for WebTransport client
+    const run_wt_client = b.addRunArtifact(wt_client);
+    if (b.args) |args| run_wt_client.addArgs(args);
+    const wt_client_step = b.step("wt-client", "Run the WebTransport test client (Milestone 8)");
+    wt_client_step.dependOn(&run_wt_client.step);
 
     // Unit tests: run a test that prints quiche version
     const test_mod = b.createModule(.{
@@ -282,35 +262,8 @@ pub fn build(b: *std.Build) void {
     });
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     unit_tests.root_module.addIncludePath(b.path(quiche_include_dir));
-    if (use_system_quiche) {
-        unit_tests.linkSystemLibrary("quiche");
-    } else {
-        unit_tests.addObjectFile(quiche_lib_path);
-        const verify_quiche_test = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
-        unit_tests.step.dependOn(&verify_quiche_test.step);
-    }
-    if (with_libev) {
-        unit_tests.linkSystemLibrary("ev");
-        if (libev_lib_dir) |libdir| unit_tests.addLibraryPath(.{ .cwd_relative = libdir });
-    }
-    unit_tests.linkLibC();
-    switch (target.result.os.tag) {
-        .linux => {
-            unit_tests.linkSystemLibrary("stdc++");
-            unit_tests.linkSystemLibrary("pthread");
-            unit_tests.linkSystemLibrary("dl");
-        },
-        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
-            unit_tests.linkSystemLibrary("c++");
-            unit_tests.linkFramework("Security");
-            unit_tests.linkFramework("CoreFoundation");
-        },
-        else => {},
-    }
-    if (link_ssl) {
-        unit_tests.linkSystemLibrary("ssl");
-        unit_tests.linkSystemLibrary("crypto");
-    }
+    addQuicheLink(b, unit_tests, use_system_quiche, quiche_lib_path, cargo_step);
+    linkCommon(target, unit_tests, link_ssl, with_libev, libev_lib_dir, true);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -324,46 +277,14 @@ pub fn build(b: *std.Build) void {
     });
     lib_mod.addIncludePath(b.path(quiche_include_dir));
     const lib = b.addLibrary(.{ .name = "zigquicheh3", .root_module = lib_mod, .linkage = .dynamic });
-    if (use_system_quiche) {
-        lib.linkSystemLibrary("quiche");
-    } else {
-        lib.addObjectFile(quiche_lib_path);
-        const verify_quiche_lib = b.addSystemCommand(&.{ "test", "-f", quiche_lib_path.getPath(b) });
-        lib.step.dependOn(&verify_quiche_lib.step);
-    }
-    if (with_libev) {
-        lib.linkSystemLibrary("ev");
-        if (libev_lib_dir) |libdir| lib.addLibraryPath(.{ .cwd_relative = libdir });
-    }
-    lib.linkLibC();
-    switch (target.result.os.tag) {
-        .linux => {
-            lib.linkSystemLibrary("stdc++");
-            lib.linkSystemLibrary("pthread");
-            lib.linkSystemLibrary("dl");
-        },
-        .freebsd, .openbsd, .netbsd, .dragonfly, .macos, .ios => {
-            lib.linkSystemLibrary("c++");
-            lib.linkFramework("Security");
-            lib.linkFramework("CoreFoundation");
-        },
-        else => {},
-    }
-    if (link_ssl) {
-        lib.linkSystemLibrary("ssl");
-        lib.linkSystemLibrary("crypto");
-    }
+    addQuicheLink(b, lib, use_system_quiche, quiche_lib_path, cargo_step);
+    linkCommon(target, lib, link_ssl, with_libev, libev_lib_dir, true);
     b.installArtifact(lib);
 
-    // Ensure we build quiche before compiling/linking, if requested.
-    if (cargo_step) |c| {
-        exe.step.dependOn(&c.step);
-        unit_tests.step.dependOn(&c.step);
-        lib.step.dependOn(&c.step);
-    }
+    // Ensure we build quiche before compiling/linking is handled in addQuicheLink()
 
     // Milestone 1 demo: UDP echo server using libev event loop
-    
+
     // Create echo module and add imports
     const echo_mod = b.createModule(.{
         .root_source_file = b.path("src/examples/udp_echo.zig"),
@@ -372,14 +293,10 @@ pub fn build(b: *std.Build) void {
     });
     echo_mod.addImport("event_loop", event_loop_mod);
     echo_mod.addImport("udp", udp_mod);
-    
+
     const echo = b.addExecutable(.{ .name = "udp-echo", .root_module = echo_mod });
-    // Link libev and libc
-    echo.linkLibC();
-    if (with_libev) {
-        echo.linkSystemLibrary("ev");
-        if (libev_lib_dir) |libdir| echo.addLibraryPath(.{ .cwd_relative = libdir });
-    }
+    // Link libc and (optionally) libev. No C++/SSL needed for UDP echo.
+    linkCommon(target, echo, false, with_libev, libev_lib_dir, false);
     // Install and run
     b.installArtifact(echo);
     const run_echo = b.addRunArtifact(echo);

@@ -13,12 +13,14 @@
     "lint": "biome check --write",
     "lint:ci": "biome ci",
     "format": "biome format --write",
-    "check": "bun run typecheck && bun run lint"
+    "check": "bun run typecheck && bun run lint",
+    "clean": "bun cleanup-tmp.ts",
+    "clean:all": "bun cleanup-tmp.ts --all"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.2.3",
+    "@biomejs/biome": "2.2.4",
     "@types/bun": "latest",
-    "typescript": "^5.6.0"
+    "typescript": "^5.9.2"
   },
   "engines": {
     "bun": ">=1.0.0"

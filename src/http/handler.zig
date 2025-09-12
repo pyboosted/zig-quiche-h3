@@ -17,6 +17,20 @@ pub const OnBodyComplete = *const fn (req: *Request, res: *Response) anyerror!vo
 /// Receives the request context, response for sending datagrams back, and payload
 pub const OnH3Datagram = *const fn (req: *Request, res: *Response, payload: []const u8) anyerror!void;
 
+/// WebTransport session handler called when a new WebTransport session is established
+/// The session pointer is opaque to avoid circular dependencies
+pub const OnWebTransportSession = *const fn (req: *Request, sess: *anyopaque) anyerror!void;
+
+/// WebTransport datagram handler for session-bound datagrams
+/// Called when a datagram is received for an active WebTransport session
+pub const OnWebTransportDatagram = *const fn (sess: *anyopaque, payload: []const u8) anyerror!void;
+
+/// WebTransport stream callbacks
+pub const OnWebTransportUniOpen = *const fn (sess: *anyopaque, stream: *anyopaque) anyerror!void;
+pub const OnWebTransportBidiOpen = *const fn (sess: *anyopaque, stream: *anyopaque) anyerror!void;
+pub const OnWebTransportStreamData = *const fn (stream: *anyopaque, data: []const u8, fin: bool) anyerror!void;
+pub const OnWebTransportStreamClosed = *const fn (stream: *anyopaque) void;
+
 /// HTTP methods
 pub const Method = enum {
     GET,
@@ -29,7 +43,7 @@ pub const Method = enum {
     CONNECT,
     CONNECT_UDP,
     TRACE,
-    
+
     pub fn fromString(s: []const u8) ?Method {
         if (std.mem.eql(u8, s, "GET")) return .GET;
         if (std.mem.eql(u8, s, "POST")) return .POST;
@@ -43,7 +57,7 @@ pub const Method = enum {
         if (std.mem.eql(u8, s, "TRACE")) return .TRACE;
         return null;
     }
-    
+
     pub fn toString(self: Method) []const u8 {
         return switch (self) {
             .GET => "GET",
@@ -69,7 +83,7 @@ pub const Status = enum(u16) {
     NoContent = 204,
     ResetContent = 205,
     PartialContent = 206,
-    
+
     // 3xx Redirection
     MovedPermanently = 301,
     Found = 302,
@@ -77,7 +91,7 @@ pub const Status = enum(u16) {
     NotModified = 304,
     TemporaryRedirect = 307,
     PermanentRedirect = 308,
-    
+
     // 4xx Client Error
     BadRequest = 400,
     Unauthorized = 401,
@@ -97,10 +111,11 @@ pub const Status = enum(u16) {
     RangeNotSatisfiable = 416,
     ExpectationFailed = 417,
     ImATeapot = 418,
+    MisdirectedRequest = 421,
     UnprocessableEntity = 422,
     TooManyRequests = 429,
     RequestHeaderFieldsTooLarge = 431,
-    
+
     // 5xx Server Error
     InternalServerError = 500,
     NotImplemented = 501,
@@ -108,15 +123,15 @@ pub const Status = enum(u16) {
     ServiceUnavailable = 503,
     GatewayTimeout = 504,
     HTTPVersionNotSupported = 505,
-    
+
     pub fn toInt(self: Status) u16 {
         return @intFromEnum(self);
     }
-    
+
     pub fn fromInt(code: u16) Status {
         return @enumFromInt(code);
     }
-    
+
     pub fn toString(self: Status) []const u8 {
         return switch (self) {
             .OK => "OK",
@@ -149,6 +164,7 @@ pub const Status = enum(u16) {
             .RangeNotSatisfiable => "Range Not Satisfiable",
             .ExpectationFailed => "Expectation Failed",
             .ImATeapot => "I'm a teapot",
+            .MisdirectedRequest => "Misdirected Request",
             .UnprocessableEntity => "Unprocessable Entity",
             .TooManyRequests => "Too Many Requests",
             .RequestHeaderFieldsTooLarge => "Request Header Fields Too Large",

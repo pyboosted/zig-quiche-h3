@@ -161,8 +161,8 @@ pub const Config = struct {
 };
 
 // Connection wrapper
-pub const Connection = struct {
-    ptr: *c.quiche_conn,
+    pub const Connection = struct {
+        ptr: *c.quiche_conn,
 
     pub fn deinit(self: *Connection) void {
         c.quiche_conn_free(self.ptr);
@@ -239,7 +239,7 @@ pub const Connection = struct {
         if (proto_len == 0) return null;
         return proto[0..proto_len];
     }
-    
+
     pub fn streamCapacity(self: *Connection, stream_id: u64) !usize {
         const res = c.quiche_conn_stream_capacity(self.ptr, stream_id);
         if (res < 0) {
@@ -249,23 +249,75 @@ pub const Connection = struct {
         }
         return @intCast(res);
     }
-    
-    pub fn streamWritableNext(self: *Connection) ?u64 {
-        const res = c.quiche_conn_stream_writable_next(self.ptr);
-        if (res < 0) return null;
-        return @intCast(res);
-    }
-    
-    pub fn streamWritable(self: *Connection, stream_id: u64, len: usize) !bool {
-        const res = c.quiche_conn_stream_writable(self.ptr, stream_id, len);
-        // Positive means writable, 0 means not writable, negative is error
-        if (res < 0) {
-            // Propagate the actual error instead of returning false
-            try mapError(@intCast(res));
-            return false; // Shouldn't reach here but needed for type safety
+
+        pub fn streamWritableNext(self: *Connection) ?u64 {
+            const res = c.quiche_conn_stream_writable_next(self.ptr);
+            if (res < 0) return null;
+            return @intCast(res);
         }
-        return res > 0;
-    }
+
+        pub fn streamWritable(self: *Connection, stream_id: u64, len: usize) !bool {
+            const res = c.quiche_conn_stream_writable(self.ptr, stream_id, len);
+            // Positive means writable, 0 means not writable, negative is error
+            if (res < 0) {
+                // Propagate the actual error instead of returning false
+                try mapError(@intCast(res));
+                return false; // Shouldn't reach here but needed for type safety
+            }
+            return res > 0;
+        }
+
+        // -------- QUIC streams (RFC 9000) wrappers --------
+        pub const StreamRecvResult = struct {
+            n: usize,
+            fin: bool,
+            error_code: u64 = 0,
+        };
+
+        pub const Shutdown = enum(c_uint) {
+            read = c.QUICHE_SHUTDOWN_READ,
+            write = c.QUICHE_SHUTDOWN_WRITE,
+        };
+
+        pub fn streamRecv(self: *Connection, stream_id: u64, out: []u8) !StreamRecvResult {
+            var fin_flag: bool = false;
+            var err_code: u64 = 0;
+            const res = c.quiche_conn_stream_recv(self.ptr, stream_id, out.ptr, out.len, &fin_flag, &err_code);
+            if (res < 0) {
+                try mapError(@intCast(res));
+                return error.RecvFailed; // Should not reach (mapError throws), keep type happy
+            }
+            return .{ .n = @intCast(res), .fin = fin_flag, .error_code = err_code };
+        }
+
+        pub fn streamSend(self: *Connection, stream_id: u64, buf: []const u8, fin: bool) !usize {
+            var err_code: u64 = 0;
+            const res = c.quiche_conn_stream_send(self.ptr, stream_id, buf.ptr, buf.len, fin, &err_code);
+            if (res < 0) {
+                try mapError(@intCast(res));
+                return error.SendFailed; // Should not reach; preserves return type
+            }
+            return @intCast(res);
+        }
+
+        pub fn streamShutdown(self: *Connection, stream_id: u64, dir: Shutdown, err: u64) !void {
+            const r = c.quiche_conn_stream_shutdown(self.ptr, stream_id, @as(c_uint, @intFromEnum(dir)), err);
+            if (r < 0) try mapError(@intCast(r));
+        }
+
+        pub fn streamReadable(self: *const Connection, stream_id: u64) bool {
+            return c.quiche_conn_stream_readable(self.ptr, stream_id);
+        }
+
+        pub fn streamReadableNext(self: *Connection) ?u64 {
+            const res = c.quiche_conn_stream_readable_next(self.ptr);
+            if (res < 0) return null;
+            return @intCast(res);
+        }
+
+        pub fn streamFinished(self: *const Connection, stream_id: u64) bool {
+            return c.quiche_conn_stream_finished(self.ptr, stream_id);
+        }
 
     // -------- QUIC DATAGRAM (RFC 9221) wrappers --------
     pub fn dgramMaxWritableLen(self: *const Connection) ?usize {
@@ -331,7 +383,7 @@ pub const Connection = struct {
     }
 
     /// Purge outgoing datagrams that match the given predicate
-    pub fn dgramPurgeOutgoing(self: *Connection, comptime f: fn([]const u8) bool) void {
+    pub fn dgramPurgeOutgoing(self: *Connection, comptime f: fn ([]const u8) bool) void {
         const Wrapper = struct {
             const predicate = f;
             fn callback(data: [*c]const u8, len: usize, _: ?*anyopaque) callconv(.c) c_int {
@@ -581,13 +633,13 @@ pub const h3 = struct {
         }
     };
 
-    // Connection wrapper  
+    // Connection wrapper
     pub const Connection = struct {
         ptr: *c.quiche_h3_conn,
 
         // Use parent module's Connection type explicitly
         pub fn newWithTransport(quic_conn: *QuicConnection, config: *h3.Config) !h3.Connection {
-            const ptr = c.quiche_h3_conn_new_with_transport(quic_conn.ptr, config.ptr) orelse 
+            const ptr = c.quiche_h3_conn_new_with_transport(quic_conn.ptr, config.ptr) orelse
                 return error.H3ConnectionCreateFailed;
             return h3.Connection{ .ptr = ptr };
         }
@@ -599,7 +651,7 @@ pub const h3 = struct {
         pub fn poll(self: *h3.Connection, quic_conn: *QuicConnection) !PollResult {
             var event: ?*c.quiche_h3_event = null;
             const stream_id = c.quiche_h3_conn_poll(self.ptr, quic_conn.ptr, &event);
-            
+
             if (stream_id < 0) {
                 try h3.mapError(@intCast(stream_id));
                 return error.PollFailed;
@@ -668,7 +720,7 @@ pub const h3 = struct {
                 self.ptr,
                 quic_conn.ptr,
                 stream_id,
-                @constCast(@ptrCast(headers.ptr)),
+                @ptrCast(@constCast(headers.ptr)),
                 headers.len,
                 is_trailer_section,
                 fin,
@@ -702,6 +754,11 @@ pub const h3 = struct {
         /// Check if H3 DATAGRAM is enabled by peer (negotiated via SETTINGS)
         pub fn dgramEnabledByPeer(self: *h3.Connection, quic_conn: *QuicConnection) bool {
             return c.quiche_h3_dgram_enabled_by_peer(self.ptr, quic_conn.ptr);
+        }
+
+        /// Check if Extended CONNECT is enabled by peer (negotiated via SETTINGS)
+        pub fn extendedConnectEnabledByPeer(self: *h3.Connection) bool {
+            return c.quiche_h3_extended_connect_enabled_by_peer(self.ptr);
         }
 
         pub const PollResult = struct {

@@ -6,7 +6,7 @@ const H3Config = @import("config.zig").H3Config;
 pub const H3Connection = struct {
     conn: quiche.h3.Connection,
     allocator: std.mem.Allocator,
-    
+
     pub fn newWithTransport(
         allocator: std.mem.Allocator,
         quic_conn: *quiche.Connection,
@@ -18,11 +18,11 @@ pub const H3Connection = struct {
             .allocator = allocator,
         };
     }
-    
+
     pub fn deinit(self: *H3Connection) void {
         self.conn.deinit();
     }
-    
+
     // Poll for events - returns null on Done error
     pub fn poll(self: *H3Connection, quic_conn: *quiche.Connection) ?PollResult {
         const result = self.conn.poll(quic_conn) catch |err| {
@@ -33,7 +33,7 @@ pub const H3Connection = struct {
             std.debug.print("H3 poll error: {}\n", .{err});
             return null;
         };
-        
+
         if (result.event) |event| {
             return PollResult{
                 .stream_id = result.stream_id,
@@ -41,10 +41,10 @@ pub const H3Connection = struct {
                 .raw_event = event,
             };
         }
-        
+
         return null;
     }
-    
+
     pub fn sendResponse(
         self: *H3Connection,
         quic_conn: *quiche.Connection,
@@ -55,7 +55,7 @@ pub const H3Connection = struct {
         // Propagate all errors including StreamBlocked for proper retry handling
         try self.conn.sendResponse(quic_conn, stream_id, headers, fin);
     }
-    
+
     pub fn sendBody(
         self: *H3Connection,
         quic_conn: *quiche.Connection,
@@ -82,7 +82,7 @@ pub const H3Connection = struct {
     ) !void {
         try self.conn.sendAdditionalHeaders(quic_conn, stream_id, headers, is_trailer_section, fin);
     }
-    
+
     pub fn recvBody(
         self: *H3Connection,
         quic_conn: *quiche.Connection,
@@ -96,17 +96,22 @@ pub const H3Connection = struct {
             return err;
         };
     }
-    
+
     /// Check if H3 DATAGRAM is enabled by peer (negotiated via SETTINGS)
     pub fn dgramEnabledByPeer(self: *H3Connection, quic_conn: *quiche.Connection) bool {
         return self.conn.dgramEnabledByPeer(quic_conn);
     }
-    
+
+    /// Check if Extended CONNECT is enabled by peer (negotiated via SETTINGS)
+    pub fn extendedConnectEnabledByPeer(self: *H3Connection) bool {
+        return self.conn.extendedConnectEnabledByPeer();
+    }
+
     pub const PollResult = struct {
         stream_id: u64,
         event_type: quiche.h3.EventType,
         raw_event: *quiche.c.quiche_h3_event,
-        
+
         pub fn deinit(self: *PollResult) void {
             quiche.h3.eventFree(self.raw_event);
         }

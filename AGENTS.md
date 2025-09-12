@@ -26,16 +26,24 @@
 - Filenames: `snake_case.zig`. Types: `TitleCase`. Functions/vars: `lowerCamelCase`. Use doc comments `///`.
 - Keep modules small; avoid cyclic imports. Never modify `third_party/` sources.
 - Zig 0.15.1+ required. Use `callconv(.c)` (lowercase `.c`). `std.ArrayList` is unmanaged in 0.15—pass an allocator (or use `std.ArrayListUnmanaged`).
+- VS Code: Configure 4-space tabs for Zig files in `.vscode/settings.json`:
+  ```json
+  "[zig]": {
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.detectIndentation": false,
+    "editor.formatOnSave": true
+  }
+  ```
 
 ## Testing Guidelines
 - Unit tests live near code or in `src/tests.zig` using `test "…" {}`; name tests with short, imperative phrases.
-- Integration: run the server, then from `third_party/quiche`: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`.
 - JS/TS E2E tests use Bun 1.x and live under `tests/e2e/`:
-  - Setup: `bun install`
   - Run: `bun test tests/e2e`
   - Stress: `H3_STRESS=1 bun test`
   - Coverage: `bun test --coverage`
   - Note: curl helpers require HTTP/3 support; otherwise use the quiche client above.
+- Manual: run the server, then from `third_party/quiche`: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`.
 
 ## Commit & Pull Request Guidelines
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `chore:`. Keep subject ≤72 chars; add a body for context.

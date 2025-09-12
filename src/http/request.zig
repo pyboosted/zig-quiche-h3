@@ -10,20 +10,20 @@ pub const Header = struct {
 /// HTTP request object with parameter extraction and body buffering
 pub const Request = struct {
     method: Method,
-    path_raw: []const u8,           // original :path pseudo-header
-    path_decoded: []const u8,        // percent-decoded, no query string
-    query_raw: ?[]const u8,          // everything after '?'
-    authority: ?[]const u8,          // :authority pseudo-header
-    headers: []Header,               // All headers including pseudo-headers
+    path_raw: []const u8, // original :path pseudo-header
+    path_decoded: []const u8, // percent-decoded, no query string
+    query_raw: ?[]const u8, // everything after '?'
+    authority: ?[]const u8, // :authority pseudo-header
+    headers: []Header, // All headers including pseudo-headers
     params: std.StringHashMapUnmanaged([]const u8), // Route parameters
-    query: std.StringHashMapUnmanaged([]const u8),  // Query parameters
+    query: std.StringHashMapUnmanaged([]const u8), // Query parameters
     stream_id: u64,
     arena: *std.heap.ArenaAllocator,
-    body_buffer: std.ArrayList(u8),  // Bounded body buffer for M4
+    body_buffer: std.ArrayList(u8), // Bounded body buffer for M4
     body_complete: bool,
-    body_received_bytes: usize,      // Track bytes in streaming mode
-    user_data: ?*anyopaque = null,   // User context for streaming handlers
-    
+    body_received_bytes: usize, // Track bytes in streaming mode
+    user_data: ?*anyopaque = null, // User context for streaming handlers
+
     /// Initialize a new request with an arena allocator
     pub fn init(
         arena: *std.heap.ArenaAllocator,
@@ -34,16 +34,16 @@ pub const Request = struct {
         stream_id: u64,
     ) !Request {
         const allocator = arena.allocator();
-        
+
         // Parse path and query
         const path_query = try parsePath(allocator, path_raw);
-        
+
         // Parse query parameters if present
         var query_params = std.StringHashMapUnmanaged([]const u8){};
         if (path_query.query) |q| {
             try parseQuery(allocator, q, &query_params);
         }
-        
+
         return Request{
             .method = method,
             .path_raw = path_raw,
@@ -61,7 +61,7 @@ pub const Request = struct {
             .user_data = null,
         };
     }
-    
+
     /// Get the HTTP/3 :protocol pseudo-header (for CONNECT semantics)
     pub fn h3Protocol(self: *Request) ?[]const u8 {
         return self.getHeader(":protocol");
@@ -80,17 +80,17 @@ pub const Request = struct {
         }
         return self.body_buffer.items;
     }
-    
+
     /// Get a route parameter by name
     pub fn getParam(self: *Request, name: []const u8) ?[]const u8 {
         return self.params.get(name);
     }
-    
+
     /// Get a query parameter by name
     pub fn getQuery(self: *Request, name: []const u8) ?[]const u8 {
         return self.query.get(name);
     }
-    
+
     /// Get a header value by name (case-insensitive)
     pub fn getHeader(self: *Request, name: []const u8) ?[]const u8 {
         for (self.headers) |header| {
@@ -100,18 +100,18 @@ pub const Request = struct {
         }
         return null;
     }
-    
+
     /// Add body data to the buffer
     pub fn appendBody(self: *Request, data: []const u8, max_size: usize) !void {
         const allocator = self.arena.allocator();
-        
+
         if (self.body_buffer.items.len + data.len > max_size) {
             return error.PayloadTooLarge;
         }
-        
+
         try self.body_buffer.appendSlice(allocator, data);
     }
-    
+
     /// Get current body size (for streaming mode tracking)
     pub fn getBodySize(self: Request) usize {
         // In streaming mode, return the counter
@@ -121,29 +121,29 @@ pub const Request = struct {
         }
         return self.body_buffer.items.len;
     }
-    
+
     /// Add to body size tracker (for streaming mode)
     pub fn addToBodySize(self: *Request, bytes: usize) void {
         // In streaming mode, just increment the counter
         // This avoids allocating memory for data we're not buffering
         self.body_received_bytes += bytes;
     }
-    
+
     /// Mark body as complete
     pub fn setBodyComplete(self: *Request) void {
         self.body_complete = true;
     }
-    
+
     /// Check if this is a HEAD request (no body expected)
     pub fn isHead(self: Request) bool {
         return self.method == .HEAD;
     }
-    
+
     /// Get content type from headers
     pub fn contentType(self: *Request) ?[]const u8 {
         return self.getHeader("content-type");
     }
-    
+
     /// Get content length from headers
     pub fn contentLength(self: *Request) ?usize {
         const len_str = self.getHeader("content-length") orelse return null;
@@ -185,24 +185,24 @@ fn parsePath(allocator: std.mem.Allocator, raw_path: []const u8) !PathQueryResul
             .query = null,
         };
     }
-    
+
     // Find query separator
     if (std.mem.indexOf(u8, raw_path, "?")) |query_start| {
         const path_part = raw_path[0..query_start];
-        const query_part = if (query_start + 1 < raw_path.len) 
-            raw_path[query_start + 1..] 
-        else 
+        const query_part = if (query_start + 1 < raw_path.len)
+            raw_path[query_start + 1 ..]
+        else
             null;
-        
+
         // Percent-decode the path ('+' should be literal in paths)
         const decoded_path = try percentDecodePath(allocator, path_part);
-        
+
         return PathQueryResult{
             .path = decoded_path,
             .query = if (query_part) |q| try allocator.dupe(u8, q) else null,
         };
     }
-    
+
     // No query string, just decode the path
     const decoded_path = try percentDecodePath(allocator, raw_path);
     return PathQueryResult{
@@ -222,10 +222,10 @@ fn parseQuery(
         if (std.mem.indexOf(u8, pair, "=")) |eq_pos| {
             const key = try percentDecodeQuery(allocator, pair[0..eq_pos]);
             const value = if (eq_pos + 1 < pair.len)
-                try percentDecodeQuery(allocator, pair[eq_pos + 1..])
+                try percentDecodeQuery(allocator, pair[eq_pos + 1 ..])
             else
                 try allocator.dupe(u8, "");
-            
+
             try params.put(allocator, key, value);
         } else {
             // Key without value
@@ -239,12 +239,12 @@ fn parseQuery(
 fn percentDecode(allocator: std.mem.Allocator, input: []const u8, plus_as_space: bool) ![]const u8 {
     var result = std.ArrayList(u8){};
     defer result.deinit(allocator);
-    
+
     var i: usize = 0;
     while (i < input.len) {
         if (input[i] == '%' and i + 2 < input.len) {
             // Try to parse hex digits
-            const hex_str = input[i + 1..i + 3];
+            const hex_str = input[i + 1 .. i + 3];
             if (std.fmt.parseInt(u8, hex_str, 16)) |byte| {
                 try result.append(allocator, byte);
                 i += 3;
@@ -263,7 +263,7 @@ fn percentDecode(allocator: std.mem.Allocator, input: []const u8, plus_as_space:
             i += 1;
         }
     }
-    
+
     return allocator.dupe(u8, result.items);
 }
 
@@ -280,40 +280,40 @@ fn percentDecodeQuery(allocator: std.mem.Allocator, input: []const u8) ![]const 
 // Tests
 test "path parsing" {
     const allocator = std.testing.allocator;
-    
+
     // Test simple path
     {
         const result = try parsePath(allocator, "/api/users");
         defer allocator.free(result.path);
         defer if (result.query) |q| allocator.free(q);
-        
+
         try std.testing.expectEqualStrings("/api/users", result.path);
         try std.testing.expect(result.query == null);
     }
-    
+
     // Test path with query
     {
         const result = try parsePath(allocator, "/search?q=test&page=1");
         defer allocator.free(result.path);
         defer if (result.query) |q| allocator.free(q);
-        
+
         try std.testing.expectEqualStrings("/search", result.path);
         try std.testing.expectEqualStrings("q=test&page=1", result.query.?);
     }
-    
+
     // Test percent-encoded path
     {
         const result = try parsePath(allocator, "/files/hello%20world.txt");
         defer allocator.free(result.path);
         defer if (result.query) |q| allocator.free(q);
-        
+
         try std.testing.expectEqualStrings("/files/hello world.txt", result.path);
     }
 }
 
 test "query parsing" {
     const allocator = std.testing.allocator;
-    
+
     var params = std.StringHashMapUnmanaged([]const u8){};
     defer {
         var iter = params.iterator();
@@ -323,9 +323,9 @@ test "query parsing" {
         }
         params.deinit(allocator);
     }
-    
+
     try parseQuery(allocator, "q=hello+world&page=1&empty=", &params);
-    
+
     try std.testing.expectEqualStrings("hello world", params.get("q").?);
     try std.testing.expectEqualStrings("1", params.get("page").?);
     try std.testing.expectEqualStrings("", params.get("empty").?);
@@ -333,28 +333,28 @@ test "query parsing" {
 
 test "percent decoding" {
     const allocator = std.testing.allocator;
-    
+
     // Test basic percent encoding
     {
         const decoded = try percentDecode(allocator, "hello%20world", false);
         defer allocator.free(decoded);
         try std.testing.expectEqualStrings("hello world", decoded);
     }
-    
+
     // Test plus in path (should be literal)
     {
         const decoded = try percentDecodePath(allocator, "hello+world");
         defer allocator.free(decoded);
         try std.testing.expectEqualStrings("hello+world", decoded);
     }
-    
+
     // Test plus in query (should be space)
     {
         const decoded = try percentDecodeQuery(allocator, "hello+world");
         defer allocator.free(decoded);
         try std.testing.expectEqualStrings("hello world", decoded);
     }
-    
+
     // Test special characters
     {
         const decoded = try percentDecode(allocator, "%2F%3D%26%3F", false);

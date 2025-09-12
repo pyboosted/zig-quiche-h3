@@ -6,4 +6,3 @@ extern fn quiche_version() [*:0]const u8;
 pub export fn zig_h3_version() [*:0]const u8 {
     return quiche_version();
 }
-

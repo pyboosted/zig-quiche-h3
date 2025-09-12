@@ -1,237 +1,230 @@
 import { type Subprocess, spawn } from "bun";
 import { get } from "./curlClient";
-import { 
-  randPort, 
-  waitFor, 
-  getServerBinary, 
-  getCertPath, 
-  getProjectRoot,
-  checkDependencies 
+import {
+    randPort,
+    waitFor,
+    getServerBinary,
+    getCertPath,
+    getProjectRoot,
+    checkDependencies,
 } from "./testUtils";
 
 /**
  * Server instance with cleanup capability
  */
 export interface ServerInstance {
-  proc: Subprocess;
-  port: number;
-  cleanup: () => Promise<void>;
+    proc: Subprocess;
+    port: number;
+    cleanup: () => Promise<void>;
 }
 
 /**
  * Options for spawning the server
  */
 export interface SpawnServerOptions {
-  port?: number;
-  qlog?: boolean;
-  debugLog?: boolean;
-  env?: Record<string, string>;
-  timeoutMs?: number;
+    port?: number;
+    qlog?: boolean;
+    debugLog?: boolean;
+    env?: Record<string, string>;
+    timeoutMs?: number;
 }
 
 /**
  * Spawn the zig-quiche-h3 server and wait for it to be ready
  */
 export async function spawnServer(opts: SpawnServerOptions = {}): Promise<ServerInstance> {
-  const port =
-    opts.port ?? (process.env.H3_TEST_PORT ? Number(process.env.H3_TEST_PORT) : randPort());
+    const port =
+        opts.port ?? (process.env.H3_TEST_PORT ? Number(process.env.H3_TEST_PORT) : randPort());
 
-  // Check dependencies first
-  await checkDependencies();
-  
-  // Ensure server is built before attempting to spawn
-  await ensureServerBuilt();
+    // Check dependencies first
+    await checkDependencies();
 
-  // Get paths using the new utilities - works from any directory
-  const serverPath = getServerBinary();
-  const certPath = getCertPath("cert.crt");
-  const keyPath = getCertPath("cert.key");
+    // Ensure server is built before attempting to spawn
+    await ensureServerBuilt();
 
-  // Build server arguments
-  const args = [
-    serverPath,
-    "--port",
-    port.toString(),
-    "--cert",
-    certPath,
-    "--key",
-    keyPath,
-  ];
+    // Get paths using the new utilities - works from any directory
+    const serverPath = getServerBinary();
+    const certPath = getCertPath("cert.crt");
+    const keyPath = getCertPath("cert.key");
 
-  // QLOG configuration
-  if (opts.qlog === false || (opts.qlog === undefined && !process.env.H3_QLOG)) {
-    args.push("--no-qlog");
-  }
+    // Build server arguments
+    const args = [serverPath, "--port", port.toString(), "--cert", certPath, "--key", keyPath];
 
-  // Debug logging
-  if (opts.debugLog || process.env.H3_DEBUG) {
-    // Server already has debug logging enabled by default
-  }
-
-  // Environment variables
-  const env = {
-    ...process.env,
-    ...opts.env,
-  };
-
-  // Add SSLKEYLOGFILE for debugging if requested
-  if (process.env.H3_DEBUG) {
-    env.SSLKEYLOGFILE = `./tmp/sslkeylog-${port}.txt`;
-  }
-
-  console.log(`Spawning server on port ${port}...`);
-
-  // Spawn the server process
-  const proc = spawn({
-    cmd: args,
-    stdout: "pipe",
-    stderr: "pipe",
-    env,
-    // No need to set cwd - we're using absolute paths
-  });
-
-  // Create cleanup function
-  const cleanup = async (): Promise<void> => {
-    console.log(`Shutting down server on port ${port}...`);
-
-    try {
-      // Send SIGTERM for graceful shutdown
-      proc.kill("SIGTERM");
-
-      // Wait for graceful shutdown with timeout
-      await Promise.race([
-        proc.exited,
-        Bun.sleep(2000), // 2 second timeout
-      ]);
-
-      // Force kill if still running
-      if (!proc.killed) {
-        proc.kill("SIGKILL");
-        await proc.exited;
-      }
-    } catch (error) {
-      console.warn(`Error during cleanup: ${error}`);
+    // QLOG configuration
+    if (opts.qlog === false || (opts.qlog === undefined && !process.env.H3_QLOG)) {
+        args.push("--no-qlog");
     }
-  };
 
-  // Wait for server to be ready
-  const timeoutMs = opts.timeoutMs ?? 10000;
-  const _deadline = Date.now() + timeoutMs;
+    // Debug logging
+    if (opts.debugLog || process.env.H3_DEBUG) {
+        // Server already has debug logging enabled by default
+    }
 
-  try {
-    await waitFor(
-      async () => {
-        try {
-          // Use GET / for readiness probe (not HEAD as per audit)
-          const response = await get(`https://127.0.0.1:${port}/`);
-          return response.status === 200;
-        } catch {
-          return false;
-        }
-      },
-      timeoutMs,
-      150,
-    );
-
-    console.log(`Server ready on port ${port}`);
-
-    return {
-      proc,
-      port,
-      cleanup,
+    // Environment variables
+    const env = {
+        ...process.env,
+        ...opts.env,
     };
-  } catch (error) {
-    // Cleanup on startup failure
-    await cleanup();
 
-    // Try to get server logs for debugging
-    let serverOutput = "";
-    try {
-      serverOutput = await new Response(proc.stderr).text();
-    } catch {
-      // Ignore
+    // Add SSLKEYLOGFILE for debugging if requested
+    if (process.env.H3_DEBUG) {
+        env.SSLKEYLOGFILE = `./tmp/sslkeylog-${port}.txt`;
     }
 
-    throw new Error(
-      `Server failed to start within ${timeoutMs}ms. Error: ${error}${
-        serverOutput ? `\n\nServer stderr:\n${serverOutput}` : ""
-      }`,
-    );
-  }
+    console.log(`Spawning server on port ${port}...`);
+
+    // Spawn the server process
+    const proc = spawn({
+        cmd: args,
+        stdout: "pipe",
+        stderr: "pipe",
+        env,
+        // No need to set cwd - we're using absolute paths
+    });
+
+    // Create cleanup function
+    const cleanup = async (): Promise<void> => {
+        console.log(`Shutting down server on port ${port}...`);
+
+        try {
+            // Send SIGTERM for graceful shutdown
+            proc.kill("SIGTERM");
+
+            // Wait for graceful shutdown with timeout
+            await Promise.race([
+                proc.exited,
+                Bun.sleep(2000), // 2 second timeout
+            ]);
+
+            // Force kill if still running
+            if (!proc.killed) {
+                proc.kill("SIGKILL");
+                await proc.exited;
+            }
+        } catch (error) {
+            console.warn(`Error during cleanup: ${error}`);
+        }
+    };
+
+    // Wait for server to be ready
+    const timeoutMs = opts.timeoutMs ?? 10000;
+    const _deadline = Date.now() + timeoutMs;
+
+    try {
+        await waitFor(
+            async () => {
+                try {
+                    // Use GET / for readiness probe (not HEAD as per audit)
+                    const response = await get(`https://127.0.0.1:${port}/`);
+                    return response.status === 200;
+                } catch {
+                    return false;
+                }
+            },
+            timeoutMs,
+            150,
+        );
+
+        console.log(`Server ready on port ${port}`);
+
+        return {
+            proc,
+            port,
+            cleanup,
+        };
+    } catch (error) {
+        // Cleanup on startup failure
+        await cleanup();
+
+        // Try to get server logs for debugging
+        let serverOutput = "";
+        try {
+            serverOutput = await new Response(proc.stderr).text();
+        } catch {
+            // Ignore
+        }
+
+        throw new Error(
+            `Server failed to start within ${timeoutMs}ms. Error: ${error}${
+                serverOutput ? `\n\nServer stderr:\n${serverOutput}` : ""
+            }`,
+        );
+    }
 }
 
 /**
  * Spawn server for a single test with automatic cleanup
  */
 export async function withServer<T>(
-  testFn: (server: ServerInstance) => Promise<T>,
-  options?: SpawnServerOptions,
+    testFn: (server: ServerInstance) => Promise<T>,
+    options?: SpawnServerOptions,
 ): Promise<T> {
-  const server = await spawnServer(options);
-  try {
-    return await testFn(server);
-  } finally {
-    await server.cleanup();
-  }
+    const server = await spawnServer(options);
+    try {
+        return await testFn(server);
+    } finally {
+        await server.cleanup();
+    }
 }
 
 /**
  * Check if the server binary exists and is executable
  */
 export async function checkServerBinary(): Promise<boolean> {
-  try {
-    const serverPath = getServerBinary();
-    
-    const proc = spawn({
-      cmd: [serverPath, "--help"],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    await proc.exited;
-    return proc.exitCode === 0;
-  } catch {
-    // Binary doesn't exist or isn't executable
-    return false;
-  }
+    try {
+        const serverPath = getServerBinary();
+
+        const proc = spawn({
+            cmd: [serverPath, "--help"],
+            stdout: "pipe",
+            stderr: "pipe",
+        });
+        await proc.exited;
+        return proc.exitCode === 0;
+    } catch {
+        // Binary doesn't exist or isn't executable
+        return false;
+    }
 }
 
 /**
  * Build the server if needed
  */
 export async function ensureServerBuilt(): Promise<void> {
-  if (await checkServerBinary()) {
-    return; // Already built
-  }
+    if (await checkServerBinary()) {
+        return; // Already built
+    }
 
-  console.log("Building server...");
+    console.log("Building server...");
 
-  const optimize = process.env.H3_OPTIMIZE ?? "ReleaseFast"; // ReleaseFast by default for perf tests
-  const libevInclude =
-    process.env.H3_LIBEV_INCLUDE ??
-    (process.platform === "darwin" ? "/opt/homebrew/opt/libev/include" : undefined);
-  const libevLib =
-    process.env.H3_LIBEV_LIB ?? (process.platform === "darwin" ? "/opt/homebrew/opt/libev/lib" : undefined);
+    const optimize = process.env.H3_OPTIMIZE ?? "ReleaseFast"; // ReleaseFast by default for perf tests
+    const libevInclude =
+        process.env.H3_LIBEV_INCLUDE ??
+        (process.platform === "darwin" ? "/opt/homebrew/opt/libev/include" : undefined);
+    const libevLib =
+        process.env.H3_LIBEV_LIB ??
+        (process.platform === "darwin" ? "/opt/homebrew/opt/libev/lib" : undefined);
 
-  const args = ["zig", "build", "-Dwith-libev=true", `-Doptimize=${optimize}`];
-  if (libevInclude) args.push(`-Dlibev-include=${libevInclude}`);
-  if (libevLib) args.push(`-Dlibev-lib=${libevLib}`);
+    const args = ["zig", "build", "-Dwith-libev=true", `-Doptimize=${optimize}`];
+    if (libevInclude) args.push(`-Dlibev-include=${libevInclude}`);
+    if (libevLib) args.push(`-Dlibev-lib=${libevLib}`);
 
-  // Always run from project root
-  const projectRoot = getProjectRoot();
-  
-  const proc = spawn({
-    cmd: args,
-    stdout: "pipe",
-    stderr: "pipe",
-    cwd: projectRoot,
-  });
+    // Always run from project root
+    const projectRoot = getProjectRoot();
 
-  await proc.exited;
+    const proc = spawn({
+        cmd: args,
+        stdout: "pipe",
+        stderr: "pipe",
+        cwd: projectRoot,
+    });
 
-  if (proc.exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    throw new Error(`Server build failed: ${stderr}`);
-  }
+    await proc.exited;
 
-  console.log("Server built successfully");
+    if (proc.exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text();
+        throw new Error(`Server build failed: ${stderr}`);
+    }
+
+    console.log("Server built successfully");
 }

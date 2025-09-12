@@ -1,0 +1,21 @@
+{
+  "name": "bun-http3-wrapper",
+  "version": "0.1.0",
+  "description": "HTTPS Alt-Svc shim that advertises local HTTP/3 (zig quic-server) for browser testing.",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/server.ts",
+    "start": "bun run src/server.ts",
+    "build": "bun build --outdir dist ./index.html",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check --write",
+    "lint:ci": "biome ci",
+    "format": "biome format --write",
+    "check": "bun run typecheck && bun run lint"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.2.4",
+    "@types/bun": "latest",
+    "typescript": "^5.9.2"
+  }
+}

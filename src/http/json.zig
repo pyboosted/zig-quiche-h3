@@ -6,22 +6,22 @@ const Request = @import("request.zig").Request;
 /// Uses the request's arena allocator for temporary memory
 pub fn send(req: *Request, res: *Response, value: anytype) !void {
     const allocator = req.arena.allocator();
-    
+
     // Use valueAlloc to serialize directly to allocated memory
     const json_data = try std.json.Stringify.valueAlloc(allocator, value, .{ .whitespace = .minified });
     // No defer needed - arena will clean up
-    
+
     // Set content type header
     try res.header("content-type", "application/json; charset=utf-8");
-    
+
     // Set content length
     var len_buf: [20]u8 = undefined;
     const len_str = try std.fmt.bufPrint(&len_buf, "{d}", .{json_data.len});
     try res.header("content-length", len_str);
-    
+
     // Write the JSON data
     _ = try res.write(json_data);
-    
+
     // End the response
     try res.end(null);
 }
@@ -53,33 +53,30 @@ pub fn stringifyPretty(allocator: std.mem.Allocator, value: anytype) ![]u8 {
 // Tests
 test "json stringify" {
     const allocator = std.testing.allocator;
-    
+
     const value = .{
         .id = 123,
         .name = "Test User",
         .active = true,
     };
-    
+
     const json_str = try stringify(allocator, value);
     defer allocator.free(json_str);
-    
-    try std.testing.expectEqualStrings(
-        "{\"id\":123,\"name\":\"Test User\",\"active\":true}",
-        json_str
-    );
+
+    try std.testing.expectEqualStrings("{\"id\":123,\"name\":\"Test User\",\"active\":true}", json_str);
 }
 
 test "json stringify with special characters" {
     const allocator = std.testing.allocator;
-    
+
     const value = .{
         .message = "Hello \"World\"\nNew line",
         .path = "/api/users/123",
     };
-    
+
     const json_str = try stringify(allocator, value);
     defer allocator.free(json_str);
-    
+
     // JSON should properly escape quotes and newlines
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\\\"World\\\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\\n") != null);

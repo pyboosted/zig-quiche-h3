@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.2.3/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.2.4/schema.json",
   "linter": {
     "enabled": true,
     "rules": {
@@ -23,7 +23,7 @@
     "enabled": true,
     "formatWithErrors": false,
     "indentStyle": "space",
-    "indentWidth": 2,
+    "indentWidth": 4,
     "lineWidth": 100,
     "lineEnding": "lf"
   },
@@ -35,7 +35,12 @@
     }
   },
   "files": {
-    "includes": ["e2e/**/*.ts", "**/*.test.ts"],
+    "includes": [
+      "tests/e2e/**/*.ts",
+      "tests/**/*.test.ts",
+      "examples/bun-http3-wrapper/**/*.ts",
+      "examples/bun-http3-wrapper/**/*.html"
+    ],
     "ignoreUnknown": false
   }
 }

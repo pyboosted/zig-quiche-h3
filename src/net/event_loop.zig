@@ -66,21 +66,21 @@ pub const EventLoop = struct {
             self.allocator.destroy(w);
         }
         self.io_watchers.deinit(self.allocator);
-        
+
         for (self.timer_watchers.items) |w| {
             // ev_timer_stop is safe to call even on inactive watchers
             c.ev_timer_stop(self.loop, &w.timer);
             self.allocator.destroy(w);
         }
         self.timer_watchers.deinit(self.allocator);
-        
+
         for (self.sig_watchers.items) |w| {
             // ev_signal_stop is safe to call even on inactive watchers
             c.ev_signal_stop(self.loop, &w.sig);
             self.allocator.destroy(w);
         }
         self.sig_watchers.deinit(self.allocator);
-        
+
         // For the default loop, libev provides ev_default_destroy (not always present via headers);
         // breaking and letting process exit is sufficient for our demos.
         self.allocator.destroy(self);
@@ -134,11 +134,11 @@ pub const EventLoop = struct {
     pub fn addSigint(self: *EventLoop, cb: SignalCallback, user_data: *anyopaque) !void {
         try self.addSignal(std.posix.SIG.INT, cb, user_data);
     }
-    
+
     pub fn addSigterm(self: *EventLoop, cb: SignalCallback, user_data: *anyopaque) !void {
         try self.addSignal(std.posix.SIG.TERM, cb, user_data);
     }
-    
+
     pub fn addSignal(self: *EventLoop, signum: c_int, cb: SignalCallback, user_data: *anyopaque) !void {
         const w = try self.allocator.create(SignalWatcher);
         w.* = .{ .cb = cb, .user_data = user_data };
