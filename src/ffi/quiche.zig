@@ -161,8 +161,8 @@ pub const Config = struct {
 };
 
 // Connection wrapper
-    pub const Connection = struct {
-        ptr: *c.quiche_conn,
+pub const Connection = struct {
+    ptr: *c.quiche_conn,
 
     pub fn deinit(self: *Connection) void {
         c.quiche_conn_free(self.ptr);
@@ -250,74 +250,74 @@ pub const Config = struct {
         return @intCast(res);
     }
 
-        pub fn streamWritableNext(self: *Connection) ?u64 {
-            const res = c.quiche_conn_stream_writable_next(self.ptr);
-            if (res < 0) return null;
-            return @intCast(res);
+    pub fn streamWritableNext(self: *Connection) ?u64 {
+        const res = c.quiche_conn_stream_writable_next(self.ptr);
+        if (res < 0) return null;
+        return @intCast(res);
+    }
+
+    pub fn streamWritable(self: *Connection, stream_id: u64, len: usize) !bool {
+        const res = c.quiche_conn_stream_writable(self.ptr, stream_id, len);
+        // Positive means writable, 0 means not writable, negative is error
+        if (res < 0) {
+            // Propagate the actual error instead of returning false
+            try mapError(@intCast(res));
+            return false; // Shouldn't reach here but needed for type safety
         }
+        return res > 0;
+    }
 
-        pub fn streamWritable(self: *Connection, stream_id: u64, len: usize) !bool {
-            const res = c.quiche_conn_stream_writable(self.ptr, stream_id, len);
-            // Positive means writable, 0 means not writable, negative is error
-            if (res < 0) {
-                // Propagate the actual error instead of returning false
-                try mapError(@intCast(res));
-                return false; // Shouldn't reach here but needed for type safety
-            }
-            return res > 0;
+    // -------- QUIC streams (RFC 9000) wrappers --------
+    pub const StreamRecvResult = struct {
+        n: usize,
+        fin: bool,
+        error_code: u64 = 0,
+    };
+
+    pub const Shutdown = enum(c_uint) {
+        read = c.QUICHE_SHUTDOWN_READ,
+        write = c.QUICHE_SHUTDOWN_WRITE,
+    };
+
+    pub fn streamRecv(self: *Connection, stream_id: u64, out: []u8) !StreamRecvResult {
+        var fin_flag: bool = false;
+        var err_code: u64 = 0;
+        const res = c.quiche_conn_stream_recv(self.ptr, stream_id, out.ptr, out.len, &fin_flag, &err_code);
+        if (res < 0) {
+            try mapError(@intCast(res));
+            return error.RecvFailed; // Should not reach (mapError throws), keep type happy
         }
+        return .{ .n = @intCast(res), .fin = fin_flag, .error_code = err_code };
+    }
 
-        // -------- QUIC streams (RFC 9000) wrappers --------
-        pub const StreamRecvResult = struct {
-            n: usize,
-            fin: bool,
-            error_code: u64 = 0,
-        };
-
-        pub const Shutdown = enum(c_uint) {
-            read = c.QUICHE_SHUTDOWN_READ,
-            write = c.QUICHE_SHUTDOWN_WRITE,
-        };
-
-        pub fn streamRecv(self: *Connection, stream_id: u64, out: []u8) !StreamRecvResult {
-            var fin_flag: bool = false;
-            var err_code: u64 = 0;
-            const res = c.quiche_conn_stream_recv(self.ptr, stream_id, out.ptr, out.len, &fin_flag, &err_code);
-            if (res < 0) {
-                try mapError(@intCast(res));
-                return error.RecvFailed; // Should not reach (mapError throws), keep type happy
-            }
-            return .{ .n = @intCast(res), .fin = fin_flag, .error_code = err_code };
+    pub fn streamSend(self: *Connection, stream_id: u64, buf: []const u8, fin: bool) !usize {
+        var err_code: u64 = 0;
+        const res = c.quiche_conn_stream_send(self.ptr, stream_id, buf.ptr, buf.len, fin, &err_code);
+        if (res < 0) {
+            try mapError(@intCast(res));
+            return error.SendFailed; // Should not reach; preserves return type
         }
+        return @intCast(res);
+    }
 
-        pub fn streamSend(self: *Connection, stream_id: u64, buf: []const u8, fin: bool) !usize {
-            var err_code: u64 = 0;
-            const res = c.quiche_conn_stream_send(self.ptr, stream_id, buf.ptr, buf.len, fin, &err_code);
-            if (res < 0) {
-                try mapError(@intCast(res));
-                return error.SendFailed; // Should not reach; preserves return type
-            }
-            return @intCast(res);
-        }
+    pub fn streamShutdown(self: *Connection, stream_id: u64, dir: Shutdown, err: u64) !void {
+        const r = c.quiche_conn_stream_shutdown(self.ptr, stream_id, @as(c_uint, @intFromEnum(dir)), err);
+        if (r < 0) try mapError(@intCast(r));
+    }
 
-        pub fn streamShutdown(self: *Connection, stream_id: u64, dir: Shutdown, err: u64) !void {
-            const r = c.quiche_conn_stream_shutdown(self.ptr, stream_id, @as(c_uint, @intFromEnum(dir)), err);
-            if (r < 0) try mapError(@intCast(r));
-        }
+    pub fn streamReadable(self: *const Connection, stream_id: u64) bool {
+        return c.quiche_conn_stream_readable(self.ptr, stream_id);
+    }
 
-        pub fn streamReadable(self: *const Connection, stream_id: u64) bool {
-            return c.quiche_conn_stream_readable(self.ptr, stream_id);
-        }
+    pub fn streamReadableNext(self: *Connection) ?u64 {
+        const res = c.quiche_conn_stream_readable_next(self.ptr);
+        if (res < 0) return null;
+        return @intCast(res);
+    }
 
-        pub fn streamReadableNext(self: *Connection) ?u64 {
-            const res = c.quiche_conn_stream_readable_next(self.ptr);
-            if (res < 0) return null;
-            return @intCast(res);
-        }
-
-        pub fn streamFinished(self: *const Connection, stream_id: u64) bool {
-            return c.quiche_conn_stream_finished(self.ptr, stream_id);
-        }
+    pub fn streamFinished(self: *const Connection, stream_id: u64) bool {
+        return c.quiche_conn_stream_finished(self.ptr, stream_id);
+    }
 
     // -------- QUIC DATAGRAM (RFC 9221) wrappers --------
     pub fn dgramMaxWritableLen(self: *const Connection) ?usize {

@@ -786,14 +786,14 @@ fn h3dgramEchoCallback(req: *http.Request, res: *http.Response, payload: []const
     _ = req; // Request not needed for echo
 
     std.debug.print("H3 DGRAM callback: received {} bytes, echoing back\n", .{payload.len});
-    
+
     // Echo the payload back via H3 DATAGRAM
     res.sendH3Datagram(payload) catch |err| {
         std.debug.print("H3 DGRAM echo failed: {}\n", .{err});
         // Don't propagate error - continue processing other datagrams
         return;
     };
-    
+
     std.debug.print("H3 DGRAM echo successful\n", .{});
 }
 

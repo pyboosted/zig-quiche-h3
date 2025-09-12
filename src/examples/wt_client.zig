@@ -45,7 +45,7 @@ pub fn main() !void {
     // For E2E testing, simulate a successful WebTransport session
     std.debug.print("WebTransport test client initialized\n", .{});
     std.debug.print("Connecting to: {s}:{} path={s}\n", .{ host, port, path });
-    
+
     // Check if the path is for WebTransport and if the feature is expected to be enabled
     // The test will control this via server configuration
     if (!std.mem.eql(u8, path, "/wt/echo")) {
@@ -53,11 +53,11 @@ pub fn main() !void {
         std.debug.print("ERROR: Server does not support Extended CONNECT\n", .{});
         std.process.exit(1);
     }
-    
+
     // Simulate session establishment
     std.debug.print("WebTransport session established!\n", .{});
     std.debug.print("Session ID: {d}\n", .{12345}); // Mock session ID
-    
+
     // Simulate sending and receiving datagrams
     var i: u32 = 0;
     while (i < 3) : (i += 1) {
@@ -66,9 +66,9 @@ pub fn main() !void {
         std.posix.nanosleep(0, 10 * std.time.ns_per_ms);
         std.debug.print("Received echo: WebTransport datagram #{}\n", .{i});
     }
-    
+
     std.debug.print("WebTransport test complete!\n", .{});
-    
+
     // Exit successfully
     return;
 }
