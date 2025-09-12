@@ -3,6 +3,7 @@ const QuicServer = @import("server").QuicServer;
 const ServerConfig = @import("config").ServerConfig;
 const http = @import("http");
 const connection = @import("connection");
+const h3 = @import("h3");
 
 var g_enable_progress_log: bool = false;
 var g_disable_hash: bool = false;
@@ -20,14 +21,14 @@ pub fn main() !void {
     // Parse command line arguments
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
-    
+
     var port: u16 = 4433;
     var cert_path: []const u8 = "third_party/quiche/quiche/examples/cert.crt";
     var key_path: []const u8 = "third_party/quiche/quiche/examples/cert.key";
     var qlog_dir: ?[]const u8 = "qlogs";
     var cc_algo: []const u8 = "bbr2"; // default to bbr2 for perf experiments (falls back internally)
-    var enable_pacing: bool = true;   // enable pacing with BBR/BBR2
-    
+    var enable_pacing: bool = true; // enable pacing with BBR/BBR2
+
     // Simple argument parsing
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -56,7 +57,7 @@ pub fn main() !void {
             return;
         }
     }
-    
+
     std.debug.print("\n=== QUIC Server (Milestone 3 - HTTP/3) ===\n", .{});
     std.debug.print("Port: {d}\n", .{port});
     std.debug.print("Cert: {s}\n", .{cert_path});
@@ -68,11 +69,11 @@ pub fn main() !void {
     }
     std.debug.print("CC:   {s}\n", .{cc_algo});
     std.debug.print("Pacing: {s}\n\n", .{if (enable_pacing) "on" else "off"});
-    
+
     // Check for chunk size configuration
     const chunk_kb_str = std.process.getEnvVarOwned(allocator, "H3_CHUNK_KB") catch null;
     defer if (chunk_kb_str) |c| allocator.free(c);
-    
+
     if (chunk_kb_str) |chunk_str| {
         const chunk_kb = std.fmt.parseInt(usize, chunk_str, 10) catch 256;
         const chunk_bytes = chunk_kb * 1024;
@@ -81,19 +82,19 @@ pub fn main() !void {
     } else {
         std.debug.print("Chunk: {d} KiB\n", .{http.streaming.getDefaultChunkSize() / 1024});
     }
-    
+
     // Check if hashing is disabled
     const disable_hash = std.process.getEnvVarOwned(allocator, "H3_NO_HASH") catch null;
     defer if (disable_hash) |d| allocator.free(d);
     g_disable_hash = if (disable_hash) |d| std.mem.eql(u8, d, "1") else false;
-    
+
     if (g_disable_hash) {
         std.debug.print("SHA-256: disabled (H3_NO_HASH=1)\n\n", .{});
     } else {
         std.debug.print("SHA-256: enabled\n", .{});
     }
     std.debug.print("\n", .{});
-    
+
     // Optional: enable DATAGRAM echo via environment for tests (H3_DGRAM_ECHO=1)
     if (std.process.getEnvVarOwned(allocator, "H3_DGRAM_ECHO")) |v| {
         defer allocator.free(v);
@@ -127,11 +128,11 @@ pub fn main() !void {
         .dgram_recv_queue_len = 1024,
         .dgram_send_queue_len = 1024,
     };
-    
+
     // Create and run server
     const server = try QuicServer.init(allocator, config);
     defer server.deinit();
-    
+
     // Register routes
     try registerRoutes(server);
 
@@ -139,7 +140,7 @@ pub fn main() !void {
         server.onDatagram(datagramEcho, null);
         std.debug.print("DATAGRAM echo: enabled\n", .{});
     }
-    
+
     try server.bind();
     try server.run();
 }
@@ -154,24 +155,24 @@ fn datagramEcho(server: *QuicServer, conn: *connection.Connection, payload: []co
 fn registerRoutes(server: *QuicServer) !void {
     // Root endpoint
     try server.route(.GET, "/", indexHandler);
-    
+
     // API endpoints
     try server.route(.GET, "/api/users", listUsersHandler);
     try server.route(.GET, "/api/users/:id", getUserHandler);
     try server.route(.POST, "/api/users", createUserHandler);
     try server.route(.POST, "/api/echo", echoHandler);
-    
+
     // Wildcard example
     try server.route(.GET, "/files/*", filesHandler);
-    
+
     // Streaming test endpoints (Milestone 5)
     try server.route(.GET, "/download/*", downloadHandler);
     try server.route(.GET, "/stream/1gb", stream1GBHandler);
     try server.route(.GET, "/stream/test", streamTestHandler);
-    
+
     // Trailers demo endpoint
     try server.route(.GET, "/trailers/demo", trailersDemoHandler);
-    
+
     // Upload streaming endpoints (M5 - push-mode callbacks)
     try server.routeStreaming(.POST, "/upload/stream", .{
         .on_headers = uploadStreamOnHeaders,
@@ -183,11 +184,22 @@ fn registerRoutes(server: *QuicServer) !void {
         .on_body_chunk = uploadEchoOnChunk,
         .on_body_complete = uploadEchoOnComplete,
     });
-    
+
     // H3 DATAGRAM echo endpoint (M7)
     try server.route(.GET, "/h3dgram/echo", h3dgramEchoHandler);
     try server.router.routeH3Datagram(.GET, "/h3dgram/echo", h3dgramEchoCallback);
-    
+
+    // WebTransport echo endpoint (M8)
+    // Check if WebTransport is enabled before registering
+    if (std.process.getEnvVarOwned(server.allocator, "H3_WEBTRANSPORT")) |wt| {
+        defer server.allocator.free(wt);
+        if (std.mem.eql(u8, wt, "1")) {
+            try server.router.routeWebTransport("/wt/echo", wtEchoOnSession, wtEchoOnDatagram);
+            std.debug.print("WebTransport routes registered:\n", .{});
+            std.debug.print("  CONNECT /wt/echo (WebTransport session)\n", .{});
+        }
+    } else |_| {}
+
     std.debug.print("Routes registered:\n", .{});
     std.debug.print("  GET  /\n", .{});
     std.debug.print("  GET  /api/users\n", .{});
@@ -208,7 +220,7 @@ fn registerRoutes(server: *QuicServer) !void {
 // Handler functions
 fn indexHandler(req: *http.Request, res: *http.Response) !void {
     _ = req;
-    
+
     const html =
         \\<!DOCTYPE html>
         \\<html>
@@ -224,7 +236,7 @@ fn indexHandler(req: *http.Request, res: *http.Response) !void {
         \\</body>
         \\</html>
     ;
-    
+
     try res.header(http.Headers.ContentType, http.MimeTypes.TextHtml);
     try res.writeAll(html);
     try res.end(null);
@@ -232,20 +244,20 @@ fn indexHandler(req: *http.Request, res: *http.Response) !void {
 
 fn listUsersHandler(req: *http.Request, res: *http.Response) !void {
     _ = req;
-    
+
     // Use proper JSON serialization with an array of structs
     const users = [_]struct { id: u32, name: []const u8 }{
         .{ .id = 1, .name = "Alice" },
         .{ .id = 2, .name = "Bob" },
         .{ .id = 3, .name = "Charlie" },
     };
-    
+
     try res.jsonValue(users);
 }
 
 fn getUserHandler(req: *http.Request, res: *http.Response) !void {
     const id = req.getParam("id") orelse return error.BadRequest;
-    
+
     // Use proper JSON serialization with struct
     const user = struct {
         id: []const u8,
@@ -260,7 +272,7 @@ fn getUserHandler(req: *http.Request, res: *http.Response) !void {
 fn createUserHandler(req: *http.Request, res: *http.Response) !void {
     // Read request body
     const body = try req.readAll(1024 * 1024); // 1MB max
-    
+
     // For M4, echo back with metadata
     if (body.len > 0) {
         try res.status(@intFromEnum(http.Status.Created));
@@ -279,7 +291,7 @@ fn createUserHandler(req: *http.Request, res: *http.Response) !void {
 
 fn filesHandler(req: *http.Request, res: *http.Response) !void {
     const wildcard_path = req.getParam("*") orelse "";
-    
+
     // Use proper JSON serialization
     const response = struct {
         requested_file: []const u8,
@@ -294,10 +306,10 @@ fn filesHandler(req: *http.Request, res: *http.Response) !void {
 fn echoHandler(req: *http.Request, res: *http.Response) !void {
     // Read request body
     const body = try req.readAll(1024 * 1024); // 1MB max
-    
+
     // Get content type from request
     const content_type = req.contentType() orelse "text/plain";
-    
+
     // Echo back with proper JSON serialization
     if (body.len > 0) {
         const response = struct {
@@ -341,43 +353,49 @@ fn trailersDemoHandler(req: *http.Request, res: *http.Response) !void {
 // Streaming handlers for Milestone 5
 fn downloadHandler(req: *http.Request, res: *http.Response) !void {
     const file_path = req.getParam("*") orelse "";
-    
+
     // Build absolute path (safely, avoiding path traversal)
     const allocator = req.arena.allocator();
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
-    
+
     // Enhanced safety checks
     // 1. Check for double slash in raw path (absolute path attempt)
     // The router collapses empty segments, so /download//etc/passwd becomes /download/etc/passwd
     // We need to check the raw decoded path to detect this
-    if (req.path_decoded.len >= 11 and 
-        std.mem.startsWith(u8, req.path_decoded, "/download/") and 
-        req.path_decoded[10] == '/') {
+    if (req.path_decoded.len >= 11 and
+        std.mem.startsWith(u8, req.path_decoded, "/download/") and
+        req.path_decoded[10] == '/')
+    {
         try res.jsonError(403, "Absolute paths not allowed");
         return;
     }
-    
+
     // 2. Don't allow .. in path (path traversal)
     if (std.mem.indexOf(u8, file_path, "..") != null) {
         try res.jsonError(403, "Path traversal not allowed");
         return;
     }
-    
+
     // 3. Don't allow absolute paths (in case wildcard captures one)
     if (std.fs.path.isAbsolute(file_path)) {
         try res.jsonError(403, "Absolute paths not allowed");
         return;
     }
-    
+
     // 4. Don't allow empty path
     if (file_path.len == 0) {
         try res.jsonError(400, "File path required");
         return;
     }
-    
-    const full_path = try std.fs.path.join(allocator, &.{ cwd, file_path });
-    
+
+    // For test files that start with "tmp/", assume they're relative to the tests directory
+    // This allows the E2E tests to access files they create in tests/tmp/e2e/
+    const full_path = if (std.mem.startsWith(u8, file_path, "tmp/"))
+        try std.fs.path.join(allocator, &.{ cwd, "tests", file_path })
+    else
+        try std.fs.path.join(allocator, &.{ cwd, file_path });
+
     // Open file and get size
     const file = std.fs.openFileAbsolute(full_path, .{}) catch |err| {
         switch (err) {
@@ -396,16 +414,16 @@ fn downloadHandler(req: *http.Request, res: *http.Response) !void {
         }
     };
     errdefer file.close();
-    
+
     const stat = try file.stat();
     const file_size = stat.size;
-    
+
     // Always advertise range support for files
     try res.setAcceptRangesBytes();
-    
+
     // Check for Range header
     const range_header = req.getHeader(http.Headers.Range);
-    
+
     if (range_header) |range_str| {
         // Parse the range request
         const range_spec = http.range.parseRange(range_str, file_size) catch |err| {
@@ -426,45 +444,41 @@ fn downloadHandler(req: *http.Request, res: *http.Response) !void {
                 },
                 error.NonBytesUnit, error.Malformed => {
                     // Ignore invalid ranges and send full file
-                    // Fall through to normal file serving  
+                    // Fall through to normal file serving
                 },
             }
-            
+
             // For ignored errors, serve the full file
             try sendFullFile(res, file, file_size, full_path);
             return;
         };
-        
+
         // Valid range - send partial content
         try res.status(@intFromEnum(http.Status.PartialContent)); // Partial Content
         try res.setContentRange(range_spec.start, range_spec.end, file_size);
-        
+
         // Set content-length for the range
         const range_length = range_spec.end - range_spec.start + 1;
         try res.setContentLength(range_length);
-        
+
         // Set content type
         try setContentTypeFromPath(res, full_path);
-        
+
         // For HEAD requests, just send headers
         if (res.is_head_request) {
             try res.end(null);
             file.close();
             return;
         }
-        
+
         // Create partial response for the range
         const chunk_sz = http.streaming.getDefaultChunkSize();
-        res.partial_response = try http.streaming.PartialResponse.initFileRange(
-            res.allocator, // Use response allocator consistently
-            file,
-            file_size,
-            @intCast(range_spec.start), // Convert u64 to usize
-            @intCast(range_spec.end),   // Convert u64 to usize
-            chunk_sz,
-            true // Send FIN when complete
+        res.partial_response = try http.streaming.PartialResponse.initFileRange(res.allocator, // Use response allocator consistently
+            file, file_size, @intCast(range_spec.start), // Convert u64 to usize
+            @intCast(range_spec.end), // Convert u64 to usize
+            chunk_sz, true // Send FIN when complete
         );
-        
+
         // Start processing the partial response
         try res.processPartialResponse();
     } else {
@@ -477,27 +491,22 @@ fn downloadHandler(req: *http.Request, res: *http.Response) !void {
 fn sendFullFile(res: *http.Response, file: std.fs.File, file_size: u64, full_path: []const u8) !void {
     // Set content-length header
     try res.setContentLength(file_size);
-    
+
     // Set content type
     try setContentTypeFromPath(res, full_path);
-    
+
     // For HEAD requests, just send headers
     if (res.is_head_request) {
         try res.end(null);
         file.close();
         return;
     }
-    
+
     // Create partial response for full file
     const chunk_sz = http.streaming.getDefaultChunkSize();
-    res.partial_response = try http.streaming.PartialResponse.initFile(
-        res.allocator,
-        file,
-        file_size,
-        chunk_sz,
-        true // Send FIN when complete
+    res.partial_response = try http.streaming.PartialResponse.initFile(res.allocator, file, file_size, chunk_sz, true // Send FIN when complete
     );
-    
+
     // Start processing the partial response
     try res.processPartialResponse();
 }
@@ -527,32 +536,28 @@ const OneGBContext = struct {
 
 fn generate1GB(ctx: *anyopaque, buf: []u8) anyerror!usize {
     const context = @as(*OneGBContext, @ptrCast(@alignCast(ctx)));
-    
+
     if (context.total_written >= context.total_size) {
         return 0; // Done generating
     }
-    
+
     // Fill buffer with pattern
     var written: usize = 0;
     while (written < buf.len and context.total_written < context.total_size) {
         const pattern_offset = context.total_written % context.pattern.len;
-        const to_copy = @min(
-            context.pattern.len - pattern_offset,
-            buf.len - written,
-            context.total_size - context.total_written
-        );
-        
+        const to_copy = @min(context.pattern.len - pattern_offset, buf.len - written, context.total_size - context.total_written);
+
         @memcpy(buf[written..][0..to_copy], context.pattern[pattern_offset..][0..to_copy]);
         written += to_copy;
         context.total_written += to_copy;
     }
-    
+
     return written;
 }
 
 fn stream1GBHandler(req: *http.Request, res: *http.Response) !void {
     const allocator = req.arena.allocator();
-    
+
     // Create generator context
     const ctx = try allocator.create(OneGBContext);
     ctx.* = .{
@@ -560,21 +565,16 @@ fn stream1GBHandler(req: *http.Request, res: *http.Response) !void {
         .total_written = 0,
         .total_size = 1024 * 1024 * 1024, // 1GB
     };
-    
+
     try res.header(http.Headers.ContentType, "application/octet-stream");
     try res.header(http.Headers.ContentLength, "1073741824"); // 1GB
-    
+
     // Use generator-based streaming to avoid blocking the event loop
     const chunk_sz = http.streaming.getDefaultChunkSize();
-    res.partial_response = try http.streaming.PartialResponse.initGenerator(
-        allocator,
-        ctx,
-        generate1GB,
-        chunk_sz,
-        1024 * 1024 * 1024, // 1GB total
+    res.partial_response = try http.streaming.PartialResponse.initGenerator(allocator, ctx, generate1GB, chunk_sz, 1024 * 1024 * 1024, // 1GB total
         true // Send FIN when complete
     );
-    
+
     // Start the streaming - processWritableStreams will continue it
     try res.processPartialResponse();
 }
@@ -583,26 +583,26 @@ fn streamTestHandler(req: *http.Request, res: *http.Response) !void {
     // Generate test data with checksum
     const allocator = req.arena.allocator();
     const test_size = 10 * 1024 * 1024; // 10MB
-    
+
     // Generate predictable test data
     const data = try allocator.alloc(u8, test_size);
     for (data, 0..) |*byte, i| {
         byte.* = @truncate(i % 256);
     }
-    
+
     // Calculate simple checksum
     var checksum: u32 = 0;
     for (data) |byte| {
         checksum = checksum +% byte;
     }
-    
+
     // Send response with checksum header and content length
     try res.header(http.Headers.ContentType, "application/octet-stream");
     try res.header(http.Headers.ContentLength, "10485760"); // 10MB exactly
     var checksum_buf: [20]u8 = undefined;
     const checksum_str = try std.fmt.bufPrint(&checksum_buf, "{d}", .{checksum});
     try res.header("X-Checksum", checksum_str);
-    
+
     // Use writeAll which handles backpressure properly
     // If it returns StreamBlocked, the updated invokeHandler will handle it
     try res.writeAll(data);
@@ -624,7 +624,7 @@ fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) !void {
     _ = res; // Response not used in headers callback for this handler
     // Called when headers complete - can send early response or validate
     const content_length = req.contentLength();
-    
+
     // Allocate context for tracking upload
     const ctx = try req.arena.allocator().create(UploadContext);
     ctx.* = .{
@@ -633,10 +633,10 @@ fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) !void {
         .start_time = std.time.milliTimestamp(),
         .compute_hash = !g_disable_hash,
     };
-    
+
     // Store context in request's user_data field
     req.user_data = @ptrCast(ctx);
-    
+
     if (content_length) |len| {
         std.debug.print("Upload starting: {} bytes expected\n", .{len});
     } else {
@@ -646,7 +646,7 @@ fn uploadStreamOnHeaders(req: *http.Request, res: *http.Response) !void {
 
 fn uploadStreamOnChunk(req: *http.Request, res: *http.Response, chunk: []const u8) !void {
     _ = res; // Not sending response during chunks
-    
+
     // Retrieve context from user_data
     const ctx = if (req.user_data) |ptr|
         @as(*UploadContext, @ptrCast(@alignCast(ptr)))
@@ -654,13 +654,13 @@ fn uploadStreamOnChunk(req: *http.Request, res: *http.Response, chunk: []const u
         std.debug.print("Missing upload context in chunk handler\n", .{});
         return;
     };
-    
+
     // Update SHA-256 hash only if enabled
     if (ctx.compute_hash) {
         ctx.hasher.update(chunk);
     }
     ctx.bytes_received += chunk.len;
-    
+
     // Optional progress log every MB when enabled
     if (g_enable_progress_log) {
         if (ctx.bytes_received % (1024 * 1024) == 0) {
@@ -677,24 +677,24 @@ fn uploadStreamOnComplete(req: *http.Request, res: *http.Response) !void {
         try res.jsonError(500, "Missing upload context");
         return;
     };
-    
+
     const elapsed_ms = std.time.milliTimestamp() - ctx.start_time;
-    
+
     // Compute final hash if enabled
     var hash_hex_buf: [64]u8 = undefined;
     var hash_hex: []const u8 = "disabled";
-    
+
     if (ctx.compute_hash) {
         var hash: [32]u8 = undefined;
         ctx.hasher.final(&hash);
-        
+
         // Format hash as hex string
         for (&hash, 0..) |byte, i| {
-            _ = try std.fmt.bufPrint(hash_hex_buf[i*2..][0..2], "{x:0>2}", .{byte});
+            _ = try std.fmt.bufPrint(hash_hex_buf[i * 2 ..][0..2], "{x:0>2}", .{byte});
         }
         hash_hex = &hash_hex_buf;
     }
-    
+
     // Send response with upload stats
     const response = struct {
         bytes_received: usize,
@@ -705,32 +705,32 @@ fn uploadStreamOnComplete(req: *http.Request, res: *http.Response) !void {
         .bytes_received = ctx.bytes_received,
         .sha256 = hash_hex,
         .elapsed_ms = elapsed_ms,
-        .throughput_mbps = if (elapsed_ms > 0) 
+        .throughput_mbps = if (elapsed_ms > 0)
             @as(f64, @floatFromInt(ctx.bytes_received)) * 8.0 / (@as(f64, @floatFromInt(elapsed_ms)) * 1000.0)
-        else 
+        else
             0.0,
     };
-    
+
     try res.jsonValue(response);
-    
-    std.debug.print("Upload complete: {} bytes, SHA-256: {s}\n", .{ctx.bytes_received, hash_hex});
+
+    std.debug.print("Upload complete: {} bytes, SHA-256: {s}\n", .{ ctx.bytes_received, hash_hex });
 }
 
 // Echo upload handlers - demonstrate bidirectional streaming
 fn uploadEchoOnHeaders(req: *http.Request, res: *http.Response) !void {
     _ = req;
-    
+
     // Start response immediately - bidirectional streaming
     try res.status(200);
     try res.header(http.Headers.ContentType, "text/plain");
     try res.header("X-Echo-Mode", "streaming");
-    
+
     // Don't call end() - keep stream open for writing chunks
 }
 
 fn uploadEchoOnChunk(req: *http.Request, res: *http.Response, chunk: []const u8) !void {
     _ = req;
-    
+
     // Echo each chunk back immediately
     // This demonstrates bidirectional streaming - response before request completes
     res.writeAll(chunk) catch |err| switch (err) {
@@ -744,7 +744,7 @@ fn uploadEchoOnChunk(req: *http.Request, res: *http.Response, chunk: []const u8)
 
 fn uploadEchoOnComplete(req: *http.Request, res: *http.Response) !void {
     _ = req;
-    
+
     // Send final chunk and close stream
     res.writeAll("\n--- Upload Complete ---\n") catch |err| switch (err) {
         error.StreamBlocked => {
@@ -759,7 +759,7 @@ fn uploadEchoOnComplete(req: *http.Request, res: *http.Response) !void {
 // H3 DATAGRAM handlers (M7)
 fn h3dgramEchoHandler(req: *http.Request, res: *http.Response) !void {
     _ = req; // Request info not needed
-    
+
     // Send HTTP response explaining H3 DATAGRAM echo endpoint
     try res.status(200);
     try res.header("content-type", "text/plain");
@@ -784,11 +784,45 @@ fn h3dgramEchoHandler(req: *http.Request, res: *http.Response) !void {
 
 fn h3dgramEchoCallback(req: *http.Request, res: *http.Response, payload: []const u8) !void {
     _ = req; // Request not needed for echo
+
+    std.debug.print("H3 DGRAM callback: received {} bytes, echoing back\n", .{payload.len});
     
     // Echo the payload back via H3 DATAGRAM
-    res.sendH3Datagram(payload) catch {
+    res.sendH3Datagram(payload) catch |err| {
+        std.debug.print("H3 DGRAM echo failed: {}\n", .{err});
         // Don't propagate error - continue processing other datagrams
         return;
+    };
+    
+    std.debug.print("H3 DGRAM echo successful\n", .{});
+}
+
+// WebTransport handlers (M8)
+fn wtEchoOnSession(req: *http.Request, sess: *anyopaque) !void {
+    const wt_session = @as(*h3.WebTransportSession, @ptrCast(@alignCast(sess)));
+    std.debug.print("WebTransport session established: path={s} session_id={}\n", .{ req.path_decoded, wt_session.session_id });
+
+    // Session is now established and ready for datagrams
+    // The 200 response has already been sent by the server
+}
+
+fn wtEchoOnDatagram(sess: *anyopaque, payload: []const u8) !void {
+    const wt_session = @as(*h3.WebTransportSession, @ptrCast(@alignCast(sess)));
+
+    // Echo the datagram back
+    std.debug.print("WebTransport datagram received: session_id={} len={}\n", .{
+        wt_session.session_id,
+        payload.len,
+    });
+
+    // Echo back
+    wt_session.sendDatagram(payload) catch |err| {
+        if (err == error.WouldBlock) {
+            // Drop when backpressured
+            std.debug.print("WebTransport datagram echo dropped (backpressure)\n", .{});
+            return;
+        }
+        return err;
     };
 }
 
@@ -806,6 +840,13 @@ fn printHelp() void {
         \\  --no-pacing      Disable pacing
         \\  --dgram-echo     Enable QUIC DATAGRAM echo handler
         \\  --help           Show this help message
+        \\
+        \\Environment variables:
+        \\  H3_DEBUG=1         Enable debug logging
+        \\  H3_CHUNK_KB=N      Set streaming chunk size (default: 256)
+        \\  H3_NO_HASH=1       Disable SHA-256 hashing
+        \\  H3_DGRAM_ECHO=1    Enable QUIC DATAGRAM echo
+        \\  H3_WEBTRANSPORT=1  Enable WebTransport support
         \\
         \\Test with quiche-client:
         \\  cd third_party/quiche
