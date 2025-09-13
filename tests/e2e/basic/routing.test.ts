@@ -1,17 +1,35 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { get, post } from "@helpers/curlClient";
+import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
-import { expectJson } from "@helpers/testUtils";
+import { expectJson, type ServerBinaryType } from "@helpers/testUtils";
 
-describe("HTTP/3 Routing", () => {
+console.log(`[E2E] routing.test.ts loaded at ${new Date().toISOString()}`);
+
+describeBoth("HTTP/3 Routing", (binaryType: ServerBinaryType) => {
+    console.log(
+        `[E2E] describe("HTTP/3 Routing [${binaryType}]") executed at ${new Date().toISOString()}`,
+    );
     let server: ServerInstance;
 
     beforeAll(async () => {
-        server = await spawnServer({ qlog: false });
+        console.log(
+            `[E2E] routing.test.ts beforeAll(${binaryType}) starting at ${new Date().toISOString()}`,
+        );
+        server = await spawnServer({ qlog: false, binaryType });
+        console.log(
+            `[E2E] routing.test.ts beforeAll(${binaryType}) completed at ${new Date().toISOString()}`,
+        );
     });
 
     afterAll(async () => {
+        console.log(
+            `[E2E] routing.test.ts afterAll(${binaryType}) starting at ${new Date().toISOString()}`,
+        );
         await server.cleanup();
+        console.log(
+            `[E2E] routing.test.ts afterAll(${binaryType}) completed at ${new Date().toISOString()}`,
+        );
     });
 
     describe("Static routes", () => {

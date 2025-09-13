@@ -68,6 +68,7 @@ pub fn build(b: *std.Build) void {
     // Build options accessible to modules via @import("build_options")
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "with_webtransport", with_webtransport);
+    // no router-related build options
 
     // Paths
     const quiche_root = b.path("third_party/quiche");
@@ -170,7 +171,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // HTTP module for routing and request/response handling
+    // HTTP module for routing and request/response handling (library default)
     const http_mod = b.createModule(.{
         .root_source_file = b.path("src/http/mod.zig"),
         .target = target,
@@ -179,7 +180,36 @@ pub fn build(b: *std.Build) void {
     http_mod.addImport("quiche", quiche_ffi_mod);
     http_mod.addImport("h3", h3_mod);
     http_mod.addImport("errors", errors_mod);
-    // http module no longer needs build_options
+
+    // Add errors module to h3_mod
+    h3_mod.addImport("errors", errors_mod);
+
+    // Routing ABI (phase 0) used by server
+    const routing_mod = b.createModule(.{
+        .root_source_file = b.path("src/routing/api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    routing_mod.addImport("http", http_mod);
+    const routing_gen_mod = b.createModule(.{
+        .root_source_file = b.path("src/routing/generator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    routing_gen_mod.addImport("http", http_mod);
+    routing_gen_mod.addImport("routing", routing_mod);
+
+    // Dynamic matcher (runtime builder)
+    const routing_dyn_mod = b.createModule(.{
+        .root_source_file = b.path("src/routing/dynamic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    routing_dyn_mod.addImport("http", http_mod);
+    routing_dyn_mod.addImport("routing", routing_mod);
+    
+
+    // http module no longer needs router/static_routes
 
     const server_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/server.zig"),
@@ -194,49 +224,136 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("h3", h3_mod);
     server_mod.addImport("http", http_mod);
     server_mod.addImport("errors", errors_mod);
+    server_mod.addImport("routing", routing_mod);
     server_mod.addOptions("build_options", build_opts);
 
-    // QUIC server executable (requires libev)
+    // Consolidated hybrid router
+    // no hybrid router in server
+
+    // App-specific HTTP module that injects example static routes for the example server
+    const http_mod_app = b.createModule(.{
+        .root_source_file = b.path("src/http/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    http_mod_app.addImport("quiche", quiche_ffi_mod);
+    http_mod_app.addImport("h3", h3_mod);
+    http_mod_app.addImport("errors", errors_mod);
+    // Shared handlers for example servers
+    const quic_handlers_mod = b.createModule(.{
+        .root_source_file = b.path("src/examples/quic_server_handlers.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    quic_handlers_mod.addImport("http", http_mod_app);
+
+    // Server module for example, bound to http_mod_app
+    const server_mod_app = b.createModule(.{
+        .root_source_file = b.path("src/quic/server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    server_mod_app.addImport("quiche", quiche_ffi_mod);
+    server_mod_app.addImport("connection", connection_mod);
+    server_mod_app.addImport("config", config_mod);
+    server_mod_app.addImport("event_loop", event_loop_mod);
+    server_mod_app.addImport("udp", udp_mod);
+    server_mod_app.addImport("h3", h3_mod);
+    server_mod_app.addImport("http", http_mod_app);
+    server_mod_app.addImport("errors", errors_mod);
+    const routing_mod_app = b.createModule(.{
+        .root_source_file = b.path("src/routing/api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    routing_mod_app.addImport("http", http_mod_app);
+    server_mod_app.addImport("routing", routing_mod_app);
+    const routing_gen_mod_app = b.createModule(.{
+        .root_source_file = b.path("src/routing/generator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    routing_gen_mod_app.addImport("http", http_mod_app);
+    routing_gen_mod_app.addImport("routing", routing_mod_app);
+    server_mod_app.addOptions("build_options", build_opts);
+
+    // Dynamic matcher module bound to app's http module
+    const routing_dyn_mod_app = b.createModule(.{
+        .root_source_file = b.path("src/routing/dynamic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    routing_dyn_mod_app.addImport("http", http_mod_app);
+    routing_dyn_mod_app.addImport("routing", routing_mod_app);
+
+    // No router module
+
+    // Remove legacy quic-server (router-based)
+
+    // QUIC server using matcher generator (canonical example)
     if (with_libev) {
         const quic_server_mod = b.createModule(.{
             .root_source_file = b.path("src/examples/quic_server.zig"),
             .target = target,
             .optimize = optimize,
         });
-        quic_server_mod.addImport("server", server_mod);
+        quic_server_mod.addImport("server", server_mod_app);
         quic_server_mod.addImport("config", config_mod);
-        quic_server_mod.addImport("http", http_mod);
+        quic_server_mod.addImport("http", http_mod_app);
         quic_server_mod.addImport("connection", connection_mod);
-        quic_server_mod.addImport("h3", h3_mod);
+        quic_server_mod.addImport("handlers", quic_handlers_mod);
+        quic_server_mod.addImport("routing", routing_mod_app);
+        quic_server_mod.addImport("routing_gen", routing_gen_mod_app);
 
-        const quic_server = b.addExecutable(.{
-            .name = "quic-server",
-            .root_module = quic_server_mod,
-        });
-
+        const quic_server = b.addExecutable(.{ .name = "quic-server", .root_module = quic_server_mod });
         addQuicheLink(b, quic_server, use_system_quiche, quiche_lib_path, cargo_step);
         linkCommon(target, quic_server, link_ssl, with_libev, libev_lib_dir, true);
-
         b.installArtifact(quic_server);
-
-        const run_quic_server = b.addRunArtifact(quic_server);
-        if (b.args) |args| run_quic_server.addArgs(args);
-        const quic_server_step = b.step("quic-server", "Run the QUIC server (requires libev)");
-        quic_server_step.dependOn(&run_quic_server.step);
+        const run_qs = b.addRunArtifact(quic_server);
+        if (b.args) |args| run_qs.addArgs(args);
+        const qs_step = b.step("quic-server", "Run the QUIC server example");
+        qs_step.dependOn(&run_qs.step);
     }
 
-    // QUIC DATAGRAM echo example (requires libev)
+    // QUIC dynamic matcher example
+    if (with_libev) {
+        const quic_server_dyn_mod = b.createModule(.{
+            .root_source_file = b.path("src/examples/quic_server_dyn.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        quic_server_dyn_mod.addImport("server", server_mod_app);
+        quic_server_dyn_mod.addImport("config", config_mod);
+        quic_server_dyn_mod.addImport("http", http_mod_app);
+        quic_server_dyn_mod.addImport("connection", connection_mod);
+        quic_server_dyn_mod.addImport("routing", routing_mod_app);
+        quic_server_dyn_mod.addImport("routing_dyn", routing_dyn_mod_app);
+        quic_server_dyn_mod.addImport("handlers", quic_handlers_mod);
+
+        const quic_server_dyn = b.addExecutable(.{ .name = "quic-server-dyn", .root_module = quic_server_dyn_mod });
+        addQuicheLink(b, quic_server_dyn, use_system_quiche, quiche_lib_path, cargo_step);
+        linkCommon(target, quic_server_dyn, link_ssl, with_libev, libev_lib_dir, true);
+        b.installArtifact(quic_server_dyn);
+        const run_qs_dyn = b.addRunArtifact(quic_server_dyn);
+        if (b.args) |args| run_qs_dyn.addArgs(args);
+        const qs_dyn_step = b.step("quic-server-dyn", "Run the QUIC server with dynamic matcher");
+        qs_dyn_step.dependOn(&run_qs_dyn.step);
+    }
+
+    // QUIC DATAGRAM echo example (requires libev) - matcher v2
     if (with_libev) {
         const dgram_echo_mod = b.createModule(.{
             .root_source_file = b.path("src/examples/quic_dgram_echo.zig"),
             .target = target,
             .optimize = optimize,
         });
-        dgram_echo_mod.addImport("server", server_mod);
+        dgram_echo_mod.addImport("server", server_mod_app);
         dgram_echo_mod.addImport("config", config_mod);
-        dgram_echo_mod.addImport("http", http_mod);
+        dgram_echo_mod.addImport("http", http_mod_app);
         dgram_echo_mod.addImport("connection", connection_mod);
         dgram_echo_mod.addImport("h3", h3_mod);
+        dgram_echo_mod.addImport("routing", routing_mod_app);
+        dgram_echo_mod.addImport("routing_gen", routing_gen_mod_app);
 
         const dgram_echo = b.addExecutable(.{ .name = "quic-dgram-echo", .root_module = dgram_echo_mod });
         addQuicheLink(b, dgram_echo, use_system_quiche, quiche_lib_path, cargo_step);
@@ -282,6 +399,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // Provide module imports used by tests
+    test_mod.addImport("http", http_mod);
+    test_mod.addImport("routing", routing_mod);
+    test_mod.addImport("routing_gen", routing_gen_mod);
+    test_mod.addImport("routing_dyn", routing_dyn_mod);
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     unit_tests.root_module.addIncludePath(b.path(quiche_include_dir));
     addQuicheLink(b, unit_tests, use_system_quiche, quiche_lib_path, cargo_step);

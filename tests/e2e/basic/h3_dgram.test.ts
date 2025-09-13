@@ -1,9 +1,11 @@
-import { describe, test, expect } from "bun:test";
-import { spawnServer } from "@helpers/spawnServer";
-import { get } from "@helpers/curlClient";
+import { expect, test } from "bun:test";
 import { retryWithBackoff } from "@helpers/cpuLoad";
+import { get } from "@helpers/curlClient";
+import { describeBoth } from "@helpers/dualBinaryTest";
+import { spawnServer } from "@helpers/spawnServer";
+import type { ServerBinaryType } from "@helpers/testUtils";
 
-describe("H3 DATAGRAM Tests", () => {
+describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
     // TODO: replace with proper zig-http3-client checks when its done
     test.skip("request-associated H3 dgram echo", async () => {
         const server = await spawnServer({ env: { H3_DGRAM_ECHO: "1", RUST_LOG: "trace" } });
@@ -65,7 +67,7 @@ describe("H3 DATAGRAM Tests", () => {
     // TODO: replace with proper zig-http3-client checks when its done
     test.skip("H3 dgram disabled when QUIC datagrams disabled", async () => {
         // Test server without DATAGRAM support enabled
-        const server = await spawnServer(); // No H3_DGRAM_ECHO env var
+        const server = await spawnServer({ binaryType }); // No H3_DGRAM_ECHO env var
 
         try {
             const response = await get(`https://127.0.0.1:${server.port}/h3dgram/echo`);

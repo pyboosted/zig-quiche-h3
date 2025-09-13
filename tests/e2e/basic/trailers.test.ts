@@ -1,10 +1,12 @@
-import { describe, test, expect } from "bun:test";
-import { spawn } from "bun";
+import { expect, test } from "bun:test";
+import { describeBoth } from "@helpers/dualBinaryTest";
 import { spawnServer } from "@helpers/spawnServer";
+import type { ServerBinaryType } from "@helpers/testUtils";
+import { spawn } from "bun";
 
-describe("HTTP/3 Trailers", () => {
+describeBoth("HTTP/3 Trailers", (binaryType: ServerBinaryType) => {
     test("curl trace shows response trailers", async () => {
-        const server = await spawnServer();
+        const server = await spawnServer({ binaryType });
         try {
             const url = `https://127.0.0.1:${server.port}/trailers/demo`;
 

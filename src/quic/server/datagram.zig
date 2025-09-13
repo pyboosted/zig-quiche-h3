@@ -17,7 +17,7 @@ pub fn Impl(comptime S: type) type {
         }
 
         /// Send a QUIC DATAGRAM on a connection, tracking counters
-        pub fn sendDatagram(self: *Self, conn: *connection.Connection, data: []const u8) !void {
+        pub fn sendDatagram(self: *Self, conn: *connection.Connection, data: []const u8) errors.DatagramError!void {
             if (conn.conn.dgramMaxWritableLen()) |maxw| {
                 if (data.len > maxw) return error.DatagramTooLarge;
             }
@@ -26,7 +26,8 @@ pub fn Impl(comptime S: type) type {
                     self.datagram.dropped_send += 1;
                     return error.WouldBlock;
                 }
-                return err;
+                // Map non-Done errors to a conservative ConnectionClosed
+                return error.ConnectionClosed;
             };
             self.datagram.sent += 1;
         }
@@ -69,7 +70,7 @@ pub fn Impl(comptime S: type) type {
                     const h3_enabled = h3_conn.dgramEnabledByPeer(&conn.conn);
                     server_logging.debugPrint(self, "[DEBUG] H3 connection exists, dgramEnabledByPeer={}\n", .{h3_enabled});
                     if (h3_enabled) {
-                        handled_as_h3 = Self.processH3Datagram(self, conn, payload) catch |err| blk: {
+                        handled_as_h3 = processH3Datagram(self, conn, payload) catch |err| blk: {
                             server_logging.debugPrint(self, "[DEBUG] H3 DATAGRAM parse error: {}, falling back to QUIC\n", .{err});
                             break :blk false;
                         };
@@ -109,7 +110,7 @@ pub fn Impl(comptime S: type) type {
             const h3_payload = payload[payload_offset..];
             server_logging.debugPrint(self, "[DEBUG] H3 DATAGRAM payload size: {} bytes\n", .{h3_payload.len});
 
-            const flow_key = .{ .conn = conn, .flow_id = flow_id };
+            const flow_key = Self.FlowKey{ .conn = conn, .flow_id = flow_id };
             server_logging.debugPrint(self, "[DEBUG] Looking up flow_key: conn={*}, flow_id={}\n", .{ conn, flow_id });
 
             if (self.h3.dgram_flows.get(flow_key)) |state| {

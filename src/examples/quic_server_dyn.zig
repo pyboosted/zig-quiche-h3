@@ -2,9 +2,10 @@ const std = @import("std");
 const QuicServer = @import("server").QuicServer;
 const ServerConfig = @import("config").ServerConfig;
 const http = @import("http");
-const connection = @import("connection");
+const handlers = @import("handlers");
 const routing = @import("routing");
-const routing_gen = @import("routing_gen");
+const routing_dyn = @import("routing_dyn");
+const connection = @import("connection");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -41,45 +42,53 @@ pub fn main() !void {
         .alpn_protocols = &.{"h3"},
         .enable_debug_logging = false,
         .enable_pacing = true,
-        .cc_algorithm = "cubic",
+        .cc_algorithm = "bbr2",
         .enable_dgram = true,
         .dgram_recv_queue_len = 1024,
         .dgram_send_queue_len = 1024,
     };
 
-    // Minimal route for readiness
-    const routes = [_]routing_gen.RouteDef{
-        .{ .pattern = "/", .method = .GET, .handler = indexHandler },
-    };
-    const Gen = routing_gen.compileRoutes(&routes);
-    var gen = Gen.instance();
-    const matcher: routing.Matcher = gen.intoMatcher();
+    var builder = routing_dyn.Builder.init(allocator);
+    defer builder.deinit();
+
+    var bptr = try builder.get("/", handlers.indexHandler);
+    bptr = try bptr.get("/api/users", handlers.listUsersHandler);
+    bptr = try bptr.get("/api/users/:id", handlers.getUserHandler);
+    bptr = try bptr.post("/api/users", handlers.createUserHandler);
+    bptr = try bptr.post("/api/echo", handlers.echoHandler);
+    bptr = try bptr.post("/api/users", handlers.createUserHandler);
+    bptr = try bptr.get("/files/*", handlers.filesHandler);
+    bptr = try bptr.get("/download/*", handlers.downloadHandler);
+    bptr = try bptr.get("/stream/1gb", handlers.stream1GBHandler);
+    bptr = try bptr.get("/stream/test", handlers.streamTestHandler);
+    bptr = try bptr.get("/trailers/demo", handlers.trailersDemoHandler);
+    bptr = try bptr.streaming("/upload/stream", .{ 
+        .on_headers = handlers.uploadStreamOnHeaders, 
+        .on_body_chunk = handlers.uploadStreamOnChunk, 
+        .on_body_complete = handlers.uploadStreamOnComplete 
+    });
+    bptr = try bptr.streaming("/upload/echo", .{ 
+        .on_headers = handlers.uploadEchoOnHeaders, 
+        .on_body_chunk = handlers.uploadEchoOnChunk, 
+        .on_body_complete = handlers.uploadEchoOnComplete 
+    });
+    _ = try bptr.getWithOpts("/h3dgram/echo", handlers.h3dgramEchoHandler, .{ .on_h3_dgram = handlers.h3dgramEchoCallback });
+
+    var dyn = try builder.build();
+    defer dyn.deinit();
+    const matcher: routing.Matcher = dyn.intoMatcher();
 
     const server = try QuicServer.init(allocator, config, matcher);
     defer server.deinit();
 
-    // Echo any received QUIC DATAGRAM back to the sender
     server.onDatagram(datagramEcho, null);
 
     try server.bind();
-    std.debug.print("QUIC DATAGRAM echo server on 127.0.0.1:{d}\n", .{port});
+    std.debug.print("QUIC dynamic server running on 127.0.0.1:{d}\n", .{port});
     try server.run();
 }
 
-fn indexHandler(_: *http.Request, res: *http.Response) http.HandlerError!void {
-    res.header(http.Headers.ContentType, http.MimeTypes.TextPlain) catch return error.InternalServerError;
-    res.writeAll("ok\n") catch |e| switch (e) {
-        error.StreamBlocked => return error.StreamBlocked,
-        else => return error.InternalServerError,
-    };
-    res.end(null) catch |e| switch (e) {
-        error.StreamBlocked => return error.StreamBlocked,
-        else => return error.InternalServerError,
-    };
-}
-
 fn datagramEcho(server: *QuicServer, conn: *connection.Connection, payload: []const u8, _: ?*anyopaque) http.DatagramError!void {
-    // Echo back, ignore transient backpressure
     server.sendDatagram(conn, payload) catch |err| switch (err) {
         error.WouldBlock => return,
         else => return err,

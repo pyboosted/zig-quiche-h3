@@ -1,9 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { expect, it } from "bun:test";
+import { retryWithBackoff } from "@helpers/cpuLoad";
+import { describeBoth } from "@helpers/dualBinaryTest";
 import { quicheClient } from "@helpers/quicheClient";
 import { withServer } from "@helpers/spawnServer";
-import { retryWithBackoff } from "@helpers/cpuLoad";
+import type { ServerBinaryType } from "@helpers/testUtils";
 
-describe("QUIC DATAGRAM echo", () => {
+describeBoth("QUIC DATAGRAM echo", (_binaryType: ServerBinaryType) => {
     // TODO: replace with proper zig-http3-client checks when its done
     it.skip("echoes datagrams when enabled", async () => {
         await withServer(

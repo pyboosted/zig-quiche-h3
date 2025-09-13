@@ -20,6 +20,7 @@ pub const HandlerError = error{
     RequestTimeout,
     TooManyRequests,
     InternalServerError,
+    RequestHeaderFieldsTooLarge,
 
     // Resource errors
     OutOfMemory,

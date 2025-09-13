@@ -2,14 +2,15 @@ import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { post } from "@helpers/curlClient";
+import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
-import { mkfile, withTempDir } from "@helpers/testUtils";
+import { mkfile, type ServerBinaryType, withTempDir } from "@helpers/testUtils";
 
-describe("HTTP/3 Upload Streaming", () => {
+describeBoth("HTTP/3 Upload Streaming", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {
-        server = await spawnServer({ qlog: false });
+        server = await spawnServer({ qlog: false, binaryType });
     });
 
     afterAll(async () => {

@@ -2,14 +2,15 @@ import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { curl, get } from "@helpers/curlClient";
+import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
-import { mkfile, parseContentLength, withTempDir } from "@helpers/testUtils";
+import { mkfile, parseContentLength, type ServerBinaryType } from "@helpers/testUtils";
 
-describe("HTTP/3 Download Streaming", () => {
+describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {
-        server = await spawnServer({ qlog: false });
+        server = await spawnServer({ qlog: false, binaryType });
     });
 
     afterAll(async () => {
@@ -109,9 +110,7 @@ describe("HTTP/3 Download Streaming", () => {
             // Get the relative path from the tests directory
             // The server expects paths relative to tests/ directory
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
-            const response = await get(
-                `https://127.0.0.1:${server.port}/download/${relativePath}`,
-            );
+            const response = await get(`https://127.0.0.1:${server.port}/download/${relativePath}`);
 
             expect(response.status).toBe(200);
 
