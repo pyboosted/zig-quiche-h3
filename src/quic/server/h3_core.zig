@@ -71,27 +71,20 @@ pub fn Impl(comptime S: type) type {
                         // Validate individual headers
                         var validation_failed = false;
                         for (headers) |header| {
-                            // For pseudo-headers, skip name validation but still validate values
-                            // Pseudo-header names are validated by QPACK, but values still need security checks
-                            const is_pseudo_header = header.name.len > 0 and header.name[0] == ':';
-
-                            if (!is_pseudo_header) {
-                                // Validate regular header names
-                                http.header_validation.validateHeaderName(header.name, &self.config) catch |err| {
-                                    const status_code: u16 = switch (err) {
-                                        error.HeaderNameTooLong => 431,
-                                        error.HeaderNameInvalid => 400,
-                                        else => 400,
-                                    };
-                                    server_logging.warnf(self, "Header name validation failed for '{s}': {s}, returning {}\n", .{ header.name, @errorName(err), status_code });
-                                    try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, status_code);
-                                    validation_failed = true;
-                                    break;
+                            // Validate all header names (validateHeaderName already handles pseudo-headers correctly)
+                            http.header_validation.validateHeaderName(header.name, &self.config) catch |err| {
+                                const status_code: u16 = switch (err) {
+                                    error.HeaderNameTooLong => 431,
+                                    error.HeaderNameInvalid => 400,
+                                    else => 400,
                                 };
-                            }
+                                server_logging.warnf(self, "Header name validation failed for '{s}': {s}, returning {}\n", .{ header.name, @errorName(err), status_code });
+                                try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, status_code);
+                                validation_failed = true;
+                                break;
+                            };
 
-                            // Always validate header values (for both regular and pseudo-headers)
-                            // This prevents CR/LF injection in paths, control characters in authority, etc.
+                            // Validate all header values to prevent CR/LF injection and control characters
                             http.header_validation.validateHeaderValue(header.value, &self.config) catch |err| {
                                 const status_code: u16 = switch (err) {
                                     error.HeaderValueTooLong => 431,

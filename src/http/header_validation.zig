@@ -13,13 +13,6 @@ pub const ValidationError = error{
     CRLFInjectionDetected,
 };
 
-/// Result of header validation
-pub const ValidationResult = struct {
-    valid: bool,
-    err: ?ValidationError = null,
-    message: ?[]const u8 = null,
-};
-
 /// Validates a single header name
 /// RFC 7230 Section 3.2: field-name = token
 /// token = 1*tchar
@@ -108,20 +101,6 @@ pub fn validateHeaders(
         try validateHeaderName(header.name, config);
         try validateHeaderValue(header.value, config);
     }
-}
-
-/// Helper to check if a character is a control character
-fn isControlChar(c: u8) bool {
-    return c < 32 or c == 127;
-}
-
-/// Helper to check if a header name contains only valid token characters
-fn isValidTokenChar(c: u8) bool {
-    return switch (c) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        '0'...'9', 'A'...'Z', 'a'...'z' => true,
-        else => false,
-    };
 }
 
 // Tests
