@@ -6,11 +6,15 @@ const handlers = @import("handlers");
 const routing = @import("routing");
 const routing_gen = @import("routing_gen");
 const connection = @import("connection");
+const server_logging = @import("server").server_logging;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    // Initialize runtime logging from environment variables
+    server_logging.initRuntime();
 
     // Parse CLI minimal
     const args = try std.process.argsAlloc(allocator);

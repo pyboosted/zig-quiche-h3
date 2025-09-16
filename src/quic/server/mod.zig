@@ -231,7 +231,10 @@ pub const QuicServer = struct {
         if (q_cfg.setCcAlgorithmName(cc_algo)) |_| {
             // ok
         } else |err| {
-            std.debug.print("cc={s} unsupported ({any}); falling back to cubic\n", .{ cfg.cc_algorithm, err });
+            // Log warning about unsupported CC algorithm
+            // During init, we don't have a server instance yet, so use std.debug.print directly
+            // This is a one-time initialization message
+            std.debug.print("[WARN] cc={s} unsupported ({any}); falling back to cubic\n", .{ cfg.cc_algorithm, err });
             const fallback = try allocator.dupeZ(u8, "cubic");
             defer allocator.free(fallback);
             _ = q_cfg.setCcAlgorithmName(fallback) catch {};
@@ -279,7 +282,7 @@ pub const QuicServer = struct {
                 const bytes = val * 1024 * 1024;
                 cfg_eff.max_non_streaming_body_bytes = bytes;
                 if (cfg_eff.enable_debug_logging) {
-                    std.debug.print("H3: max_non_streaming_body_bytes set to {} bytes via H3_MAX_BODY_MB\n", .{bytes});
+                    std.debug.print("[INFO] H3: max_non_streaming_body_bytes set to {} bytes via H3_MAX_BODY_MB\n", .{bytes});
                 }
             }
         } else |_| {}
@@ -291,7 +294,7 @@ pub const QuicServer = struct {
             if (val > 0) {
                 @import("http").streaming.setDefaultChunkSize(val);
                 if (cfg_eff.enable_debug_logging) {
-                    std.debug.print("H3: streaming chunk size set to {} via H3_CHUNK_SIZE\n", .{val});
+                    std.debug.print("[INFO] H3: streaming chunk size set to {} via H3_CHUNK_SIZE\n", .{val});
                 }
             }
         } else |_| {}
@@ -303,7 +306,7 @@ pub const QuicServer = struct {
             if (val > 0) {
                 cfg_eff.max_active_requests_per_conn = val;
                 if (cfg_eff.enable_debug_logging) {
-                    std.debug.print("H3: max_active_requests_per_conn set to {} via H3_MAX_REQS_PER_CONN\n", .{val});
+                    std.debug.print("[INFO] H3: max_active_requests_per_conn set to {} via H3_MAX_REQS_PER_CONN\n", .{val});
                 }
             }
         } else |_| {}
@@ -315,7 +318,7 @@ pub const QuicServer = struct {
             if (val > 0) {
                 cfg_eff.max_active_downloads_per_conn = val;
                 if (cfg_eff.enable_debug_logging) {
-                    std.debug.print("H3: max_active_downloads_per_conn set to {} via H3_MAX_DOWNLOADS_PER_CONN\n", .{val});
+                    std.debug.print("[INFO] H3: max_active_downloads_per_conn set to {} via H3_MAX_DOWNLOADS_PER_CONN\n", .{val});
                 }
             }
         } else |_| {}
