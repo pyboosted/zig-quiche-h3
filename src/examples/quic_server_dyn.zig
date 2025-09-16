@@ -7,6 +7,7 @@ const routing = @import("routing");
 const routing_dyn = @import("routing_dyn");
 const connection = @import("connection");
 const server_logging = @import("server").server_logging;
+const args = @import("args");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -16,33 +17,32 @@ pub fn main() !void {
     // Initialize runtime logging from environment variables
     server_logging.initRuntime();
 
-    // Args: --port, --cert, --key
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Parse command-line arguments
+    const ServerArgs = struct {
+        port: u16 = 4433,
+        cert: []const u8 = "third_party/quiche/quiche/examples/cert.crt",
+        key: []const u8 = "third_party/quiche/quiche/examples/cert.key",
+        no_qlog: bool = false,
 
-    var port: u16 = 4433;
-    var cert_path: []const u8 = "third_party/quiche/quiche/examples/cert.crt";
-    var key_path: []const u8 = "third_party/quiche/quiche/examples/cert.key";
+        pub const descriptions = .{
+            .port = "Port to listen on for QUIC connections",
+            .cert = "Path to TLS certificate file",
+            .key = "Path to TLS private key file",
+            .no_qlog = "Disable qlog output",
+        };
+    };
 
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
-            i += 1;
-            port = try std.fmt.parseInt(u16, args[i], 10);
-        } else if (std.mem.eql(u8, args[i], "--cert") and i + 1 < args.len) {
-            i += 1;
-            cert_path = args[i];
-        } else if (std.mem.eql(u8, args[i], "--key") and i + 1 < args.len) {
-            i += 1;
-            key_path = args[i];
-        }
-    }
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
+
+    const parser = args.Parser(ServerArgs);
+    const parsed = try parser.parse(allocator, argv);
 
     const config = ServerConfig{
-        .bind_port = port,
+        .bind_port = parsed.port,
         .bind_addr = "127.0.0.1",
-        .cert_path = cert_path,
-        .key_path = key_path,
+        .cert_path = parsed.cert,
+        .key_path = parsed.key,
         .alpn_protocols = &.{"h3"},
         .enable_debug_logging = false,
         .enable_pacing = true,
@@ -50,6 +50,7 @@ pub fn main() !void {
         .enable_dgram = true,
         .dgram_recv_queue_len = 1024,
         .dgram_send_queue_len = 1024,
+        .qlog_dir = if (parsed.no_qlog) null else "qlogs",
     };
 
     var builder = routing_dyn.Builder.init(allocator);
@@ -89,7 +90,7 @@ pub fn main() !void {
     server.onDatagram(datagramEcho, null);
 
     try server.bind();
-    std.debug.print("QUIC dynamic server running on 127.0.0.1:{d}\n", .{port});
+    std.debug.print("QUIC dynamic server running on 127.0.0.1:{d}\n", .{parsed.port});
     try server.run();
 }
 

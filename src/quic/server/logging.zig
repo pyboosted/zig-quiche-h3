@@ -51,7 +51,7 @@ pub fn initRuntime() void {
     }
 }
 
-fn levelEnabled(self: anytype, level: config_mod.ServerConfig.LogLevel) bool {
+fn levelEnabled(self: anytype, comptime level: config_mod.ServerConfig.LogLevel) bool {
     // First check compile-time level - if disabled at compile-time, always return false
     // This allows the compiler to eliminate the logging code entirely
     if (comptime @intFromEnum(level) > @intFromEnum(build_log_level)) {
@@ -70,7 +70,9 @@ fn levelEnabled(self: anytype, level: config_mod.ServerConfig.LogLevel) bool {
 
 pub fn logf(self: anytype, comptime level: config_mod.ServerConfig.LogLevel, comptime fmt: []const u8, args: anytype) void {
     // Compile-time filtering - if disabled at build time, this code is eliminated
-    if (comptime @intFromEnum(level) > @intFromEnum(build_log_level)) {
+    const level_int = @intFromEnum(level);
+    const build_level_int = @intFromEnum(build_log_level);
+    if (comptime level_int > build_level_int) {
         return;
     }
 

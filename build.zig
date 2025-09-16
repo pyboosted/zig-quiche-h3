@@ -151,6 +151,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Argument parsing module for CLI tools
+    const args_mod = b.createModule(.{
+        .root_source_file = b.path("src/args.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const connection_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/connection.zig"),
         .target = target,
@@ -316,6 +323,7 @@ pub fn build(b: *std.Build) void {
         quic_server_mod.addImport("handlers", quic_handlers_mod);
         quic_server_mod.addImport("routing", routing_mod_app);
         quic_server_mod.addImport("routing_gen", routing_gen_mod_app);
+        quic_server_mod.addImport("args", args_mod);
 
         const quic_server = b.addExecutable(.{ .name = "quic-server", .root_module = quic_server_mod });
         addQuicheLink(b, quic_server, use_system_quiche, quiche_lib_path, cargo_step);
@@ -341,6 +349,7 @@ pub fn build(b: *std.Build) void {
         quic_server_dyn_mod.addImport("routing", routing_mod_app);
         quic_server_dyn_mod.addImport("routing_dyn", routing_dyn_mod_app);
         quic_server_dyn_mod.addImport("handlers", quic_handlers_mod);
+        quic_server_dyn_mod.addImport("args", args_mod);
 
         const quic_server_dyn = b.addExecutable(.{ .name = "quic-server-dyn", .root_module = quic_server_dyn_mod });
         addQuicheLink(b, quic_server_dyn, use_system_quiche, quiche_lib_path, cargo_step);
