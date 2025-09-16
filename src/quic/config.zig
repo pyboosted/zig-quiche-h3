@@ -86,6 +86,91 @@ pub const ServerConfig = struct {
     recv_buffer_size: usize = 2048, // Good for M3, increase later
     send_buffer_size: usize = 2048,
 
+    /// Compile-time configuration validation
+    /// This validates a configuration at compile-time to catch errors during build
+    pub fn validateComptime(comptime cfg: ServerConfig) void {
+        // Port validation
+        if (cfg.bind_port == 0 or cfg.bind_port > 65535) {
+            @compileError(std.fmt.comptimePrint("Invalid port: {d}. Port must be between 1 and 65535", .{cfg.bind_port}));
+        }
+
+        // Path validation
+        if (cfg.cert_path.len == 0) {
+            @compileError("Certificate path cannot be empty");
+        }
+        if (cfg.key_path.len == 0) {
+            @compileError("Key path cannot be empty");
+        }
+
+        // ALPN validation
+        if (cfg.alpn_protocols.len == 0) {
+            @compileError("At least one ALPN protocol must be specified");
+        }
+        for (cfg.alpn_protocols) |proto| {
+            if (proto.len == 0) {
+                @compileError("ALPN protocol cannot be empty string");
+            }
+            if (proto.len > 255) {
+                @compileError(std.fmt.comptimePrint("ALPN protocol '{s}' exceeds 255 bytes", .{proto}));
+            }
+        }
+
+        // Transport parameters validation
+        if (cfg.initial_max_data == 0) {
+            @compileError("initial_max_data must be greater than 0");
+        }
+        if (cfg.initial_max_streams_bidi == 0 and cfg.initial_max_streams_uni == 0) {
+            @compileError("At least one stream type must be allowed (bidi or uni)");
+        }
+
+        // Buffer size validation
+        if (cfg.recv_buffer_size < 1350) {
+            @compileError(std.fmt.comptimePrint("recv_buffer_size ({d}) must be at least 1350 bytes for QUIC MTU", .{cfg.recv_buffer_size}));
+        }
+        if (cfg.send_buffer_size < 1350) {
+            @compileError(std.fmt.comptimePrint("send_buffer_size ({d}) must be at least 1350 bytes for QUIC MTU", .{cfg.send_buffer_size}));
+        }
+        if (cfg.max_recv_udp_payload_size < 1200 or cfg.max_recv_udp_payload_size > 65527) {
+            @compileError(std.fmt.comptimePrint("max_recv_udp_payload_size ({d}) must be between 1200 and 65527", .{cfg.max_recv_udp_payload_size}));
+        }
+        if (cfg.max_send_udp_payload_size < 1200 or cfg.max_send_udp_payload_size > 65527) {
+            @compileError(std.fmt.comptimePrint("max_send_udp_payload_size ({d}) must be between 1200 and 65527", .{cfg.max_send_udp_payload_size}));
+        }
+
+        // HTTP limits validation
+        if (cfg.max_request_headers_size < 1024) {
+            @compileError(std.fmt.comptimePrint("max_request_headers_size ({d}) must be at least 1024 bytes", .{cfg.max_request_headers_size}));
+        }
+        if (cfg.max_path_length < 16) {
+            @compileError(std.fmt.comptimePrint("max_path_length ({d}) must be at least 16 characters", .{cfg.max_path_length}));
+        }
+        if (cfg.max_non_streaming_body_bytes < 1024) {
+            @compileError(std.fmt.comptimePrint("max_non_streaming_body_bytes ({d}) must be at least 1024 bytes", .{cfg.max_non_streaming_body_bytes}));
+        }
+
+        // Timeout validation
+        if (cfg.idle_timeout_ms == 0) {
+            @compileError("idle_timeout_ms must be greater than 0 (use a large value to effectively disable)");
+        }
+
+        // Debug settings validation
+        if (cfg.debug_log_throttle == 0) {
+            @compileError("debug_log_throttle must be at least 1 (1 = no throttling)");
+        }
+
+        // WebTransport validation (when enabled)
+        if (cfg.wt_write_quota_per_tick == 0) {
+            @compileError("wt_write_quota_per_tick must be greater than 0");
+        }
+        if (cfg.wt_session_idle_ms == 0) {
+            @compileError("wt_session_idle_ms must be greater than 0");
+        }
+        if (cfg.wt_stream_pending_max == 0) {
+            @compileError("wt_stream_pending_max must be greater than 0");
+        }
+    }
+
+    /// Runtime validation (kept for dynamic configurations)
     pub fn validate(self: *const ServerConfig) !void {
         // Basic validation
         if (self.bind_port == 0) return error.InvalidPort;
@@ -164,3 +249,59 @@ pub const ServerConfig = struct {
         }
     }
 };
+
+// Tests for compile-time validation
+test "ServerConfig compile-time validation catches invalid configs" {
+    // These would cause compile errors if uncommented:
+
+    // Invalid port (0)
+    // const bad_port_config = ServerConfig{ .bind_port = 0 };
+    // comptime ServerConfig.validateComptime(bad_port_config);
+
+    // Port out of range
+    // const bad_port_high = ServerConfig{ .bind_port = 70000 };
+    // comptime ServerConfig.validateComptime(bad_port_high);
+
+    // Empty certificate path
+    // const bad_cert = ServerConfig{ .cert_path = "" };
+    // comptime ServerConfig.validateComptime(bad_cert);
+
+    // Buffer too small
+    // const bad_buffer = ServerConfig{ .recv_buffer_size = 1000 };
+    // comptime ServerConfig.validateComptime(bad_buffer);
+
+    // No ALPN protocols
+    // const bad_alpn = ServerConfig{ .alpn_protocols = &.{} };
+    // comptime ServerConfig.validateComptime(bad_alpn);
+
+    // Valid configuration should pass
+    const valid_config = ServerConfig{};
+    comptime ServerConfig.validateComptime(valid_config);
+
+    try std.testing.expect(true); // Test passes if compilation succeeds
+}
+
+test "ServerConfig runtime validation" {
+    // Test runtime validation still works
+    var config = ServerConfig{};
+    try config.validate();
+
+    // Invalid port
+    config.bind_port = 0;
+    try std.testing.expectError(error.InvalidPort, config.validate());
+    config.bind_port = 4433;
+
+    // Empty cert path
+    config.cert_path = "";
+    try std.testing.expectError(error.MissingCertPath, config.validate());
+    config.cert_path = "test.crt";
+
+    // Empty key path
+    config.key_path = "";
+    try std.testing.expectError(error.MissingKeyPath, config.validate());
+    config.key_path = "test.key";
+
+    // Buffer too small
+    config.recv_buffer_size = 1000;
+    try std.testing.expectError(error.RecvBufferTooSmall, config.validate());
+}

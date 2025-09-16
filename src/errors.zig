@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_messages = @import("utils").error_messages;
 
 /// Centralized, typed error unions for the public API.
 /// These replace anyerror to improve API clarity and compile-time safety.
@@ -90,4 +91,14 @@ pub fn errorToStatus(err: HttpAnyError) u16 {
         error.TooManyRequests => 429,
         else => 500,
     };
+}
+
+/// Get human-readable error message for diagnostics
+pub fn getErrorMessage(err: HttpAnyError) []const u8 {
+    return error_messages.ErrorMessages.get(err);
+}
+
+/// Get error message with context
+pub fn formatError(allocator: std.mem.Allocator, err: HttpAnyError, context: []const u8) ![]const u8 {
+    return error_messages.ErrorMessages.format(allocator, err, context);
 }

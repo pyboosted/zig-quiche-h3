@@ -108,6 +108,25 @@ pub const QuicServer = struct {
     pub const SessionKey = struct { conn: *connection.Connection, session_id: u64 };
     const SessionKeyContext = utils.AutoContext(SessionKey);
 
+    // Compile-time struct size and alignment assertions
+    comptime {
+        // Ensure our key structs are optimally packed (pointer + u64 = 16 bytes on 64-bit)
+        const ptr_size = @sizeOf(*connection.Connection);
+        const u64_size = @sizeOf(u64);
+        const expected_key_size = ptr_size + u64_size;
+
+        // StreamKey assertions
+        std.debug.assert(@sizeOf(StreamKey) == expected_key_size);
+        std.debug.assert(@alignOf(StreamKey) == @max(@alignOf(*connection.Connection), @alignOf(u64)));
+
+        // SessionKey assertions
+        std.debug.assert(@sizeOf(SessionKey) == expected_key_size);
+        std.debug.assert(@alignOf(SessionKey) == @max(@alignOf(*connection.Connection), @alignOf(u64)));
+
+        // FlowKey assertions (defined later but check here for consistency)
+        // Will be validated after FlowKey is defined
+    }
+
     // Embedded state structs
     const DatagramStats = struct {
         received: usize = 0,
@@ -140,6 +159,29 @@ pub const QuicServer = struct {
     // Type definitions for H3 DATAGRAM flow_id tracking
     pub const FlowKey = struct { conn: *connection.Connection, flow_id: u64 };
     const FlowKeyContext = utils.AutoContext(FlowKey);
+
+    // Additional compile-time assertions for FlowKey
+    comptime {
+        const ptr_size = @sizeOf(*connection.Connection);
+        const u64_size = @sizeOf(u64);
+        const expected_key_size = ptr_size + u64_size;
+
+        // FlowKey assertions
+        std.debug.assert(@sizeOf(FlowKey) == expected_key_size);
+        std.debug.assert(@alignOf(FlowKey) == @max(@alignOf(*connection.Connection), @alignOf(u64)));
+
+        // RequestState size documentation
+        // Note: RequestState is larger due to arena allocator and embedded Request/Response
+        // We don't assert exact size as it may vary with std lib changes, but document expectations
+        const req_state_size = @sizeOf(RequestState);
+        if (req_state_size > 4096) {
+            @compileError(std.fmt.comptimePrint("RequestState size ({d} bytes) exceeds expected maximum. Consider optimizing.", .{req_state_size}));
+        }
+
+        // DatagramStats assertions - should be 3 * usize
+        std.debug.assert(@sizeOf(DatagramStats) == 3 * @sizeOf(usize));
+        std.debug.assert(@alignOf(DatagramStats) == @alignOf(usize));
+    }
 
     pub fn init(allocator: std.mem.Allocator, cfg: config_mod.ServerConfig, matcher: routing.Matcher) !*QuicServer {
         // Validate config
