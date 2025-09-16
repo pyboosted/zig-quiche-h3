@@ -380,7 +380,7 @@ pub fn Impl(comptime S: type) type {
         pub fn sendErrorResponse(self: *Self, h3_conn: *h3.H3Connection, quic_conn: *quiche.Connection, stream_id: u64, status_code: u16) !void {
             _ = self;
             var status_buf: [4]u8 = undefined;
-            const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{status_code});
+            const status_str = try http.StatusStrings.getWithFallback(status_code, &status_buf);
             const headers = [_]quiche.h3.Header{
                 .{ .name = ":status", .name_len = 7, .value = status_str.ptr, .value_len = status_str.len },
                 .{ .name = "content-length", .name_len = 14, .value = "0", .value_len = 1 },
@@ -391,7 +391,7 @@ pub fn Impl(comptime S: type) type {
         pub fn sendErrorResponseWithAllow(self: *Self, h3_conn: *h3.H3Connection, quic_conn: *quiche.Connection, stream_id: u64, status_code: u16, allow: []const u8) !void {
             _ = self;
             var status_buf: [4]u8 = undefined;
-            const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{status_code});
+            const status_str = try http.StatusStrings.getWithFallback(status_code, &status_buf);
             const headers = [_]quiche.h3.Header{
                 .{ .name = ":status", .name_len = 7, .value = status_str.ptr, .value_len = status_str.len },
                 .{ .name = "allow", .name_len = 5, .value = allow.ptr, .value_len = allow.len },

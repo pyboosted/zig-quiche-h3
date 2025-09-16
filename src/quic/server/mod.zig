@@ -10,6 +10,7 @@ const http = @import("http");
 const routing = @import("routing");
 const errors = @import("errors");
 const server_logging = @import("logging.zig");
+const utils = @import("utils");
 
 const c = quiche.c;
 const posix = std.posix;
@@ -101,31 +102,11 @@ pub const QuicServer = struct {
 
     // Type definitions for stream state tracking
     pub const StreamKey = struct { conn: *connection.Connection, stream_id: u64 };
-    const StreamKeyContext = struct {
-        pub fn hash(_: StreamKeyContext, key: StreamKey) u64 {
-            var h = std.hash.Wyhash.init(0);
-            h.update(std.mem.asBytes(&key.conn));
-            h.update(std.mem.asBytes(&key.stream_id));
-            return h.final();
-        }
-        pub fn eql(_: StreamKeyContext, a: StreamKey, b: StreamKey) bool {
-            return a.conn == b.conn and a.stream_id == b.stream_id;
-        }
-    };
+    const StreamKeyContext = utils.AutoContext(StreamKey);
 
     // Type definitions for WebTransport session tracking
     pub const SessionKey = struct { conn: *connection.Connection, session_id: u64 };
-    const SessionKeyContext = struct {
-        pub fn hash(_: SessionKeyContext, key: SessionKey) u64 {
-            var h = std.hash.Wyhash.init(0);
-            h.update(std.mem.asBytes(&key.conn));
-            h.update(std.mem.asBytes(&key.session_id));
-            return h.final();
-        }
-        pub fn eql(_: SessionKeyContext, a: SessionKey, b: SessionKey) bool {
-            return a.conn == b.conn and a.session_id == b.session_id;
-        }
-    };
+    const SessionKeyContext = utils.AutoContext(SessionKey);
 
     // Embedded state structs
     const DatagramStats = struct {
@@ -158,17 +139,7 @@ pub const QuicServer = struct {
 
     // Type definitions for H3 DATAGRAM flow_id tracking
     pub const FlowKey = struct { conn: *connection.Connection, flow_id: u64 };
-    const FlowKeyContext = struct {
-        pub fn hash(_: FlowKeyContext, key: FlowKey) u64 {
-            var h = std.hash.Wyhash.init(0);
-            h.update(std.mem.asBytes(&key.conn));
-            h.update(std.mem.asBytes(&key.flow_id));
-            return h.final();
-        }
-        pub fn eql(_: FlowKeyContext, a: FlowKey, b: FlowKey) bool {
-            return a.conn == b.conn and a.flow_id == b.flow_id;
-        }
-    };
+    const FlowKeyContext = utils.AutoContext(FlowKey);
 
     pub fn init(allocator: std.mem.Allocator, cfg: config_mod.ServerConfig, matcher: routing.Matcher) !*QuicServer {
         // Validate config

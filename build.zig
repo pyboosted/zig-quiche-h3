@@ -144,12 +144,20 @@ pub fn build(b: *std.Build) void {
     });
     quiche_ffi_mod.addIncludePath(b.path(quiche_include_dir));
 
+    // Utility module needs to be created before modules that use it
+    const utils_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const connection_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/connection.zig"),
         .target = target,
         .optimize = optimize,
     });
     connection_mod.addImport("quiche", quiche_ffi_mod);
+    connection_mod.addImport("utils", utils_mod);
 
     const config_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/config.zig"),
@@ -227,6 +235,7 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("http", http_mod);
     server_mod.addImport("errors", errors_mod);
     server_mod.addImport("routing", routing_mod);
+    server_mod.addImport("utils", utils_mod);
     server_mod.addOptions("build_options", build_opts);
 
     // Consolidated hybrid router
@@ -263,6 +272,7 @@ pub fn build(b: *std.Build) void {
     server_mod_app.addImport("h3", h3_mod);
     server_mod_app.addImport("http", http_mod_app);
     server_mod_app.addImport("errors", errors_mod);
+    server_mod_app.addImport("utils", utils_mod);
     const routing_mod_app = b.createModule(.{
         .root_source_file = b.path("src/routing/api.zig"),
         .target = target,

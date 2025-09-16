@@ -511,12 +511,56 @@ pub fn version() []const u8 {
     return std.mem.span(ver);
 }
 
-// ALPN encoder helper - critical for proper wire format!
+// Compile-time ALPN encoder for common protocol combinations
+pub const AlpnWireFormat = struct {
+    // Pre-encode common ALPN combinations at compile-time
+    pub const h3 = encodeAlpnComptime(&.{"h3"});
+    pub const h3_hq = encodeAlpnComptime(&.{ "h3", "hq-interop" });
+    pub const hq = encodeAlpnComptime(&.{"hq-interop"});
+
+    fn encodeAlpnComptime(comptime protocols: []const []const u8) []const u8 {
+        comptime {
+            var total_len: usize = 0;
+            for (protocols) |proto| {
+                if (proto.len > 255) @compileError("Protocol name too long");
+                total_len += 1 + proto.len;
+            }
+
+            var buf: [total_len]u8 = undefined;
+            var offset: usize = 0;
+
+            for (protocols) |proto| {
+                buf[offset] = @intCast(proto.len);
+                offset += 1;
+                @memcpy(buf[offset..][0..proto.len], proto);
+                offset += proto.len;
+            }
+
+            const result = buf;
+            return &result;
+        }
+    }
+};
+
+// Runtime ALPN encoder - still needed for dynamic protocols
 pub fn encodeAlpn(allocator: std.mem.Allocator, protocols: []const []const u8) ![]u8 {
+    // Check if we can use pre-encoded version
+    if (protocols.len == 1 and std.mem.eql(u8, protocols[0], "h3")) {
+        const encoded = try allocator.alloc(u8, AlpnWireFormat.h3.len);
+        @memcpy(encoded, AlpnWireFormat.h3);
+        return encoded;
+    }
+    if (protocols.len == 2 and std.mem.eql(u8, protocols[0], "h3") and std.mem.eql(u8, protocols[1], "hq-interop")) {
+        const encoded = try allocator.alloc(u8, AlpnWireFormat.h3_hq.len);
+        @memcpy(encoded, AlpnWireFormat.h3_hq);
+        return encoded;
+    }
+
+    // Fallback to runtime encoding for other combinations
     var total_len: usize = 0;
     for (protocols) |proto| {
         if (proto.len > 255) return error.ProtocolNameTooLong;
-        total_len += 1 + proto.len; // 1 byte length prefix + protocol string
+        total_len += 1 + proto.len;
     }
 
     var buf = try allocator.alloc(u8, total_len);
