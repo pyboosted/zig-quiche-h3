@@ -23,6 +23,17 @@ pub const HandlerError = error{
     InternalServerError,
     RequestHeaderFieldsTooLarge,
 
+    // Range-specific errors
+    RangeNotSatisfiable,
+    InvalidRange,
+    Unsatisfiable,
+    Malformed,
+    MultiRange,
+    NonBytesUnit,
+
+    // Redirect errors
+    InvalidRedirectStatus,
+
     // Resource errors
     OutOfMemory,
 };
@@ -79,16 +90,28 @@ pub const HttpAnyError = HandlerError || StreamingError || DatagramError || WebT
 /// Unknown errors map to 500 Internal Server Error.
 pub fn errorToStatus(err: HttpAnyError) u16 {
     return switch (err) {
+        // Service availability
         error.StreamBlocked, error.WouldBlock, error.Done => 503,
-        error.NotFound => 404,
-        error.MethodNotAllowed => 405,
-        error.BadRequest => 400,
-        error.PayloadTooLarge => 413,
-        error.RequestHeaderFieldsTooLarge => 431,
+
+        // Client errors (4xx)
+        error.BadRequest, error.Malformed => 400,
         error.Unauthorized => 401,
         error.Forbidden => 403,
+        error.NotFound => 404,
+        error.MethodNotAllowed => 405,
         error.RequestTimeout => 408,
+        error.PayloadTooLarge => 413,
+        error.RangeNotSatisfiable, error.InvalidRange, error.Unsatisfiable => 416,
         error.TooManyRequests => 429,
+        error.RequestHeaderFieldsTooLarge => 431,
+
+        // Range errors that should be 400 (bad request)
+        error.MultiRange, error.NonBytesUnit => 400,
+
+        // Redirect errors
+        error.InvalidRedirectStatus => 500,
+
+        // Server errors (5xx) - everything else
         else => 500,
     };
 }

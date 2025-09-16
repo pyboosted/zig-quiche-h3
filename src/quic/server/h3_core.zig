@@ -305,7 +305,7 @@ pub fn Impl(comptime S: type) type {
                         }
                     } else {
                         state.request.appendBody(buf[0..bytes_read], self.config.max_non_streaming_body_bytes) catch |err| {
-                            const status: u16 = if (err == error.PayloadTooLarge) 413 else 500;
+                            const status = http.errorToStatus(@errorCast(err));
                             sendErrorResponse(self, h3_conn, &conn.conn, stream_id, status) catch {};
                         };
                     }

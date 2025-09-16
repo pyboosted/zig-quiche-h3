@@ -4,6 +4,7 @@ const _server_tests = @import("quic/server.zig");
 const _routing_api_tests = @import("routing");
 const _routing_gen_tests = @import("routing_gen");
 const http = @import("http");
+const _errors_tests = @import("errors_test.zig");
 
 extern fn quiche_version() [*:0]const u8;
 
