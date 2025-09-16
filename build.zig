@@ -415,6 +415,26 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    // Benchmark for compile-time optimizations
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/benchmarks/comptime_bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("http", http_mod);
+    const bench = b.addExecutable(.{
+        .name = "comptime-bench",
+        .root_module = bench_mod,
+    });
+    bench.root_module.addIncludePath(b.path(quiche_include_dir));
+    addQuicheLink(b, bench, use_system_quiche, quiche_lib_path, cargo_step);
+    linkCommon(target, bench, link_ssl, with_libev, libev_lib_dir, false);
+
+    b.installArtifact(bench);
+    const run_bench = b.addRunArtifact(bench);
+    const bench_step = b.step("bench", "Run compile-time optimization benchmarks");
+    bench_step.dependOn(&run_bench.step);
+
     // Shared library for Bun FFI smoke tests: exports zig_h3_version()
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/ffi.zig"),

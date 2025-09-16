@@ -112,18 +112,32 @@ pub const ServerConfig = struct {
         }
     }
 
+    // Compile-time hex lookup table for fast conversion
+    const HexTable = struct {
+        const table = blk: {
+            var t: [256][2]u8 = undefined;
+            const hex_chars = "0123456789abcdef";
+            for (0..256) |i| {
+                t[i][0] = hex_chars[i >> 4];
+                t[i][1] = hex_chars[i & 0x0f];
+            }
+            break :blk t;
+        };
+    };
+
     pub fn createQlogPath(self: *const ServerConfig, allocator: std.mem.Allocator, conn_id: []const u8) ![:0]u8 {
         if (self.qlog_dir) |dir| {
-            // Format connection ID as hex
+            // Format connection ID as hex using compile-time lookup table
             var hex_buf: [40]u8 = undefined; // Max 20 bytes * 2
-            const hex_chars = "0123456789abcdef";
 
             var hex_len: usize = 0;
             for (conn_id) |byte| {
                 if (hex_len >= hex_buf.len - 1) break;
-                hex_buf[hex_len] = hex_chars[byte >> 4];
+                // Direct lookup - no computation needed
+                const hex_pair = HexTable.table[byte];
+                hex_buf[hex_len] = hex_pair[0];
                 hex_len += 1;
-                hex_buf[hex_len] = hex_chars[byte & 0x0f];
+                hex_buf[hex_len] = hex_pair[1];
                 hex_len += 1;
             }
 

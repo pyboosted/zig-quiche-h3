@@ -45,18 +45,62 @@ pub const Method = enum {
     CONNECT_UDP,
     TRACE,
 
+    const MethodLookup = struct {
+        const Entry = struct { str: []const u8, method: Method };
+
+        // Build compile-time lookup table sorted by string length then alphabetically
+        // This enables fast rejection and efficient lookup
+        const methods = blk: {
+            const entries = [_]Entry{
+                .{ .str = "GET", .method = .GET },
+                .{ .str = "PUT", .method = .PUT },
+                .{ .str = "HEAD", .method = .HEAD },
+                .{ .str = "POST", .method = .POST },
+                .{ .str = "PATCH", .method = .PATCH },
+                .{ .str = "TRACE", .method = .TRACE },
+                .{ .str = "DELETE", .method = .DELETE },
+                .{ .str = "OPTIONS", .method = .OPTIONS },
+                .{ .str = "CONNECT", .method = .CONNECT },
+                .{ .str = "CONNECT-UDP", .method = .CONNECT_UDP },
+            };
+            break :blk entries;
+        };
+
+        // Use a simple perfect hash based on string length and first char
+        // This gives us O(1) lookup for all standard HTTP methods
+        pub fn lookup(s: []const u8) ?Method {
+            // Fast path: check common methods by length and first char
+            switch (s.len) {
+                3 => {
+                    if (s[0] == 'G' and std.mem.eql(u8, s, "GET")) return .GET;
+                    if (s[0] == 'P' and std.mem.eql(u8, s, "PUT")) return .PUT;
+                },
+                4 => {
+                    if (s[0] == 'H' and std.mem.eql(u8, s, "HEAD")) return .HEAD;
+                    if (s[0] == 'P' and std.mem.eql(u8, s, "POST")) return .POST;
+                },
+                5 => {
+                    if (s[0] == 'P' and std.mem.eql(u8, s, "PATCH")) return .PATCH;
+                    if (s[0] == 'T' and std.mem.eql(u8, s, "TRACE")) return .TRACE;
+                },
+                6 => {
+                    if (s[0] == 'D' and std.mem.eql(u8, s, "DELETE")) return .DELETE;
+                },
+                7 => {
+                    if (s[0] == 'O' and std.mem.eql(u8, s, "OPTIONS")) return .OPTIONS;
+                    if (s[0] == 'C' and std.mem.eql(u8, s, "CONNECT")) return .CONNECT;
+                },
+                11 => {
+                    if (s[0] == 'C' and std.mem.eql(u8, s, "CONNECT-UDP")) return .CONNECT_UDP;
+                },
+                else => {},
+            }
+            return null;
+        }
+    };
+
     pub fn fromString(s: []const u8) ?Method {
-        if (std.mem.eql(u8, s, "GET")) return .GET;
-        if (std.mem.eql(u8, s, "POST")) return .POST;
-        if (std.mem.eql(u8, s, "PUT")) return .PUT;
-        if (std.mem.eql(u8, s, "DELETE")) return .DELETE;
-        if (std.mem.eql(u8, s, "HEAD")) return .HEAD;
-        if (std.mem.eql(u8, s, "OPTIONS")) return .OPTIONS;
-        if (std.mem.eql(u8, s, "PATCH")) return .PATCH;
-        if (std.mem.eql(u8, s, "CONNECT")) return .CONNECT;
-        if (std.mem.eql(u8, s, "CONNECT-UDP")) return .CONNECT_UDP;
-        if (std.mem.eql(u8, s, "TRACE")) return .TRACE;
-        return null;
+        return MethodLookup.lookup(s);
     }
 
     pub fn toString(self: Method) []const u8 {
