@@ -25,6 +25,8 @@ pub const RequestState = struct {
     body_complete: bool = false,
     handler_invoked: bool = false, // Track if handler was already called
     is_streaming: bool = false,
+    // Phase 2: mark if this request is a download (file or generator streaming)
+    is_download: bool = false,
 
     // User data for streaming handlers to store context
     user_data: ?*anyopaque = null,
@@ -234,12 +236,74 @@ pub const QuicServer = struct {
         var conn_id_seed: [32]u8 = undefined;
         std.crypto.random.bytes(&conn_id_seed);
 
-        // Honor H3_DEBUG=1 to enable app-level debug traces without changing caller config
+        // 1) Apply build default log level
         var cfg_eff = cfg;
+        const bo = @import("build_options");
+        if (server_logging.parseLevel(bo.log_level)) |lvl| cfg_eff.log_level = lvl;
+
+        // 2) H3_LOG_LEVEL runtime override (takes precedence)
+        if (std.process.getEnvVarOwned(allocator, "H3_LOG_LEVEL")) |lvl_s| {
+            defer allocator.free(lvl_s);
+            if (server_logging.parseLevel(lvl_s)) |lvl| cfg_eff.log_level = lvl;
+        } else |_| {}
+
+        // 3) Honor H3_DEBUG=1 to force debug level and enable app-level debug traces
         if (std.process.getEnvVarOwned(allocator, "H3_DEBUG")) |dbg| {
             defer allocator.free(dbg);
             if (dbg.len > 0 and (std.mem.eql(u8, dbg, "1") or std.mem.eql(u8, dbg, "true") or std.mem.eql(u8, dbg, "on"))) {
                 cfg_eff.enable_debug_logging = true;
+                if (@intFromEnum(cfg_eff.log_level) < @intFromEnum(config_mod.ServerConfig.LogLevel.debug)) {
+                    cfg_eff.log_level = .debug;
+                }
+            }
+        } else |_| {}
+
+        // Optional override: H3_MAX_BODY_MB sets the non-streaming body cap (in MiB)
+        if (std.process.getEnvVarOwned(allocator, "H3_MAX_BODY_MB")) |mb| {
+            defer allocator.free(mb);
+            const val = std.fmt.parseUnsigned(usize, mb, 10) catch 0;
+            if (val > 0) {
+                const bytes = val * 1024 * 1024;
+                cfg_eff.max_non_streaming_body_bytes = bytes;
+                if (cfg_eff.enable_debug_logging) {
+                    std.debug.print("H3: max_non_streaming_body_bytes set to {} bytes via H3_MAX_BODY_MB\n", .{bytes});
+                }
+            }
+        } else |_| {}
+
+        // Optional override: H3_CHUNK_SIZE sets default streaming chunk size (bytes)
+        if (std.process.getEnvVarOwned(allocator, "H3_CHUNK_SIZE")) |cs| {
+            defer allocator.free(cs);
+            const val = std.fmt.parseUnsigned(usize, cs, 10) catch 0;
+            if (val > 0) {
+                @import("http").streaming.setDefaultChunkSize(val);
+                if (cfg_eff.enable_debug_logging) {
+                    std.debug.print("H3: streaming chunk size set to {} via H3_CHUNK_SIZE\n", .{val});
+                }
+            }
+        } else |_| {}
+
+        // Optional override: H3_MAX_REQS_PER_CONN caps concurrent requests per connection
+        if (std.process.getEnvVarOwned(allocator, "H3_MAX_REQS_PER_CONN")) |rq| {
+            defer allocator.free(rq);
+            const val = std.fmt.parseUnsigned(usize, rq, 10) catch 0;
+            if (val > 0) {
+                cfg_eff.max_active_requests_per_conn = val;
+                if (cfg_eff.enable_debug_logging) {
+                    std.debug.print("H3: max_active_requests_per_conn set to {} via H3_MAX_REQS_PER_CONN\n", .{val});
+                }
+            }
+        } else |_| {}
+
+        // Optional override: H3_MAX_DOWNLOADS_PER_CONN caps concurrent downloads per connection
+        if (std.process.getEnvVarOwned(allocator, "H3_MAX_DOWNLOADS_PER_CONN")) |dq| {
+            defer allocator.free(dq);
+            const val = std.fmt.parseUnsigned(usize, dq, 10) catch 0;
+            if (val > 0) {
+                cfg_eff.max_active_downloads_per_conn = val;
+                if (cfg_eff.enable_debug_logging) {
+                    std.debug.print("H3: max_active_downloads_per_conn set to {} via H3_MAX_DOWNLOADS_PER_CONN\n", .{val});
+                }
             }
         } else |_| {}
 

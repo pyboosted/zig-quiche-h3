@@ -64,10 +64,12 @@ pub fn build(b: *std.Build) void {
     const libev_lib_dir = b.option([]const u8, "libev-lib", "Path to libev library directory (contains libev.dylib/.so)");
     const quiche_include_dir = b.option([]const u8, "quiche-include", "Path to quiche headers (quiche/include)") orelse "third_party/quiche/quiche/include";
     const with_webtransport = b.option(bool, "with-webtransport", "Enable WebTransport (experimental)") orelse true;
+    const log_level_opt = b.option([]const u8, "log-level", "Default app log level: error|warn|info|debug|trace") orelse "warn";
 
     // Build options accessible to modules via @import("build_options")
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "with_webtransport", with_webtransport);
+    build_opts.addOption([]const u8, "log_level", log_level_opt);
     // no router-related build options
 
     // Paths

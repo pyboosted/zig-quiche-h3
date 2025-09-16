@@ -22,6 +22,11 @@ pub const Response = struct {
     is_head_request: bool, // Track if this is a HEAD request
     partial_response: ?*streaming.PartialResponse, // Track partial sends
 
+    // Optional limiter callback invoked before starting a streaming response
+    limiter_ctx: ?*anyopaque = null,
+    on_start_streaming: ?*const fn (ctx: *anyopaque, quic_conn: *quiche.Connection, stream_id: u64, source_kind: u8) bool = null,
+    limiter_checked: bool = false,
+
     /// Initialize a new response writer
     pub fn init(
         allocator: std.mem.Allocator,
@@ -42,6 +47,9 @@ pub const Response = struct {
             .allocator = allocator,
             .is_head_request = is_head_request,
             .partial_response = null,
+            .limiter_ctx = null,
+            .on_start_streaming = null,
+            .limiter_checked = false,
         };
     }
 
@@ -261,6 +269,17 @@ pub const Response = struct {
         try self.jsonValue(error_obj);
     }
 
+    /// Install a callback to gate the start of streaming (file/generator sources).
+    /// The callback should return true to allow streaming or false to reject.
+    pub fn setStreamingLimiter(
+        self: *Response,
+        ctx: *anyopaque,
+        cb: *const fn (ctx: *anyopaque, quic_conn: *quiche.Connection, stream_id: u64, source_kind: u8) bool,
+    ) void {
+        self.limiter_ctx = ctx;
+        self.on_start_streaming = cb;
+    }
+
     /// Type for trailer headers
     pub const Trailer = struct { name: []const u8, value: []const u8 };
 
@@ -477,6 +496,41 @@ pub const Response = struct {
     /// Process a partial response (resume sending)
     pub fn processPartialResponse(self: *Response) !void {
         const partial = self.partial_response orelse return;
+
+        // Gate the start of streaming for file/generator sources if a limiter is installed.
+        if (!self.limiter_checked and self.on_start_streaming != null) {
+            var source_kind: u8 = 0; // 0=memory, 1=file, 2=generator
+            switch (partial.body_source) {
+                .memory => source_kind = 0,
+                .file => source_kind = 1,
+                .generator => source_kind = 2,
+            }
+
+            // Only gate for file/generator downloads
+            if (source_kind != 0) {
+                const ok = self.on_start_streaming.?(self.limiter_ctx.?, self.quic_conn, self.stream_id, source_kind);
+                self.limiter_checked = true;
+                if (!ok) {
+                    // Reject: immediately send 503 with empty body, bypassing buffered headers.
+                    var status_buf: [4]u8 = undefined;
+                    const code: u16 = @intFromEnum(Status.ServiceUnavailable);
+                    const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{code});
+                    const headers = [_]quiche.h3.Header{
+                        .{ .name = ":status", .name_len = 7, .value = status_str.ptr, .value_len = status_str.len },
+                        .{ .name = Headers.ContentLength, .name_len = Headers.ContentLength.len, .value = "0", .value_len = 1 },
+                    };
+                    // Best-effort: ignore errors here; caller can't recover.
+                    self.h3_conn.sendResponse(self.quic_conn, self.stream_id, headers[0..], true) catch {};
+                    // Clean up the partial and mark response ended
+                    partial.deinit();
+                    self.partial_response = null;
+                    self.ended = true;
+                    return;
+                }
+            } else {
+                self.limiter_checked = true;
+            }
+        }
 
         // HEAD requests should not have body
         if (self.is_head_request) {

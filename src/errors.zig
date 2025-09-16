@@ -78,6 +78,7 @@ pub const HttpAnyError = HandlerError || StreamingError || DatagramError || WebT
 /// Unknown errors map to 500 Internal Server Error.
 pub fn errorToStatus(err: HttpAnyError) u16 {
     return switch (err) {
+        error.StreamBlocked, error.WouldBlock, error.Done => 503,
         error.NotFound => 404,
         error.MethodNotAllowed => 405,
         error.BadRequest => 400,

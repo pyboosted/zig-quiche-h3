@@ -57,6 +57,7 @@ pub fn main() !void {
         routing_gen.POST("/api/echo", handlers.echoHandler),
         routing_gen.GET("/files/*", handlers.filesHandler),
         routing_gen.GET("/download/*", handlers.downloadHandler),
+        routing_gen.GET("/slow", handlers.slowHandler),
         routing_gen.GET("/stream/1gb", handlers.stream1GBHandler),
         routing_gen.GET("/stream/test", handlers.streamTestHandler),
         routing_gen.GET("/trailers/demo", handlers.trailersDemoHandler),

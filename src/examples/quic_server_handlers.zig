@@ -13,6 +13,8 @@ pub fn indexHandler(_: *http.Request, res: *http.Response) http.HandlerError!voi
         \\  <li><a href=\"/api/users\">/api/users</a> - List users</li>
         \\  <li><a href=\"/api/users/123\">/api/users/123</a> - Get user by ID</li>
         \\  <li><a href=\"/files/test.txt\">/files/test.txt</a> - Wildcard route</li>
+        \\  <li><a href=\"/slow\">/slow</a> - Slow response (default 1s delay)</li>
+        \\  <li><a href=\"/slow?delay=3000\">/slow?delay=3000</a> - Slow response (3s delay)</li>
         \\</ul>
         \\</body>
         \\</html>
@@ -146,6 +148,34 @@ pub fn h3dgramEchoHandler(_: *http.Request, res: *http.Response) http.HandlerErr
 pub fn h3dgramEchoCallback(_: *http.Request, res: *http.Response, payload: []const u8) http.DatagramError!void {
     res.sendH3Datagram(payload) catch {
         return;
+    };
+}
+
+// === Slow response handler (for testing concurrency) ===
+pub fn slowHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
+    // Extract delay from query param or use default
+    const delay_ms = if (req.query.get("delay")) |d|
+        std.fmt.parseUnsigned(u64, d, 10) catch 1000
+    else
+        1000;
+
+    // Send headers immediately
+    try res.status(200);
+    try res.header("content-type", "text/plain");
+
+    // Sleep for the specified duration (simulating slow processing)
+    std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+
+    // Then send body
+    _ = res.write("Slow response completed\n") catch |err| switch (err) {
+        error.StreamBlocked => return error.StreamBlocked,
+        error.ResponseEnded => return error.ResponseEnded,
+        else => return error.InternalServerError,
+    };
+    res.end(null) catch |err| switch (err) {
+        error.StreamBlocked => return error.StreamBlocked,
+        error.ResponseEnded => return error.ResponseEnded,
+        else => return error.InternalServerError,
     };
 }
 

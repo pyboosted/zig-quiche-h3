@@ -2,6 +2,7 @@ const std = @import("std");
 
 // QUIC server configuration with safe defaults for M3 (HTTP/3)
 pub const ServerConfig = struct {
+    pub const LogLevel = enum(u8) { err, warn, info, debug, trace };
     // Network
     bind_addr: []const u8 = "0.0.0.0",
     bind_port: u16 = 4433,
@@ -35,6 +36,7 @@ pub const ServerConfig = struct {
     qlog_dir: ?[]const u8 = "qlogs", // Enable qlog by default
     keylog_path: ?[]const u8 = null, // Optional SSLKEYLOGFILE
     enable_debug_logging: bool = true,
+    log_level: LogLevel = .warn,
     debug_log_throttle: u32 = 10, // Print every Nth line to avoid spam
 
     // ALPN protocols - support both HTTP/3 and HTTP/0.9 like quiche examples
@@ -51,6 +53,21 @@ pub const ServerConfig = struct {
     max_request_headers_size: usize = 16384, // 16KB
     max_request_body_size: usize = 104857600, // 100MB (increased for testing)
     max_path_length: usize = 2048,
+    /// Max bytes buffered in-memory for non-streaming request bodies.
+    /// Larger bodies should use streaming handlers; exceeding this cap returns 413.
+    max_non_streaming_body_bytes: usize = 1 * 1024 * 1024, // 1 MiB
+
+    /// Phase 2: concurrency caps (0 = unlimited)
+    /// Maximum number of simultaneously active HTTP requests per connection.
+    /// Requests are considered active from headers received until the response
+    /// is fully ended and stream state is cleaned up.
+    max_active_requests_per_conn: usize = 0,
+
+    /// Maximum number of simultaneously active download streams per connection.
+    /// A "download" is defined as a response that streams from a file or
+    /// generator source (PartialResponse.file/generator). Memory-backed partials
+    /// created for backpressure are not counted.
+    max_active_downloads_per_conn: usize = 0,
 
     // WebTransport server-side limits (experimental)
     wt_max_streams_uni: u32 = 32,

@@ -59,6 +59,7 @@ pub fn main() !void {
     bptr = try bptr.post("/api/users", handlers.createUserHandler);
     bptr = try bptr.get("/files/*", handlers.filesHandler);
     bptr = try bptr.get("/download/*", handlers.downloadHandler);
+    bptr = try bptr.get("/slow", handlers.slowHandler);
     bptr = try bptr.get("/stream/1gb", handlers.stream1GBHandler);
     bptr = try bptr.get("/stream/test", handlers.streamTestHandler);
     bptr = try bptr.get("/trailers/demo", handlers.trailersDemoHandler);

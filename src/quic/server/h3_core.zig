@@ -2,6 +2,7 @@ const std = @import("std");
 const quiche = @import("quiche");
 const h3 = @import("h3");
 const http = @import("http");
+const errors = @import("errors");
 const connection = @import("connection");
 const h3_datagram = @import("h3").datagram;
 const server_logging = @import("logging.zig");
@@ -28,6 +29,16 @@ pub fn Impl(comptime S: type) type {
 
                 switch (result.event_type) {
                     .Headers => {
+                        // Phase 2: enforce per-connection active request cap (if configured)
+                        if (self.config.max_active_requests_per_conn > 0) {
+                            const cur = countActiveRequests(self, conn);
+                            if (cur >= self.config.max_active_requests_per_conn) {
+                                server_logging.warnf(self, "503: per-conn request cap reached (cur={}, cap={})\n", .{ cur, self.config.max_active_requests_per_conn });
+                                // Respond 503 and do not create stream state
+                                try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 503);
+                                continue;
+                            }
+                        }
                         const state = try self.allocator.create(RequestState);
                         state.* = .{
                             .arena = std.heap.ArenaAllocator.init(self.allocator),
@@ -36,6 +47,8 @@ pub fn Impl(comptime S: type) type {
                             .handler = undefined,
                             .body_complete = false,
                             .handler_invoked = false,
+                            .is_streaming = false,
+                            .is_download = false,
                         };
                         errdefer {
                             state.arena.deinit();
@@ -56,9 +69,7 @@ pub fn Impl(comptime S: type) type {
 
                         const method_str = req_info.method.?;
                         const path_raw = req_info.path.?;
-                        if (server_logging.appDebug(self)) {
-                            std.debug.print("→ HTTP/3 request: {s} {s}\n", .{ method_str, path_raw });
-                        }
+                        server_logging.infof(self, "→ HTTP/3 request: {s} {s}\n", .{ method_str, path_raw });
 
                         const method = http.Method.fromString(method_str) orelse {
                             try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 405);
@@ -81,10 +92,8 @@ pub fn Impl(comptime S: type) type {
                             result.stream_id,
                         );
                         state.request.user_data = state.user_data;
-                        if (server_logging.appDebug(self)) {
-                            const clen = state.request.contentLength() orelse 0;
-                            std.debug.print("  headers parsed: content-length={}, path-decoded={s}\n", .{clen, state.request.path_decoded});
-                        }
+                        const clen = state.request.contentLength() orelse 0;
+                        server_logging.debugf(self, "  headers parsed: content-length={}, path-decoded={s}\n", .{clen, state.request.path_decoded});
 
                         // If a matcher is provided, try it first; otherwise, use dynamic router
                         {
@@ -93,9 +102,7 @@ pub fn Impl(comptime S: type) type {
                             _ = self.matcher.vtable.match_fn(self.matcher.ctx, method, state.request.path_decoded, &mr);
                             switch (mr) {
                                 .Found => |f| {
-                                    if (server_logging.appDebug(self)) {
-                                        std.debug.print("  route Found; params={d}, streaming? {}\n", .{ f.params.len, (f.route.on_headers != null or f.route.on_body_chunk != null or f.route.on_body_complete != null) });
-                                    }
+                                    server_logging.debugf(self, "  route Found; params={d}, streaming? {}\n", .{ f.params.len, (f.route.on_headers != null or f.route.on_body_chunk != null or f.route.on_body_complete != null) });
                                     // Build params into request map (copy strings to arena to ensure they persist)
                                     var params = std.StringHashMapUnmanaged([]const u8){};
                                     for (f.params) |p| {
@@ -133,9 +140,7 @@ pub fn Impl(comptime S: type) type {
                                 },
                                 .NotFound => {
                                     // fall through to dynamic router
-                                    if (server_logging.appDebug(self)) {
-                                        std.debug.print("  route NotFound\n", .{});
-                                    }
+                                    server_logging.debugf(self, "  route NotFound\n", .{});
                                 },
                             }
                             if (mr != .NotFound) {
@@ -147,6 +152,8 @@ pub fn Impl(comptime S: type) type {
                                     result.stream_id,
                                     method == .HEAD,
                                 );
+                                // Install streaming limiter callback to enforce download caps
+                                state.response.setStreamingLimiter(self, responseStreamingGate);
 
                                 try self.stream_states.put(.{ .conn = conn, .stream_id = result.stream_id }, state);
                                 if (state.on_h3_dgram != null) {
@@ -155,29 +162,20 @@ pub fn Impl(comptime S: type) type {
                                 }
 
                                 if (!state.is_streaming) {
-                                    const clen = state.request.contentLength() orelse 0;
-                                    const requires_body = (method == .POST or method == .PUT or method == .PATCH) or (clen > 0);
+                                    const clen2 = state.request.contentLength() orelse 0;
+                                    const requires_body = (method == .POST or method == .PUT or method == .PATCH) or (clen2 > 0);
                                     if (requires_body) {
-                                        if (server_logging.appDebug(self)) {
-                                            std.debug.print("  deferring non-streaming handler until body complete (clen={d})\n", .{clen});
-                                        }
+                                        server_logging.debugf(self, "  deferring non-streaming handler until body complete (clen={d})\n", .{clen2});
                                         // Handler will be invoked on .Finished after body is drained
                                     } else {
-                                        if (server_logging.appDebug(self)) {
-                                            std.debug.print("  invoking non-streaming handler for {s} {s} (no body)\n", .{ method_str, state.request.path_decoded });
-                                        }
+                                        server_logging.debugf(self, "  invoking non-streaming handler for {s} {s} (no body)\n", .{ method_str, state.request.path_decoded });
                                         invokeHandler(self, state) catch |err| {
-                                            const status = switch (err) {
-                                                error.StreamBlocked, error.Done => @as(u16, 503),
-                                                else => @as(u16, 500),
-                                            };
-                                            sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, status) catch {};
+                                            const mapped = http.errorToStatus(@errorCast(err));
+                                            sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, mapped) catch {};
                                         };
                                     }
                                 } else if (state.on_headers) |cb| {
-                                    if (server_logging.appDebug(self)) {
-                                        std.debug.print("  streaming on_headers for {s} {s}\n", .{ method_str, state.request.path_decoded });
-                                    }
+                                    server_logging.debugf(self, "  streaming on_headers for {s} {s}\n", .{ method_str, state.request.path_decoded });
                                     cb(&state.request, &state.response) catch |err| {
                                         sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, http.errorToStatus(err)) catch {};
                                     };
@@ -208,15 +206,16 @@ pub fn Impl(comptime S: type) type {
                             } else if (!state.handler_invoked) {
                                 // Ensure any remaining body bytes are drained for non-streaming handlers
                                 readAvailableBody(self, h3_conn, conn, result.stream_id, state);
-                                invokeHandler(self, state) catch {
-                                    sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 500) catch {};
+                                invokeHandler(self, state) catch |err| {
+                                    const status = http.errorToStatus(@errorCast(err));
+                                    sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, status) catch {};
                                 };
                             }
 
                             if (state.response.isEnded() and state.response.partial_response == null) {
                                 cleanupStreamState(self, conn, result.stream_id, state);
                             } else {
-                                std.debug.print("  Keeping stream {} alive for ongoing response\n", .{result.stream_id});
+                                server_logging.tracef(self, "  Keeping stream {} alive for ongoing response\n", .{result.stream_id});
                             }
                         }
                     },
@@ -231,15 +230,73 @@ pub fn Impl(comptime S: type) type {
             }
         }
 
+        // Count active request states for a given connection.
+        fn countActiveRequests(self: *Self, conn: *connection.Connection) usize {
+            var count: usize = 0;
+            var it = self.stream_states.iterator();
+            while (it.next()) |entry| {
+                if (entry.key_ptr.*.conn == conn) {
+                    count += 1;
+                }
+            }
+            return count;
+        }
+
+        // Count active downloads (file or generator partial responses) for a connection.
+        fn countActiveDownloads(self: *Self, conn: *connection.Connection) usize {
+            var count: usize = 0;
+            var it = self.stream_states.iterator();
+            while (it.next()) |entry| {
+                if (entry.key_ptr.*.conn != conn) continue;
+                const st = entry.value_ptr.*;
+                if (st.response.partial_response) |p| {
+                    switch (p.body_source) {
+                        .file, .generator => count += 1,
+                        else => {},
+                    }
+                }
+            }
+            return count;
+        }
+
+        // Locate the connection pointer from a quiche.Connection pointer by scanning the table.
+        fn findConnByQuichePtr(self: *Self, q: *quiche.Connection) ?*connection.Connection {
+            var it = self.connections.map.iterator();
+            while (it.next()) |e| {
+                if (&e.value_ptr.*.conn == q) return e.value_ptr.*;
+            }
+            return null;
+        }
+
+        // Streaming gate: invoked by Response before starting a file/generator partial.
+        fn responseStreamingGate(ctx: *anyopaque, q_conn: *quiche.Connection, stream_id: u64, source_kind: u8) bool {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            if (self.config.max_active_downloads_per_conn == 0) return true;
+
+            const conn = findConnByQuichePtr(self, q_conn) orelse return true; // If unknown, allow
+
+            const current = countActiveDownloads(self, conn);
+            if (current >= self.config.max_active_downloads_per_conn) {
+                server_logging.warnf(self, "503: per-conn download cap reached (cur={}, cap={})\n", .{ current, self.config.max_active_downloads_per_conn });
+                return false; // reject new download stream
+            }
+
+            // Mark the state as a download if we can find it
+            if (self.stream_states.get(.{ .conn = conn, .stream_id = stream_id })) |st| {
+                if (source_kind == 1 or source_kind == 2) {
+                    st.is_download = true;
+                }
+            }
+            return true;
+        }
+
         fn readAvailableBody(self: *Self, h3_conn: *h3.H3Connection, conn: *connection.Connection, stream_id: u64, state: *RequestState) void {
             var buf: [16384]u8 = undefined;
             while (true) {
                 const res = h3_conn.recvBody(&conn.conn, stream_id, &buf);
                 if (res) |bytes_read| {
                     if (bytes_read == 0) break;
-                    if (server_logging.appDebug(self)) {
-                        std.debug.print("  DATA recv: {} bytes (streaming={} totalBuffered={})\n", .{ bytes_read, state.is_streaming, state.request.getBodySize() });
-                    }
+                    server_logging.tracef(self, "  DATA recv: {} bytes (streaming={} totalBuffered={})\n", .{ bytes_read, state.is_streaming, state.request.getBodySize() });
                     if (state.is_streaming) {
                         if (state.on_body_chunk) |cb| {
                             cb(&state.request, &state.response, buf[0..bytes_read]) catch |err| {
@@ -247,7 +304,7 @@ pub fn Impl(comptime S: type) type {
                             };
                         }
                     } else {
-                        state.request.appendBody(buf[0..bytes_read], 1 * 1024 * 1024) catch |err| {
+                        state.request.appendBody(buf[0..bytes_read], self.config.max_non_streaming_body_bytes) catch |err| {
                             const status: u16 = if (err == error.PayloadTooLarge) 413 else 500;
                             sendErrorResponse(self, h3_conn, &conn.conn, stream_id, status) catch {};
                         };
@@ -265,11 +322,12 @@ pub fn Impl(comptime S: type) type {
 
         fn invokeHandler(self: *Self, state: *RequestState) !void {
             _ = self;
-            // Prevent double invocation
+            // Prevent double invocation (quietly return if already invoked)
             if (state.handler_invoked) return;
             state.handler_invoked = true;
 
             state.handler(&state.request, &state.response) catch |err| {
+                // Gracefully handle backpressure / done signals
                 if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
                     return;
                 }
