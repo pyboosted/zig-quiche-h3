@@ -7,6 +7,7 @@ pub const json = @import("json.zig");
 pub const streaming = @import("streaming.zig");
 pub const range = @import("range.zig");
 pub const status_codes = @import("status_codes.zig");
+pub const header_validation = @import("header_validation.zig");
 
 // Re-export commonly used types at the module level
 pub const Request = request.Request;

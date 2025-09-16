@@ -197,6 +197,7 @@ pub fn build(b: *std.Build) void {
     http_mod.addImport("quiche", quiche_ffi_mod);
     http_mod.addImport("h3", h3_mod);
     http_mod.addImport("errors", errors_mod);
+    http_mod.addImport("config", config_mod);
 
     // Add errors module to h3_mod
     h3_mod.addImport("errors", errors_mod);
@@ -257,6 +258,7 @@ pub fn build(b: *std.Build) void {
     http_mod_app.addImport("quiche", quiche_ffi_mod);
     http_mod_app.addImport("h3", h3_mod);
     http_mod_app.addImport("errors", errors_mod);
+    http_mod_app.addImport("config", config_mod);
     // Shared handlers for example servers
     const quic_handlers_mod = b.createModule(.{
         .root_source_file = b.path("src/examples/quic_server_handlers.zig"),

@@ -58,6 +58,60 @@ pub fn Impl(comptime S: type) type {
                         const arena_allocator = state.arena.allocator();
                         const headers = try h3.collectHeaders(arena_allocator, result.raw_event);
 
+                        // Validate headers before processing (Phase 4)
+                        // Check header count limit
+                        if (headers.len > self.config.max_header_count) {
+                            server_logging.warnf(self, "Header validation failed: HeaderCountExceeded ({}), returning 431\n", .{headers.len});
+                            try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 431);
+                            state.arena.deinit();
+                            self.allocator.destroy(state);
+                            continue;
+                        }
+
+                        // Validate individual headers
+                        var validation_failed = false;
+                        for (headers) |header| {
+                            // For pseudo-headers, skip name validation but still validate values
+                            // Pseudo-header names are validated by QPACK, but values still need security checks
+                            const is_pseudo_header = header.name.len > 0 and header.name[0] == ':';
+
+                            if (!is_pseudo_header) {
+                                // Validate regular header names
+                                http.header_validation.validateHeaderName(header.name, &self.config) catch |err| {
+                                    const status_code: u16 = switch (err) {
+                                        error.HeaderNameTooLong => 431,
+                                        error.HeaderNameInvalid => 400,
+                                        else => 400,
+                                    };
+                                    server_logging.warnf(self, "Header name validation failed for '{s}': {s}, returning {}\n", .{ header.name, @errorName(err), status_code });
+                                    try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, status_code);
+                                    validation_failed = true;
+                                    break;
+                                };
+                            }
+
+                            // Always validate header values (for both regular and pseudo-headers)
+                            // This prevents CR/LF injection in paths, control characters in authority, etc.
+                            http.header_validation.validateHeaderValue(header.value, &self.config) catch |err| {
+                                const status_code: u16 = switch (err) {
+                                    error.HeaderValueTooLong => 431,
+                                    error.CRLFInjectionDetected, error.ControlCharacterDetected => 400,
+                                    error.HeaderValueInvalid => 400,
+                                    else => 400,
+                                };
+                                server_logging.warnf(self, "Header value validation failed for '{s}': {s}, returning {}\n", .{ header.name, @errorName(err), status_code });
+                                try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, status_code);
+                                validation_failed = true;
+                                break;
+                            };
+                        }
+
+                        if (validation_failed) {
+                            state.arena.deinit();
+                            self.allocator.destroy(state);
+                            continue;
+                        }
+
                         const req_info = h3.parseRequestHeaders(headers);
 
                         if (req_info.method == null or req_info.path == null) {

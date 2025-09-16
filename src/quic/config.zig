@@ -50,9 +50,14 @@ pub const ServerConfig = struct {
     },
 
     // HTTP configuration limits
-    max_request_headers_size: usize = 16384, // 16KB
+    max_request_headers_size: usize = 16384, // 16KB - total size of all headers
     max_request_body_size: usize = 104857600, // 100MB (increased for testing)
     max_path_length: usize = 2048,
+
+    // Header validation limits (Phase 4)
+    max_header_count: usize = 100, // Maximum number of headers per request
+    max_header_name_length: usize = 256, // Maximum length of a header name
+    max_header_value_length: usize = 8192, // Maximum length of a header value
     /// Max bytes buffered in-memory for non-streaming request bodies.
     /// Larger bodies should use streaming handlers; exceeding this cap returns 413.
     max_non_streaming_body_bytes: usize = 1 * 1024 * 1024, // 1 MiB
@@ -148,6 +153,26 @@ pub const ServerConfig = struct {
             @compileError(std.fmt.comptimePrint("max_non_streaming_body_bytes ({d}) must be at least 1024 bytes", .{cfg.max_non_streaming_body_bytes}));
         }
 
+        // Header validation limits (Phase 4)
+        if (cfg.max_header_count == 0) {
+            @compileError("max_header_count must be at least 1");
+        }
+        if (cfg.max_header_count > 1000) {
+            @compileError(std.fmt.comptimePrint("max_header_count ({d}) exceeds reasonable limit of 1000", .{cfg.max_header_count}));
+        }
+        if (cfg.max_header_name_length < 8) {
+            @compileError(std.fmt.comptimePrint("max_header_name_length ({d}) must be at least 8 characters", .{cfg.max_header_name_length}));
+        }
+        if (cfg.max_header_name_length > 2048) {
+            @compileError(std.fmt.comptimePrint("max_header_name_length ({d}) exceeds reasonable limit of 2048", .{cfg.max_header_name_length}));
+        }
+        if (cfg.max_header_value_length < 16) {
+            @compileError(std.fmt.comptimePrint("max_header_value_length ({d}) must be at least 16 characters", .{cfg.max_header_value_length}));
+        }
+        if (cfg.max_header_value_length > 65536) {
+            @compileError(std.fmt.comptimePrint("max_header_value_length ({d}) exceeds reasonable limit of 65536", .{cfg.max_header_value_length}));
+        }
+
         // Timeout validation
         if (cfg.idle_timeout_ms == 0) {
             @compileError("idle_timeout_ms must be greater than 0 (use a large value to effectively disable)");
@@ -190,6 +215,11 @@ pub const ServerConfig = struct {
 
         // Validate debug log throttle
         if (self.debug_log_throttle == 0) return error.InvalidDebugLogThrottle;
+
+        // Validate header limits
+        if (self.max_header_count == 0) return error.InvalidHeaderCount;
+        if (self.max_header_name_length < 8) return error.HeaderNameLengthTooSmall;
+        if (self.max_header_value_length < 16) return error.HeaderValueLengthTooSmall;
 
         // Basic sanity for WT limits
         if (self.wt_max_streams_uni == 0 and self.wt_max_streams_bidi == 0) {
