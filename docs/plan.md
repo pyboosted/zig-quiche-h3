@@ -382,13 +382,13 @@ Interop checklist (for next milestone):
 - Observe qlogs for stream events; compare with expectations.
 
 Milestone 9: Full HTTP/3/WebTransport Client Harness
-Status: Planned — spec in progress
+Status: Planned — see `docs/client-spec.md`
 - Implement a Zig (or mixed) client that exercises streaming bodies, DATAGRAMs, and WebTransport flows against the server.
 - Provide CLI/batch modes for regression tests and load generation; mirror the example routes to cover edge cases (range, trailers, WT streams, etc.).
 - Serve as the foundation for Bun FFI validation (client side) and future benchmarking.
 
 Milestone 10: Interop + Performance (shifted after M9)
-Status: Planned — blocked on M9 client harness
+Status: Planned — blocked on client harness completion (docs/client-spec.md)
 - Once the dedicated client exists, run interop passes (quiche apps, ngtcp2, Chrome) and gather throughput/latency baselines.
 - Add metrics/qlog hooks, pacing tuning, and high-load tests driven by the new client.
 

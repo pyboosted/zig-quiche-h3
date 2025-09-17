@@ -16,7 +16,8 @@ Where relevant I cite `quiche` sources and docs so you can jump straight to the 
   * **HTTP endpoints/handlers** for request/response streaming,
   * **HTTP/3 Datagram** (QUIC DATAGRAM) callbacks.
 * Provides **full HTTP/3 support to the extent `quiche` exposes it**: ALPN `h3`, HTTP/3 handshake & control streams, QPACK, headers/data/trailers, GOAWAY, priority update, stats, and HTTP/3 DATAGRAMs (when negotiated). (See `quiche::h3` module and the `Connection` methods and events we mirror. ([QUIC Docs][1]))
-* Adds initial, experimental support for **WebTransport over HTTP/3**: accept/establish sessions via Extended CONNECT and support session-bound DATAGRAMs. Note: peer-initiated WebTransport streams are not surfaced by the current `quiche` C FFI; stream support is limited (see 5.7). WebTransport is compiled in by default; you can opt out at build time.
+* Adds initial, experimental support for **WebTransport over HTTP/3**: accept/establish sessions via Extended CONNECT and support session-bound DATAGRAMs. Note: peer-initiated WebTransport streams are not surfaced by the current `quiche` C FFI; stream support is limited (see 5.7). WebTransport is compiled in by default; you can opt out at build time. The complementary client harness is described in `docs/client-spec.md` (Milestone 9) and underpins future interop/perf milestones.
+* Client-side HTTP/3/WebTransport support is specified in `docs/client-spec.md` (Milestone 9) and will provide the complementary harness for interop and benchmarking milestones.
 * Ships with a comprehensive test suite and **bench harness**, and includes interop & conformance tests using `quiche`’s own apps/tools and the community **QUIC Interop Runner**. ([Docs.rs][2], [GitHub][3])
 
 **Non-goals (phase 1).**
