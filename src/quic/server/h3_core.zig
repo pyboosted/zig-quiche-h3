@@ -31,7 +31,7 @@ pub fn Impl(comptime S: type) type {
                     .Headers => {
                         // Phase 2: enforce per-connection active request cap (if configured)
                         if (self.config.max_active_requests_per_conn > 0) {
-                            const cur = countActiveRequests(self, conn);
+                            const cur = conn.active_requests;
                             if (cur >= self.config.max_active_requests_per_conn) {
                                 server_logging.warnf(self, "503: per-conn request cap reached (cur={}, cap={})\n", .{ cur, self.config.max_active_requests_per_conn });
                                 // Respond 503 and do not create stream state
@@ -140,7 +140,7 @@ pub fn Impl(comptime S: type) type {
                         );
                         state.request.user_data = state.user_data;
                         const clen = state.request.contentLength() orelse 0;
-                        server_logging.debugf(self, "  headers parsed: content-length={}, path-decoded={s}\n", .{clen, state.request.path_decoded});
+                        server_logging.debugf(self, "  headers parsed: content-length={}, path-decoded={s}\n", .{ clen, state.request.path_decoded });
 
                         // If a matcher is provided, try it first; otherwise, use dynamic router
                         {
@@ -203,6 +203,7 @@ pub fn Impl(comptime S: type) type {
                                 state.response.setStreamingLimiter(self, responseStreamingGate);
 
                                 try self.stream_states.put(.{ .conn = conn, .stream_id = result.stream_id }, state);
+                                conn.active_requests += 1;
                                 if (state.on_h3_dgram != null) {
                                     const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(result.stream_id);
                                     try self.h3.dgram_flows.put(.{ .conn = conn, .flow_id = flow_id }, state);
@@ -277,35 +278,6 @@ pub fn Impl(comptime S: type) type {
             }
         }
 
-        // Count active request states for a given connection.
-        fn countActiveRequests(self: *Self, conn: *connection.Connection) usize {
-            var count: usize = 0;
-            var it = self.stream_states.iterator();
-            while (it.next()) |entry| {
-                if (entry.key_ptr.*.conn == conn) {
-                    count += 1;
-                }
-            }
-            return count;
-        }
-
-        // Count active downloads (file or generator partial responses) for a connection.
-        fn countActiveDownloads(self: *Self, conn: *connection.Connection) usize {
-            var count: usize = 0;
-            var it = self.stream_states.iterator();
-            while (it.next()) |entry| {
-                if (entry.key_ptr.*.conn != conn) continue;
-                const st = entry.value_ptr.*;
-                if (st.response.partial_response) |p| {
-                    switch (p.body_source) {
-                        .file, .generator => count += 1,
-                        else => {},
-                    }
-                }
-            }
-            return count;
-        }
-
         // Locate the connection pointer from a quiche.Connection pointer by scanning the table.
         fn findConnByQuichePtr(self: *Self, q: *quiche.Connection) ?*connection.Connection {
             var it = self.connections.map.iterator();
@@ -322,7 +294,7 @@ pub fn Impl(comptime S: type) type {
 
             const conn = findConnByQuichePtr(self, q_conn) orelse return true; // If unknown, allow
 
-            const current = countActiveDownloads(self, conn);
+            const current = conn.active_downloads;
             if (current >= self.config.max_active_downloads_per_conn) {
                 server_logging.warnf(self, "503: per-conn download cap reached (cur={}, cap={})\n", .{ current, self.config.max_active_downloads_per_conn });
                 return false; // reject new download stream
@@ -330,8 +302,9 @@ pub fn Impl(comptime S: type) type {
 
             // Mark the state as a download if we can find it
             if (self.stream_states.get(.{ .conn = conn, .stream_id = stream_id })) |st| {
-                if (source_kind == 1 or source_kind == 2) {
+                if ((source_kind == 1 or source_kind == 2) and !st.is_download) {
                     st.is_download = true;
+                    conn.active_downloads += 1;
                 }
             }
             return true;
@@ -453,6 +426,8 @@ pub fn Impl(comptime S: type) type {
                 const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
                 _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
             }
+            if (conn.active_requests > 0) conn.active_requests -= 1;
+            if (state.is_download and conn.active_downloads > 0) conn.active_downloads -= 1;
             state.response.deinit();
             state.arena.deinit();
             self.allocator.destroy(state);

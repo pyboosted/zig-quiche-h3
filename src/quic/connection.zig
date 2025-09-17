@@ -53,6 +53,10 @@ pub const Connection = struct {
     // HTTP/3 connection (lazy-initialized)
     http3: ?*anyopaque = null, // Will be *h3.H3Connection, using anyopaque to avoid circular deps
 
+    // Per-connection accounting
+    active_requests: usize = 0,
+    active_downloads: usize = 0,
+
     // Debug
     qlog_path: ?[]const u8 = null,
 
