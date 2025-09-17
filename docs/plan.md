@@ -340,7 +340,7 @@ Implementation notes:
 - H3: `H3Connection.extendedConnectEnabledByPeer()` wrapped; `WebTransportSession.close()` now FINs the CONNECT stream.
 - Server: per‑session WT maps, cleanup on stream and connection close, write‑quota per tick (`wt_write_quota_per_tick`).
 - Router: `routeWebTransport()` extended with stream callbacks.
- - WT REGISTER refusal: on over‑limit or invalid `REGISTER_WEBTRANSPORT_STREAM`, the server refuses the referenced stream by issuing `STOP_SENDING` (read) and `RESET_STREAM` (write) with configurable app error codes (`wt_app_err_stream_limit`, `wt_app_err_invalid_stream`).
+- WT REGISTER refusal: on over-limit or invalid `REGISTER_WEBTRANSPORT_STREAM`, the server refuses the referenced stream by issuing `STOP_SENDING` (read) and `RESET_STREAM` (write) with configurable app error codes (`wt_app_err_stream_limit`, `wt_app_err_invalid_stream`).
 
 Config / Flags:
 - Build flag: `-Dwith-webtransport=true` to compile in WT (experimental)
@@ -356,7 +356,16 @@ Public APIs:
 - Server: `openWtUniStream(conn, session_state)`, `openWtBidiStream(conn, session_state)`, `sendWtStream(conn, stream, data, fin)`, `queueWtRegisterCapsule(session_state, stream_id)`.
 
 Testing status:
-- Current `wt-client` is a stub (no real handshake); server paths validated by build‑time scaffolding and unit‑level pieces. Real interop and a full client will be implemented next.
+- Current `wt-client` is a stub (no real handshake); server paths validated by build-time scaffolding and unit-level pieces. Real interop and a full client will be implemented next.
+
+Milestone 8.1: Operational Hardening & Tooling (September 2025)
+Status: Completed ✓
+- Centralized logging (`src/quic/server/logging.zig`) with compile-time elision via `-Dlog-level=…` and runtime overrides (`H3_LOG_LEVEL`, `H3_DEBUG`). All server modules route through `server_logging`, quiche debug output is throttled via atomic counter + `debug_log_throttle`.
+- Struct-based CLI parser (`src/args.zig`) now powers all examples; provides automatic `--help`, short/long flag parity, and typed parsing. Examples updated (`src/examples/quic_server.zig`, `quic_dgram_echo.zig`, `wt_client.zig`).
+- HTTP header validation guardrail (`src/http/header_validation.zig`): configurable caps (`max_header_count`, `max_header_name_length`, `max_header_value_length`) and RFC7230 token checks. CR/LF injection and control characters yield 400/431 with structured logs.
+- Request body safety knobs: `ServerConfig.max_non_streaming_body_bytes` enforced with `H3_MAX_BODY_MB` override; streaming chunk size tunable via `H3_CHUNK_SIZE`.
+- Concurrency caps: `max_active_requests_per_conn` and `max_active_downloads_per_conn` tracked per connection; caps trigger 503 with explainers and can be tuned via `H3_MAX_REQS_PER_CONN` / `H3_MAX_DOWNLOADS_PER_CONN`.
+- Central error taxonomy (`src/errors.zig`) unifies handler/stream/datagram/WebTransport errors and maps them to HTTP status codes; `utils/error_messages.zig` produces readable diagnostics for logs/tests.
 
 Interop checklist (for next milestone):
 - Verify ALPN `h3` and Alt-Svc advert when testing with Chrome; serve certs trusted by the OS (or configure Chrome with allow-insecure-localhost for dev).

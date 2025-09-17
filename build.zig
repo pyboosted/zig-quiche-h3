@@ -225,7 +225,6 @@ pub fn build(b: *std.Build) void {
     });
     routing_dyn_mod.addImport("http", http_mod);
     routing_dyn_mod.addImport("routing", routing_mod);
-    
 
     // http module no longer needs router/static_routes
 
@@ -377,6 +376,7 @@ pub fn build(b: *std.Build) void {
         dgram_echo_mod.addImport("h3", h3_mod);
         dgram_echo_mod.addImport("routing", routing_mod_app);
         dgram_echo_mod.addImport("routing_gen", routing_gen_mod_app);
+        dgram_echo_mod.addImport("args", args_mod);
 
         const dgram_echo = b.addExecutable(.{ .name = "quic-dgram-echo", .root_module = dgram_echo_mod });
         addQuicheLink(b, dgram_echo, use_system_quiche, quiche_lib_path, cargo_step);
@@ -398,6 +398,7 @@ pub fn build(b: *std.Build) void {
         wt_client_mod.addImport("quiche", quiche_ffi_mod);
         wt_client_mod.addImport("h3", h3_mod);
         wt_client_mod.addImport("net", udp_mod);
+        wt_client_mod.addImport("args", args_mod);
         // wt client does not import build_options
 
         const wt_client = b.addExecutable(.{

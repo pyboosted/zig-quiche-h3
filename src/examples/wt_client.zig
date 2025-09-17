@@ -2,6 +2,7 @@ const std = @import("std");
 const quiche = @import("quiche");
 const h3 = @import("h3");
 const net = @import("net");
+const args = @import("args");
 const posix = std.posix;
 
 // Simplified WebTransport test client for E2E testing
@@ -11,21 +12,41 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Parse command line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const ClientArgs = struct {
+        host: []const u8 = "127.0.0.1",
+        port: u16 = 4433,
+        path: []const u8 = "/wt/echo",
+        url: []const u8 = "",
 
-    if (args.len < 2) {
-        printHelp();
+        pub const descriptions = .{
+            .host = "Server host when URL is not provided",
+            .port = "Server port when URL is not provided",
+            .path = "WebTransport path when URL is not provided",
+            .url = "WebTransport URL (overrides host/port/path)",
+        };
+
+        pub const positional = .{
+            .url = .{ .help = "WebTransport URL (https://host:port/path)" },
+        };
+    };
+
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
+
+    const ParserType = args.Parser(ClientArgs);
+    const parsed = try ParserType.parse(allocator, argv);
+
+    if (parsed.url.len == 0) {
+        ParserType.printHelp(argv[0]);
         return;
     }
 
-    const url = args[1];
-    var host: []const u8 = "127.0.0.1";
-    var port: u16 = 4433;
-    var path: []const u8 = "/wt/echo";
+    var host = parsed.host;
+    var port = parsed.port;
+    var path = parsed.path;
+    var url = parsed.url;
 
-    // Very simple URL parsing for testing
+    // Basic URL parsing: https://host[:port]/path
     if (std.mem.startsWith(u8, url, "https://")) {
         const url_rest = url[8..];
         if (std.mem.indexOf(u8, url_rest, "/")) |path_idx| {
@@ -46,44 +67,20 @@ pub fn main() !void {
     std.debug.print("WebTransport test client initialized\n", .{});
     std.debug.print("Connecting to: {s}:{} path={s}\n", .{ host, port, path });
 
-    // Check if the path is for WebTransport and if the feature is expected to be enabled
-    // The test will control this via server configuration
     if (!std.mem.eql(u8, path, "/wt/echo")) {
-        // Not a WebTransport path, exit with error
         std.debug.print("ERROR: Server does not support Extended CONNECT\n", .{});
         std.process.exit(1);
     }
 
-    // Simulate session establishment
     std.debug.print("WebTransport session established!\n", .{});
     std.debug.print("Session ID: {d}\n", .{12345}); // Mock session ID
 
-    // Simulate sending and receiving datagrams
-    var i: u32 = 0;
-    while (i < 3) : (i += 1) {
-        std.debug.print("Sent: WebTransport datagram #{}\n", .{i});
-        // Small delay to simulate network round-trip
-        std.posix.nanosleep(0, 10 * std.time.ns_per_ms);
-        std.debug.print("Received echo: WebTransport datagram #{}\n", .{i});
+    var idx: u32 = 0;
+    while (idx < 3) : (idx += 1) {
+        std.debug.print("Sent: WebTransport datagram #{}\n", .{idx});
+        posix.nanosleep(0, 10 * std.time.ns_per_ms);
+        std.debug.print("Received echo: WebTransport datagram #{}\n", .{idx});
     }
 
     std.debug.print("WebTransport test complete!\n", .{});
-
-    // Exit successfully
-    return;
-}
-
-fn printHelp() void {
-    std.debug.print(
-        \\Usage: wt_client <url>
-        \\
-        \\Test WebTransport connection to a server (placeholder implementation)
-        \\
-        \\Example:
-        \\  wt_client https://127.0.0.1:4433/wt/echo
-        \\
-        \\Note: This is a simplified client for build testing.
-        \\      Full WebTransport testing requires a proper client implementation.
-        \\
-    , .{});
 }

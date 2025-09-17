@@ -10,6 +10,8 @@ pub fn Parser(comptime Args: type) type {
         pub fn parse(_: std.mem.Allocator, argv: []const [:0]const u8) !Args {
             var result = Args{}; // Start with default values
             var i: usize = 1; // Skip program name
+            var positional_index: usize = 0;
+            const total_positionals = positionalCount();
 
             while (i < argv.len) : (i += 1) {
                 const arg = argv[i];
@@ -70,6 +72,18 @@ pub fn Parser(comptime Args: type) type {
                 }
 
                 if (!matched) {
+                    if (positional_index < total_positionals) {
+                        assignPositional(&result, positional_index, arg) catch |err| {
+                            if (err == error.UnknownArgument) {
+                                std.debug.print("Error: Unknown positional argument '{s}'\n\n", .{arg});
+                                printHelp(argv[0]);
+                            }
+                            return err;
+                        };
+                        positional_index += 1;
+                        continue;
+                    }
+
                     std.debug.print("Error: Unknown argument '{s}'\n\n", .{arg});
                     printHelp(argv[0]);
                     return error.UnknownArgument;
@@ -126,6 +140,51 @@ pub fn Parser(comptime Args: type) type {
             return buf[0..total_len];
         }
 
+        fn positionalCount() usize {
+            if (!@hasDecl(Args, "positional")) return 0;
+            return std.meta.fields(@TypeOf(Args.positional)).len;
+        }
+
+        fn positionalHelp(comptime name: []const u8) []const u8 {
+            if (!@hasDecl(Args, "positional")) return "";
+            const entry = @field(Args.positional, name);
+            const EntryType = @TypeOf(entry);
+            if (@hasField(EntryType, "help")) {
+                return entry.help;
+            } else if (EntryType == []const u8) {
+                return entry;
+            } else {
+                return "";
+            }
+        }
+
+        fn assignPositional(result: *Args, position: usize, value: []const u8) !void {
+            if (!@hasDecl(Args, "positional")) return error.UnknownArgument;
+
+            var idx: usize = 0;
+            inline for (std.meta.fields(@TypeOf(Args.positional))) |pos_field| {
+                if (idx == position) {
+                    const field_index = std.meta.fieldIndex(Args, pos_field.name) orelse @compileError("Positional field '" ++ pos_field.name ++ "' not found in Args struct");
+                    try assignFieldByIndex(result, field_index, value);
+                    return;
+                }
+                idx += 1;
+            }
+
+            return error.UnknownArgument;
+        }
+
+        fn assignFieldByIndex(result: *Args, target_index: usize, value: []const u8) !void {
+            inline for (std.meta.fields(Args), 0..) |field, field_index| {
+                if (field_index == target_index) {
+                    const field_ptr = &@field(result.*, field.name);
+                    try parseValue(field_ptr, value);
+                    return;
+                }
+            }
+            unreachable; // compile-time guarded by positional metadata
+        }
+
         /// Check if a field has a short flag defined
         fn hasShortFlag(comptime name: []const u8) bool {
             // Define short flags for common options
@@ -154,8 +213,38 @@ pub fn Parser(comptime Args: type) type {
             // Extract just the binary name from the path
             const basename = std.fs.path.basename(program_name);
 
-            std.debug.print("Usage: {s} [options]\n\n", .{basename});
-            std.debug.print("Options:\n", .{});
+            const has_options = std.meta.fields(Args).len > 0;
+
+            std.debug.print("Usage: {s}", .{basename});
+            if (has_options) {
+                std.debug.print(" [options]", .{});
+            }
+            if (comptime positionalCount() > 0) {
+                inline for (std.meta.fields(@TypeOf(Args.positional))) |pos_field| {
+                    std.debug.print(" <{s}>", .{pos_field.name});
+                }
+            }
+            std.debug.print("\n\n", .{});
+
+            if (comptime positionalCount() > 0) {
+                std.debug.print("Positional arguments:\n", .{});
+                inline for (std.meta.fields(@TypeOf(Args.positional))) |pos_field| {
+                    const name = pos_field.name;
+                    const help = positionalHelp(pos_field.name);
+                    std.debug.print("  {s}", .{name});
+                    const padding = if (name.len < 25) 25 - name.len else 2;
+                    for (0..padding) |_| std.debug.print(" ", .{});
+                    if (help.len > 0) {
+                        std.debug.print("{s}", .{help});
+                    }
+                    std.debug.print("\n", .{});
+                }
+                std.debug.print("\n", .{});
+            }
+
+            if (has_options) {
+                std.debug.print("Options:\n", .{});
+            }
 
             inline for (std.meta.fields(Args)) |field| {
                 // Format the flag name
@@ -285,4 +374,45 @@ test "argument parser error handling" {
     const result = parser.parse(testing.allocator, &argv);
 
     try testing.expectError(error.MissingValue, result);
+}
+
+test "argument parser rejects unknown arguments" {
+    const testing = std.testing;
+
+    const TestArgs = struct {
+        port: u16 = 4433,
+    };
+
+    const argv = [_][:0]const u8{ "test", "--unknown" };
+    const parser = Parser(TestArgs);
+    const result = parser.parse(testing.allocator, &argv);
+
+    try testing.expectError(error.UnknownArgument, result);
+}
+
+test "argument parser positional arguments" {
+    const testing = std.testing;
+
+    const TestArgs = struct {
+        host: []const u8 = "127.0.0.1",
+        url: []const u8 = "",
+
+        pub const positional = .{
+            .url = .{ .help = "Target URL" },
+        };
+    };
+
+    const parser = Parser(TestArgs);
+
+    const argv_positional = [_][:0]const u8{ "test", "https://example.com" };
+    const args_positional = try parser.parse(testing.allocator, &argv_positional);
+    try testing.expectEqualStrings("https://example.com", args_positional.url);
+    try testing.expectEqualStrings("127.0.0.1", args_positional.host);
+
+    const argv_flag = [_][:0]const u8{ "test", "--url", "https://flag" };
+    const args_flag = try parser.parse(testing.allocator, &argv_flag);
+    try testing.expectEqualStrings("https://flag", args_flag.url);
+
+    const argv_extra = [_][:0]const u8{ "test", "one", "two" };
+    try testing.expectError(error.UnknownArgument, parser.parse(testing.allocator, &argv_extra));
 }

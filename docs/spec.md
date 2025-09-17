@@ -95,11 +95,13 @@ Common flags:
 - `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…` to link libev and build example binaries (server, echo, etc.). Without this flag, examples are skipped, and core library/tests still build.
 - `-Dwith-webtransport=false|true` to toggle WebTransport features (default: true).
 - `-Dlink-ssl=true` when linking against OpenSSL/quictls instead of vendored BoringSSL.
+- `-Dlog-level=error|warn|info|debug|trace` to set the compile-time logging floor (default: `warn`).
 
 Examples and tests:
 
 - UDP echo: `zig build echo` (send with `nc -u localhost 4433`).
 - QUIC server example (requires `-Dwith-libev=true`): `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
+  - Examples now share a struct-based argument parser (`src/args.zig`): declare a struct, call `args.Parser(MyArgs).parse()`, and get automatic `--help` output plus short/long flag support.
 - Unit tests: `zig build test` or `zig test src/tests.zig`.
 
 > **Why C FFI (not Rust JNI/`extern "Rust"`)?** The `quiche` team officially supports a **thin C API** consistent with the Rust API. Zig’s C-ABI interop is first-class and stable, so this is the cleanest, most robust bridge. ([GitHub][8])
@@ -133,39 +135,79 @@ pub const Server = struct {
 };
 
 pub const ServerConfig = struct {
-    bind_addr: []const u8,        // "0.0.0.0:443" or "[::]:443"
-    cert_chain_pem: []const u8,   // path or in-memory; see TLSOptions
-    priv_key_pem: []const u8,
-    // QUIC (maps to quiche::Config setters)
-    quic: QuicOptions,
-    // HTTP/3 (maps to quiche::h3::Config)
-    h3: H3Options,
-    // Logging / qlog
-    qlog_dir: ?[]const u8 = null,
-    // Event backend selection (default: libev)
-    event_backend: EventBackend = .libev,
-};
+    pub const LogLevel = enum(u8) { err, warn, info, debug, trace };
 
-pub const QuicOptions = struct {
-    alpn: []const []const u8 = &.{ "h3" },        // sets APPLICATION_PROTOCOL, i.e. h3 ALPN
-    max_idle_timeout_ms: u64 = 30000,
-    max_streams_bidi: u64 = 100,
-    max_streams_uni: u64 = 100,
-    max_data: u64 = 10 * 1024 * 1024,
-    max_stream_data_bidi_local: u64 = 1_000_000,
-    max_stream_data_bidi_remote: u64 = 1_000_000,
-    max_stream_data_uni: u64 = 1_000_000,
+    // Network / TLS
+    bind_addr: []const u8 = "0.0.0.0",
+    bind_port: u16 = 4433,
+    cert_path: []const u8 = "third_party/quiche/quiche/examples/cert.crt",
+    key_path: []const u8 = "third_party/quiche/quiche/examples/cert.key",
+    verify_peer: bool = false,
+
+    // QUIC transport defaults (mirror src/quic/config.zig)
+    idle_timeout_ms: u64 = 30_000,
+    initial_max_data: u64 = 2 * 1024 * 1024,
+    initial_max_stream_data_bidi_local: u64 = 1 * 1024 * 1024,
+    initial_max_stream_data_bidi_remote: u64 = 1 * 1024 * 1024,
+    initial_max_stream_data_uni: u64 = 1 * 1024 * 1024,
+    initial_max_streams_bidi: u64 = 10,
+    initial_max_streams_uni: u64 = 10,
+    max_recv_udp_payload_size: usize = 1350,
+    max_send_udp_payload_size: usize = 1350,
     disable_active_migration: bool = true,
-    enable_datagrams: bool = true,  // QUIC DATAGRAM (RFC 9221)
-    congestion: enum { cubic, reno, bbr, bbr2 } = .cubic,
+    enable_pacing: bool = true,
+    cc_algorithm: []const u8 = "cubic",
+    enable_dgram: bool = false,
+    dgram_recv_queue_len: usize = 0,
+    dgram_send_queue_len: usize = 0,
     grease: bool = true,
-};
 
-pub const H3Options = struct {
-    qpack_max_table_capacity: u64 = 0,
-    qpack_blocked_streams: u64 = 0,
-    enable_extended_connect: bool = false, // RFC 9297 / RFC 9220 family (extended CONNECT)
-    enable_webtransport: bool = false,     // Experimental convenience flag: implies extended CONNECT; actual enablement is via :protocol negotiation
+    // Logging & diagnostics
+    qlog_dir: ?[]const u8 = "qlogs",
+    keylog_path: ?[]const u8 = null,
+    enable_debug_logging: bool = true,
+    log_level: LogLevel = .warn,
+    debug_log_throttle: u32 = 10,
+
+    // ALPN set (HTTP/3 + fallback interop protocols)
+    alpn_protocols: []const []const u8 = &.{
+        "h3",
+        "hq-interop",
+        "hq-29",
+        "hq-28",
+        "hq-27",
+        "http/0.9",
+    },
+
+    // HTTP limits & validation
+    max_request_headers_size: usize = 16_384,
+    max_request_body_size: usize = 100 * 1024 * 1024,
+    max_path_length: usize = 2048,
+    max_header_count: usize = 100,
+    max_header_name_length: usize = 256,
+    max_header_value_length: usize = 8192,
+    max_non_streaming_body_bytes: usize = 1 * 1024 * 1024,
+    max_active_requests_per_conn: usize = 0,
+    max_active_downloads_per_conn: usize = 0,
+
+    // WebTransport knobs (experimental; guarded by -Dwith-webtransport)
+    wt_max_streams_uni: u32 = 32,
+    wt_max_streams_bidi: u32 = 32,
+    wt_write_quota_per_tick: usize = 64 * 1024,
+    wt_session_idle_ms: u64 = 60_000,
+    wt_stream_pending_max: usize = 256 * 1024,
+    wt_app_err_stream_limit: u64 = 0x1000,
+    wt_app_err_invalid_stream: u64 = 0x1001,
+
+    // Retry & buffers
+    enable_retry: bool = false,
+    recv_buffer_size: usize = 2048,
+    send_buffer_size: usize = 2048,
+
+    /// Compile-time validation mirrors src/quic/config.zig.validateComptime()
+    /// (port range, ALPN length, header limits, buffer sizing, etc.).
+    pub fn validateComptime(comptime cfg: ServerConfig) void { /* compile-time asserts */ }
+    /// Runtime validation is available via validate().
 };
 
 pub const Request = struct {
@@ -203,16 +245,64 @@ pub const OnDatagram = *const fn (*Server, *Connection, []const u8, ?*anyopaque)
 
 // Error types used by handlers and callbacks
 pub const HandlerError = error{
-    HeadersAlreadySent, ResponseEnded, StreamBlocked, InvalidState,
-    PayloadTooLarge, NotFound, MethodNotAllowed, BadRequest,
-    Unauthorized, Forbidden, RequestTimeout, TooManyRequests,
-    InternalServerError, OutOfMemory,
+    HeadersAlreadySent,
+    ResponseEnded,
+    StreamBlocked,
+    InvalidState,
+    PayloadTooLarge,
+    NotFound,
+    MethodNotAllowed,
+    BadRequest,
+    Unauthorized,
+    Forbidden,
+    RequestTimeout,
+    TooManyRequests,
+    InternalServerError,
+    RequestHeaderFieldsTooLarge,
+    RangeNotSatisfiable,
+    InvalidRange,
+    Unsatisfiable,
+    Malformed,
+    MultiRange,
+    NonBytesUnit,
+    InvalidRedirectStatus,
+    OutOfMemory,
 };
-pub const StreamingError = error{ StreamBlocked, ResponseEnded, HeadersAlreadySent, InvalidState, PayloadTooLarge, OutOfMemory };
-pub const DatagramError = error{ WouldBlock, DatagramTooLarge, ConnectionClosed, Done, OutOfMemory };
-pub const WebTransportError = error{ SessionClosed, StreamBlocked, InvalidState, WouldBlock, OutOfMemory };
-pub const WebTransportStreamError = error{ StreamClosed, StreamReset, FlowControl, WouldBlock, InvalidState, OutOfMemory };
-pub const GeneratorError = error{ EndOfStream, ReadError, OutOfMemory };
+pub const StreamingError = error{
+    StreamBlocked,
+    ResponseEnded,
+    HeadersAlreadySent,
+    InvalidState,
+    PayloadTooLarge,
+    OutOfMemory,
+};
+pub const DatagramError = error{
+    WouldBlock,
+    DatagramTooLarge,
+    ConnectionClosed,
+    Done,
+    OutOfMemory,
+};
+pub const WebTransportError = error{
+    SessionClosed,
+    StreamBlocked,
+    InvalidState,
+    WouldBlock,
+    OutOfMemory,
+};
+pub const WebTransportStreamError = error{
+    StreamClosed,
+    StreamReset,
+    FlowControl,
+    WouldBlock,
+    InvalidState,
+    OutOfMemory,
+};
+pub const GeneratorError = error{
+    EndOfStream,
+    ReadError,
+    OutOfMemory,
+};
 
 pub fn errorToStatus(err: HandlerError || StreamingError || DatagramError || WebTransportError || WebTransportStreamError || GeneratorError) u16;
 
@@ -370,7 +460,7 @@ Note: WebTransport is experimental and compiled in by default. You can disable i
 What works now (with `quiche` 0.24.6 C FFI):
 
 - Detect and accept WebTransport sessions using Extended CONNECT:
-  - Gate on `H3Options.enable_extended_connect` and peer support via `quiche_h3_extended_connect_enabled_by_peer()`.
+  - We enable Extended CONNECT whenever WebTransport is built in, and gate runtime behavior on peer support via `quiche_h3_extended_connect_enabled_by_peer()`.
   - On `:method = CONNECT` with `:protocol = webtransport`, route to a WebTransport route and accept the session by replying `:status = 200` on the request stream.
 - Session-bound DATAGRAMs:
   - When `quiche_h3_dgram_enabled_by_peer(conn)` is true, encode the H3 DATAGRAM flow-id using the WebTransport Session ID (the CONNECT request stream ID) and send/receive via `quiche_conn_dgram_send/recv`.
@@ -399,18 +489,23 @@ Notes and caveats (upstream constraints we work around):
 * **Retry**: optional stateless retry using `quiche` helpers (configurable).
 * **GREASE & invariants**: optional GREASE to improve interop.
 * **QLOG**: enable per-connection qlog file in `qlog_dir` for debugging/analysis (leveraging `quiche` qlog support exposed via config).
+* **Header validation**: every request header set is checked against configurable limits (`max_header_count`, `max_header_name_length`, `max_header_value_length`). Names must match RFC 7230 token rules (pseudo-headers allowed), values reject control characters/CRLF injection. Failures yield 400/431 with structured logging.
+* **Body bounds**: non-streaming handlers respect `max_non_streaming_body_bytes` (override via `H3_MAX_BODY_MB`); exceeding the cap returns 413 via the centralized `errorToStatus` map.
+* **Concurrency caps**: per-connection request and download limits (`max_active_requests_per_conn`, `max_active_downloads_per_conn`) prevent runaway resource usage; when hit, we log a WARN line and emit 503.
+* **Centralized logging**: compile-time log filtering via `-Dlog-level=[error|warn|info|debug|trace]`, plus runtime overrides `H3_LOG_LEVEL` / `H3_DEBUG=1`. Logging helpers (`server_logging.{errorf, warnf, infof, debugf, tracef}`) route everything through one module with throttled quiche debug callbacks.
 
 ---
 
 ## 6) Configuration → `quiche` mapping
 
-We map `ServerConfig.quic` to `quiche::Config` mutators (the README documents the canonical set: initial max streams/data, idle timeout, ALPN, congestion, migration, datagrams). ([Docs.rs][2])
+We feed the transport-related fields from `ServerConfig` (idle timeout, stream/data caps, congestion control string, disable-active-migration, pacing, datagram toggles, UDP payload sizing, GREASE, retry) directly into the corresponding `quiche::Config` mutators. ([Docs.rs][2])
 
-We map `ServerConfig.h3` to **`quiche::h3::Config`** setters:
+HTTP/3 specific fields (`alpn_protocols`, header/body limits, extended CONNECT/WebTransport flags) log through `quiche::h3::Config` using:
 
-* `set_qpack_max_table_capacity(u64)`,
-* `set_qpack_blocked_streams(u64)`,
-* `enable_extended_connect(bool)` — Note: `H3Options.enable_webtransport=true` implicitly sets this to true for convenience. There is no separate C FFI toggle for WebTransport; enablement is implicit via Extended CONNECT + `:protocol = webtransport` negotiation. ([QUIC Docs][15])
+* `set_application_protos()` with the configured ALPN list (default `h3`, `hq-*`, `http/0.9`)
+* `enable_extended_connect(true)` when WebTransport is built in (default) or when we need CONNECT-UDP
+* `enable_datagrams()` when both `enable_dgram` and the H3 DATAGRAM context are requested
+* QPACK table/blocked stream caps set to sensible defaults (currently zero — match quiche examples)
 
 At startup we call:
 
