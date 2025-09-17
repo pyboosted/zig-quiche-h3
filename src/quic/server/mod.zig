@@ -10,7 +10,8 @@ const http = @import("http");
 const routing = @import("routing");
 const errors = @import("errors");
 const server_logging = @import("logging.zig");
-const utils = @import("utils");
+const runtime_config = @import("config_runtime.zig");
+const conn_state = @import("connection_state.zig");
 
 const c = quiche.c;
 const posix = std.posix;
@@ -67,10 +68,9 @@ pub const QuicServer = struct {
 
     // HTTP routing via matcher only
     matcher: routing.Matcher,
-    // Track per-connection stream state using a composite key so
-    // simultaneous connections with the same stream_id (e.g., 0)
-    // don't collide.
-    stream_states: std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80),
+    // Track per-connection stream state using a composite key so simultaneous
+    // connections with the same stream_id (e.g., 0) don't collide.
+    stream_states: std.hash_map.HashMap(conn_state.StreamKey, *RequestState, conn_state.StreamKeyContext, 80),
 
     // H3 DATAGRAM flow_id mapping lives under embedded state `h3`
 
@@ -80,7 +80,7 @@ pub const QuicServer = struct {
     packets_sent: usize = 0,
 
     // Embedded state
-    datagram: DatagramStats = .{},
+    datagram: conn_state.DatagramStats = .{},
     h3: H3State,
     wt: WTState,
 
@@ -95,92 +95,33 @@ pub const QuicServer = struct {
     const WTCore = @import("webtransport.zig");
     const WT = WTCore.Impl(@This());
 
+    pub const StreamKey = conn_state.StreamKey;
+    pub const StreamKeyContext = conn_state.StreamKeyContext;
+    pub const SessionKey = conn_state.SessionKey;
+    pub const SessionKeyContext = conn_state.SessionKeyContext;
+    pub const FlowKey = conn_state.FlowKey;
+    pub const FlowKeyContext = conn_state.FlowKeyContext;
+
+    const H3State = conn_state.H3State(*RequestState);
+    const WTState = conn_state.WTState(
+        *h3.WebTransportSessionState,
+        *h3.WebTransportSession.WebTransportStream,
+        WT.UniPreface,
+    );
+
     /// Build-time feature toggle for WebTransport
     pub const WithWT: bool = @import("build_options").with_webtransport;
 
     // H3 helpers are accessed directly via the H3 facade (no wrappers)
 
-    // Type definitions for stream state tracking
-    pub const StreamKey = struct { conn: *connection.Connection, stream_id: u64 };
-    const StreamKeyContext = utils.AutoContext(StreamKey);
-
-    // Type definitions for WebTransport session tracking
-    pub const SessionKey = struct { conn: *connection.Connection, session_id: u64 };
-    const SessionKeyContext = utils.AutoContext(SessionKey);
-
-    // Compile-time struct size and alignment assertions
     comptime {
-        // Ensure our key structs are optimally packed (pointer + u64 = 16 bytes on 64-bit)
-        const ptr_size = @sizeOf(*connection.Connection);
-        const u64_size = @sizeOf(u64);
-        const expected_key_size = ptr_size + u64_size;
-
-        // StreamKey assertions
-        std.debug.assert(@sizeOf(StreamKey) == expected_key_size);
-        std.debug.assert(@alignOf(StreamKey) == @max(@alignOf(*connection.Connection), @alignOf(u64)));
-
-        // SessionKey assertions
-        std.debug.assert(@sizeOf(SessionKey) == expected_key_size);
-        std.debug.assert(@alignOf(SessionKey) == @max(@alignOf(*connection.Connection), @alignOf(u64)));
-
-        // FlowKey assertions (defined later but check here for consistency)
-        // Will be validated after FlowKey is defined
-    }
-
-    // Embedded state structs
-    const DatagramStats = struct {
-        received: usize = 0,
-        sent: usize = 0,
-        dropped_send: usize = 0,
-    };
-
-    const H3State = struct {
-        dgram_flows: std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80),
-        dgrams_received: usize = 0,
-        dgrams_sent: usize = 0,
-        unknown_flow: usize = 0,
-        would_block: usize = 0,
-    };
-
-    const WTState = struct {
-        sessions: std.hash_map.HashMap(SessionKey, *h3.WebTransportSessionState, SessionKeyContext, 80),
-        dgram_map: std.hash_map.HashMap(FlowKey, *h3.WebTransportSessionState, FlowKeyContext, 80),
-        sessions_created: usize = 0,
-        sessions_closed: usize = 0,
-        dgrams_received: usize = 0,
-        dgrams_sent: usize = 0,
-        dgrams_would_block: usize = 0,
-        enable_streams: bool = false,
-        enable_bidi: bool = false,
-        streams: std.hash_map.HashMap(StreamKey, *h3.WebTransportSession.WebTransportStream, StreamKeyContext, 80),
-        uni_preface: std.hash_map.HashMap(StreamKey, WT.UniPreface, StreamKeyContext, 80),
-    };
-
-    // Type definitions for H3 DATAGRAM flow_id tracking
-    pub const FlowKey = struct { conn: *connection.Connection, flow_id: u64 };
-    const FlowKeyContext = utils.AutoContext(FlowKey);
-
-    // Additional compile-time assertions for FlowKey
-    comptime {
-        const ptr_size = @sizeOf(*connection.Connection);
-        const u64_size = @sizeOf(u64);
-        const expected_key_size = ptr_size + u64_size;
-
-        // FlowKey assertions
-        std.debug.assert(@sizeOf(FlowKey) == expected_key_size);
-        std.debug.assert(@alignOf(FlowKey) == @max(@alignOf(*connection.Connection), @alignOf(u64)));
-
-        // RequestState size documentation
-        // Note: RequestState is larger due to arena allocator and embedded Request/Response
-        // We don't assert exact size as it may vary with std lib changes, but document expectations
         const req_state_size = @sizeOf(RequestState);
         if (req_state_size > 4096) {
-            @compileError(std.fmt.comptimePrint("RequestState size ({d} bytes) exceeds expected maximum. Consider optimizing.", .{req_state_size}));
+            @compileError(std.fmt.comptimePrint(
+                "RequestState size ({d} bytes) exceeds expected maximum. Consider optimizing.",
+                .{req_state_size},
+            ));
         }
-
-        // DatagramStats assertions - should be 3 * usize
-        std.debug.assert(@sizeOf(DatagramStats) == 3 * @sizeOf(usize));
-        std.debug.assert(@alignOf(DatagramStats) == @alignOf(usize));
     }
 
     pub fn init(allocator: std.mem.Allocator, cfg: config_mod.ServerConfig, matcher: routing.Matcher) !*QuicServer {
@@ -252,76 +193,22 @@ pub const QuicServer = struct {
         var conn_id_seed: [32]u8 = undefined;
         std.crypto.random.bytes(&conn_id_seed);
 
-        // 1) Apply build default log level
-        var cfg_eff = cfg;
-        const bo = @import("build_options");
-        if (server_logging.parseLevel(bo.log_level)) |lvl| cfg_eff.log_level = lvl;
+        const overrides = try runtime_config.applyRuntimeOverrides(allocator, cfg, WithWT);
+        const cfg_eff = overrides.config;
 
-        // 2) H3_LOG_LEVEL runtime override (takes precedence)
-        if (std.process.getEnvVarOwned(allocator, "H3_LOG_LEVEL")) |lvl_s| {
-            defer allocator.free(lvl_s);
-            if (server_logging.parseLevel(lvl_s)) |lvl| cfg_eff.log_level = lvl;
-        } else |_| {}
+        var stream_states = std.hash_map.HashMap(conn_state.StreamKey, *RequestState, conn_state.StreamKeyContext, 80).init(allocator);
+        errdefer stream_states.deinit();
 
-        // 3) Honor H3_DEBUG=1 to force debug level and enable app-level debug traces
-        if (std.process.getEnvVarOwned(allocator, "H3_DEBUG")) |dbg| {
-            defer allocator.free(dbg);
-            if (dbg.len > 0 and (std.mem.eql(u8, dbg, "1") or std.mem.eql(u8, dbg, "true") or std.mem.eql(u8, dbg, "on"))) {
-                cfg_eff.enable_debug_logging = true;
-                if (@intFromEnum(cfg_eff.log_level) < @intFromEnum(config_mod.ServerConfig.LogLevel.debug)) {
-                    cfg_eff.log_level = .debug;
-                }
-            }
-        } else |_| {}
+        var h3_state = try H3State.init(allocator);
+        errdefer h3_state.dgram_flows.deinit();
 
-        // Optional override: H3_MAX_BODY_MB sets the non-streaming body cap (in MiB)
-        if (std.process.getEnvVarOwned(allocator, "H3_MAX_BODY_MB")) |mb| {
-            defer allocator.free(mb);
-            const val = std.fmt.parseUnsigned(usize, mb, 10) catch 0;
-            if (val > 0) {
-                const bytes = val * 1024 * 1024;
-                cfg_eff.max_non_streaming_body_bytes = bytes;
-                if (cfg_eff.enable_debug_logging) {
-                    std.debug.print("[INFO] H3: max_non_streaming_body_bytes set to {} bytes via H3_MAX_BODY_MB\n", .{bytes});
-                }
-            }
-        } else |_| {}
-
-        // Optional override: H3_CHUNK_SIZE sets default streaming chunk size (bytes)
-        if (std.process.getEnvVarOwned(allocator, "H3_CHUNK_SIZE")) |cs| {
-            defer allocator.free(cs);
-            const val = std.fmt.parseUnsigned(usize, cs, 10) catch 0;
-            if (val > 0) {
-                @import("http").streaming.setDefaultChunkSize(val);
-                if (cfg_eff.enable_debug_logging) {
-                    std.debug.print("[INFO] H3: streaming chunk size set to {} via H3_CHUNK_SIZE\n", .{val});
-                }
-            }
-        } else |_| {}
-
-        // Optional override: H3_MAX_REQS_PER_CONN caps concurrent requests per connection
-        if (std.process.getEnvVarOwned(allocator, "H3_MAX_REQS_PER_CONN")) |rq| {
-            defer allocator.free(rq);
-            const val = std.fmt.parseUnsigned(usize, rq, 10) catch 0;
-            if (val > 0) {
-                cfg_eff.max_active_requests_per_conn = val;
-                if (cfg_eff.enable_debug_logging) {
-                    std.debug.print("[INFO] H3: max_active_requests_per_conn set to {} via H3_MAX_REQS_PER_CONN\n", .{val});
-                }
-            }
-        } else |_| {}
-
-        // Optional override: H3_MAX_DOWNLOADS_PER_CONN caps concurrent downloads per connection
-        if (std.process.getEnvVarOwned(allocator, "H3_MAX_DOWNLOADS_PER_CONN")) |dq| {
-            defer allocator.free(dq);
-            const val = std.fmt.parseUnsigned(usize, dq, 10) catch 0;
-            if (val > 0) {
-                cfg_eff.max_active_downloads_per_conn = val;
-                if (cfg_eff.enable_debug_logging) {
-                    std.debug.print("[INFO] H3: max_active_downloads_per_conn set to {} via H3_MAX_DOWNLOADS_PER_CONN\n", .{val});
-                }
-            }
-        } else |_| {}
+        var wt_state = try WTState.init(allocator);
+        errdefer {
+            wt_state.sessions.deinit();
+            wt_state.dgram_map.deinit();
+            wt_state.streams.deinit();
+            wt_state.uni_preface.deinit();
+        }
 
         server.* = .{
             .allocator = allocator,
@@ -331,49 +218,21 @@ pub const QuicServer = struct {
             .event_loop = loop,
             .conn_id_seed = conn_id_seed,
             .matcher = matcher,
-            .stream_states = std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80).init(allocator),
-            .h3 = .{ .dgram_flows = std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80).init(allocator) },
-            .wt = .{
-                .sessions = std.hash_map.HashMap(SessionKey, *h3.WebTransportSessionState, SessionKeyContext, 80).init(allocator),
-                .dgram_map = std.hash_map.HashMap(FlowKey, *h3.WebTransportSessionState, FlowKeyContext, 80).init(allocator),
-                .streams = std.hash_map.HashMap(StreamKey, *h3.WebTransportSession.WebTransportStream, StreamKeyContext, 80).init(allocator),
-                .uni_preface = std.hash_map.HashMap(StreamKey, WT.UniPreface, StreamKeyContext, 80).init(allocator),
-            },
+            .stream_states = stream_states,
+            .h3 = h3_state,
+            .wt = wt_state,
         };
 
         // Create H3 config; WebTransport requires explicit build flag
-        const enable_wt_env = std.process.getEnvVarOwned(allocator, "H3_WEBTRANSPORT") catch null;
-        defer if (enable_wt_env) |wt| allocator.free(wt);
-        if (WithWT and enable_wt_env != null and std.mem.eql(u8, enable_wt_env.?, "1")) {
+        if (WithWT and overrides.webtransport_enabled) {
             server.h3_config = try h3.H3Config.initWithWebTransport();
-            std.debug.print("WebTransport: enabled (H3_WEBTRANSPORT=1, -Dwith-webtransport=true)\n", .{});
         } else {
-            if (!WithWT and enable_wt_env != null and std.mem.eql(u8, enable_wt_env.?, "1")) {
-                std.debug.print("WebTransport: disabled at build time; ignoring H3_WEBTRANSPORT=1\n", .{});
-            }
             server.h3_config = try h3.H3Config.initWithDefaults();
         }
         errdefer if (server.h3_config) |*h| h.deinit();
 
-        // Enable WT streams if requested and feature compiled
-        const enable_wts = std.process.getEnvVarOwned(allocator, "H3_WT_STREAMS") catch null;
-        defer if (enable_wts) |wts| allocator.free(wts);
-        server.wt.enable_streams = (WithWT and enable_wts != null and std.mem.eql(u8, enable_wts.?, "1"));
-        if (enable_wts != null and std.mem.eql(u8, enable_wts.?, "1") and !WithWT) {
-            std.debug.print("WebTransport Streams: disabled at build time; ignoring H3_WT_STREAMS=1\n", .{});
-        } else if (server.wt.enable_streams) {
-            std.debug.print("WebTransport Streams: enabled (H3_WT_STREAMS=1)\n", .{});
-        }
-
-        // Enable WT bidi streams if requested and feature compiled
-        const enable_wtb = std.process.getEnvVarOwned(allocator, "H3_WT_BIDI") catch null;
-        defer if (enable_wtb) |wb| allocator.free(wb);
-        server.wt.enable_bidi = (WithWT and enable_wtb != null and std.mem.eql(u8, enable_wtb.?, "1"));
-        if (enable_wtb != null and std.mem.eql(u8, enable_wtb.?, "1") and !WithWT) {
-            std.debug.print("WebTransport Bidi Streams: disabled at build time; ignoring H3_WT_BIDI=1\n", .{});
-        } else if (server.wt.enable_bidi) {
-            std.debug.print("WebTransport Bidi Streams: enabled (H3_WT_BIDI=1)\n", .{});
-        }
+        server.wt.enable_streams = overrides.wt_streams and WithWT;
+        server.wt.enable_bidi = overrides.wt_bidi and WithWT;
 
         // Enable debug logging if requested
         if (server.config.enable_debug_logging) {
@@ -997,8 +856,8 @@ pub const QuicServer = struct {
         // Prepare a minimal server instance with just the fields we need
         var server: QuicServer = undefined;
         server.allocator = allocator;
-        server.stream_states = std.hash_map.HashMap(StreamKey, *RequestState, StreamKeyContext, 80).init(allocator);
-        server.h3 = .{ .dgram_flows = std.hash_map.HashMap(FlowKey, *RequestState, FlowKeyContext, 80).init(allocator) };
+        server.stream_states = std.hash_map.HashMap(conn_state.StreamKey, *RequestState, conn_state.StreamKeyContext, 80).init(allocator);
+        server.h3 = try H3State.init(allocator);
 
         // Create a dummy connection
         const conn_ptr = try allocator.create(connection.Connection);
@@ -1074,7 +933,7 @@ pub const QuicServer = struct {
 
     fn closeConnection(self: *QuicServer, conn: *connection.Connection) void {
         // Clean up any pending stream states for this connection first
-        var to_remove = std.ArrayList(StreamKey){};
+        var to_remove = std.ArrayList(conn_state.StreamKey){};
         defer to_remove.deinit(self.allocator);
         {
             var it = self.stream_states.iterator();
@@ -1095,7 +954,7 @@ pub const QuicServer = struct {
         // Purge any remaining H3 DATAGRAM flow mappings for this connection
         {
             var it2 = self.h3.dgram_flows.iterator();
-            var flow_keys_to_remove = std.ArrayList(FlowKey){};
+            var flow_keys_to_remove = std.ArrayList(conn_state.FlowKey){};
             defer flow_keys_to_remove.deinit(self.allocator);
             while (it2.next()) |entry| {
                 const fk = entry.key_ptr.*;

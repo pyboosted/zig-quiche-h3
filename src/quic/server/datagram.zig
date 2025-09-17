@@ -4,6 +4,7 @@ const h3_datagram = @import("h3").datagram;
 const connection = @import("connection");
 const errors = @import("errors");
 const server_logging = @import("logging.zig");
+const conn_state = @import("connection_state.zig");
 
 pub fn Impl(comptime S: type) type {
     return struct {
@@ -110,7 +111,7 @@ pub fn Impl(comptime S: type) type {
             const h3_payload = payload[payload_offset..];
             server_logging.debugPrint(self, "[DEBUG] H3 DATAGRAM payload size: {} bytes\n", .{h3_payload.len});
 
-            const flow_key = Self.FlowKey{ .conn = conn, .flow_id = flow_id };
+            const flow_key = conn_state.FlowKey{ .conn = conn, .flow_id = flow_id };
             server_logging.debugPrint(self, "[DEBUG] Looking up flow_key: conn={*}, flow_id={}\n", .{ conn, flow_id });
 
             if (self.h3.dgram_flows.get(flow_key)) |state| {
