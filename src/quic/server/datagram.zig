@@ -35,17 +35,16 @@ pub fn Impl(comptime S: type) type {
 
         /// Try to read and dispatch QUIC/H3 DATAGRAMs for a connection
         pub fn processDatagrams(self: *Self, conn: *connection.Connection) !void {
-            var small_buf: [2048]u8 = undefined;
             while (true) {
                 const hint = conn.conn.dgramRecvFrontLen();
+                var buf: []u8 = conn.datagram_buf[0..];
                 var use_heap = false;
-                var buf: []u8 = small_buf[0..];
                 if (hint) |h| {
-                    if (h > small_buf.len) {
+                    if (h > conn.datagram_buf.len) {
                         buf = try std.heap.c_allocator.alloc(u8, h);
                         use_heap = true;
                     } else {
-                        buf = small_buf[0..h];
+                        buf = conn.datagram_buf[0..h];
                     }
                 }
 

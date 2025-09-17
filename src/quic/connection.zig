@@ -57,6 +57,9 @@ pub const Connection = struct {
     active_requests: usize = 0,
     active_downloads: usize = 0,
 
+    // Reusable buffer for QUIC/H3 DATAGRAMs
+    datagram_buf: [2048]u8 = undefined,
+
     // Debug
     qlog_path: ?[]const u8 = null,
 
@@ -173,6 +176,7 @@ pub fn createConnection(
         .dcid = undefined,
         .dcid_len = @intCast(dcid.len),
         .timeout_deadline_ms = 0,
+        .datagram_buf = undefined,
         .qlog_path = qlog_path,
     };
 
