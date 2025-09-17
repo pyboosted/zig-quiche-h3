@@ -1,7 +1,7 @@
 const std = @import("std");
 const http = @import("http");
 const routing = @import("routing");
-const enums = std.enums;
+const core = @import("matcher_core.zig");
 
 pub const RouteDef = struct {
     pattern: []const u8,
@@ -13,22 +13,12 @@ pub const RouteDef = struct {
     on_body_complete: ?http.handler.OnBodyComplete = null,
 };
 
-const LiteralEntry = struct {
-    path: []const u8,
-    method: http.Method,
-    route: routing.FoundRoute,
-};
-
-const PatternEntry = struct {
-    pattern: []const u8,
-    method: http.Method,
-    route: routing.FoundRoute,
-};
-
 pub const Builder = struct {
     allocator: std.mem.Allocator,
-    lits: std.ArrayListUnmanaged(LiteralEntry) = .{},
-    pats: std.ArrayListUnmanaged(PatternEntry) = .{},
+    lits: std.ArrayListUnmanaged(core.LiteralEntry) = .{},
+    pats: std.ArrayListUnmanaged(core.PatternEntry) = .{},
+    segments: std.ArrayListUnmanaged(core.Segment) = .{},
+    pattern_storage: std.ArrayListUnmanaged([]u8) = .{},
 
     pub const Error = error{MissingStreamingCallbacks};
 
@@ -38,10 +28,12 @@ pub const Builder = struct {
 
     pub fn deinit(self: *Builder) void {
         // Free copied strings and the arrays
-        for (self.lits.items) |e| self.allocator.free(e.path);
-        for (self.pats.items) |e| self.allocator.free(e.pattern);
+        for (self.lits.items) |e| self.allocator.free(@constCast(e.path));
+        for (self.pattern_storage.items) |p| self.allocator.free(p);
         self.lits.deinit(self.allocator);
         self.pats.deinit(self.allocator);
+        self.segments.deinit(self.allocator);
+        self.pattern_storage.deinit(self.allocator);
         self.* = .{ .allocator = self.allocator };
     }
 
@@ -56,10 +48,22 @@ pub const Builder = struct {
             .on_wt_session = null,
             .on_wt_datagram = null,
         };
-        if (isStaticPath(pat_copy)) {
+        if (core.isStaticPath(pat_copy)) {
             try self.lits.append(self.allocator, .{ .path = pat_copy, .method = def.method, .route = fr });
         } else {
-            try self.pats.append(self.allocator, .{ .pattern = pat_copy, .method = def.method, .route = fr });
+            errdefer self.allocator.free(pat_copy);
+
+            const seg_len = core.countSegments(pat_copy);
+            const off = self.segments.items.len;
+            const seg_slice = try self.segments.addManyAsSlice(self.allocator, seg_len);
+            errdefer self.segments.items.len = off;
+            _ = core.writeSegments(pat_copy, seg_slice, 0);
+
+            const storage_prev_len = self.pattern_storage.items.len;
+            try self.pattern_storage.append(self.allocator, pat_copy);
+            errdefer self.pattern_storage.items.len = storage_prev_len;
+
+            try self.pats.append(self.allocator, .{ .off = off, .len = seg_len, .method = def.method, .route = fr });
         }
     }
 
@@ -153,17 +157,29 @@ pub const Builder = struct {
         // Move entries into owned slices; keep strings owned as-is
         const lits = try self.lits.toOwnedSlice(self.allocator);
         const pats = try self.pats.toOwnedSlice(self.allocator);
+        const segs = try self.segments.toOwnedSlice(self.allocator);
+        const pat_storage = try self.pattern_storage.toOwnedSlice(self.allocator);
         // Reset builder containers to avoid double-free
         self.lits = .{};
         self.pats = .{};
-        return DynMatcher{ .allocator = self.allocator, .literals = lits, .patterns = pats };
+        self.segments = .{};
+        self.pattern_storage = .{};
+        return DynMatcher{
+            .allocator = self.allocator,
+            .literals = lits,
+            .patterns = pats,
+            .segments = segs,
+            .pattern_storage = pat_storage,
+        };
     }
 };
 
 pub const DynMatcher = struct {
     allocator: std.mem.Allocator,
-    literals: []LiteralEntry,
-    patterns: []PatternEntry,
+    literals: []core.LiteralEntry,
+    patterns: []core.PatternEntry,
+    segments: []core.Segment,
+    pattern_storage: [][]u8,
     scratch_params: [16]routing.ParamSpan = undefined,
 
     pub fn intoMatcher(self: *DynMatcher) routing.Matcher {
@@ -171,10 +187,12 @@ pub const DynMatcher = struct {
     }
 
     pub fn deinit(self: *DynMatcher) void {
-        for (self.literals) |e| self.allocator.free(e.path);
-        for (self.patterns) |e| self.allocator.free(e.pattern);
+        for (self.literals) |e| self.allocator.free(@constCast(e.path));
+        for (self.pattern_storage) |p| self.allocator.free(p);
         self.allocator.free(self.literals);
         self.allocator.free(self.patterns);
+        self.allocator.free(self.segments);
+        self.allocator.free(self.pattern_storage);
         self.* = undefined;
     }
 
@@ -182,95 +200,17 @@ pub const DynMatcher = struct {
 
     fn matchFn(ctx: *anyopaque, method: http.Method, path: []const u8, out: *routing.MatchResult) bool {
         const self: *DynMatcher = @ptrCast(@alignCast(ctx));
-        // Literal fast path with 405 aggregation
-        var lit_allowed = enums.EnumSet(http.Method){};
-        for (self.literals, 0..) |e, i| {
-            if (std.mem.eql(u8, e.path, path)) {
-                if (e.method == method) {
-                    out.* = .{ .Found = .{ .route = &self.literals[i].route, .params = &.{} } };
-                    return true;
-                }
-                if (method == .HEAD and e.method == .GET) {
-                    out.* = .{ .Found = .{ .route = &self.literals[i].route, .params = &.{} } };
-                    return true;
-                }
-                lit_allowed.insert(e.method);
-            }
-        }
-        if (lit_allowed.count() > 0) {
-            out.* = .{ .PathMatched = .{ .allowed = lit_allowed } };
-            return true;
-        }
-
-        // Pattern routes with 405 aggregation
-        var allowed = enums.EnumSet(http.Method){};
-        for (self.patterns, 0..) |e, i| {
-            var span_count: usize = 0;
-            if (matchPattern(e.pattern, path, self.scratch_params[0..], &span_count)) {
-                allowed.insert(e.method);
-                if (e.method == method or (method == .HEAD and e.method == .GET)) {
-                    out.* = .{ .Found = .{ .route = &self.patterns[i].route, .params = self.scratch_params[0..span_count] } };
-                    return true;
-                }
-            }
-        }
-        if (allowed.count() > 0) {
-            out.* = .{ .PathMatched = .{ .allowed = allowed } };
-            return true;
-        }
-        out.* = .NotFound;
-        return true;
+        return core.matchPath(
+            self.literals,
+            self.patterns,
+            self.segments,
+            method,
+            path,
+            self.scratch_params[0..],
+            out,
+        );
     }
 };
-
-fn isStaticPath(s: []const u8) bool {
-    return std.mem.indexOfScalar(u8, s, ':') == null and std.mem.indexOfScalar(u8, s, '*') == null;
-}
-
-fn nextSeg(s: []const u8, idx: *usize) ?[]const u8 {
-    var i = idx.*;
-    while (i < s.len and s[i] == '/') : (i += 1) {}
-    if (i >= s.len) {
-        idx.* = i;
-        return null;
-    }
-    const start = i;
-    while (i < s.len and s[i] != '/') : (i += 1) {}
-    const seg = s[start..i];
-    idx.* = i;
-    return seg;
-}
-
-fn matchPattern(pattern: []const u8, path: []const u8, spans: []routing.ParamSpan, span_count: *usize) bool {
-    var ip: usize = 0;
-    var ix: usize = 0;
-    span_count.* = 0;
-    while (true) {
-        const sp = nextSeg(pattern, &ip) orelse break;
-        if (sp.len == 1 and sp[0] == '*') {
-            // Capture the remainder of the path; skip a leading '/' if present
-            var start = ix;
-            if (start < path.len and path[start] == '/') start += 1;
-            if (span_count.* < spans.len) {
-                spans[span_count.*] = .{ .name = "*", .value = path[start..] };
-                span_count.* += 1;
-            }
-            return true;
-        }
-        if (sp.len > 0 and sp[0] == ':') {
-            const seg = nextSeg(path, &ix) orelse return false;
-            if (span_count.* < spans.len) {
-                spans[span_count.*] = .{ .name = sp[1..], .value = seg };
-                span_count.* += 1;
-            }
-            continue;
-        }
-        const seg_path = nextSeg(path, &ix) orelse return false;
-        if (!std.mem.eql(u8, sp, seg_path)) return false;
-    }
-    var tmp = ix;
-    return nextSeg(path, &tmp) == null;
-}
 
 // ---- Unit Tests ----
 const testing = std.testing;
