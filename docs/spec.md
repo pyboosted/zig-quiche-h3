@@ -48,7 +48,8 @@ Where relevant I cite `quiche` sources and docs so you can jump straight to the 
     /ffi/ (imported quiche.h + Zig wrappers)
     /net/ (socket, epoll/kqueue, timers, batching)
     /quic/ (conn map, accept/recv/send, pacing, qlog)
-    /h3/ (h3 state, routing, body streams, trailers)
+    /h3/ (h3 state, body streams, trailers)
+    /routing/ (compile-time generator, dynamic builder, shared matcher core)
     /dgram/ (QUIC DATAGRAM + H3 DATAGRAM glue)
     /util/ (alloc, arena buffers, vectors)
   /tests
@@ -100,7 +101,8 @@ Common flags:
 Examples and tests:
 
 - UDP echo: `zig build echo` (send with `nc -u localhost 4433`).
-- QUIC server example (requires `-Dwith-libev=true`): `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
+  - QUIC server example (requires `-Dwith-libev=true`): `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
+  - Routing helpers live in `src/routing/`: the compile-time generator and dynamic builder both reuse `matcher_core.zig`, so handlers registered at runtime and compile time share the same precedence rules and wildcard/param parsing.
   - Examples now share a struct-based argument parser (`src/args.zig`): declare a struct, call `args.Parser(MyArgs).parse()`, and get automatic `--help` output plus short/long flag support.
 - Unit tests: `zig build test` or `zig test src/tests.zig`.
 
@@ -543,7 +545,7 @@ quiche_h3_conn_new_with_transport(conn, h3_config)
 ### 9.1 Unit tests (Zig)
 
 * **FFI wrappers**: creation/freeing of `quiche_config`, `h3_config`, error code translation, header conversion (Zig <-> `quiche_h3_header`), datagram send/recv glue.
-* **Router**: method/path matching, param extraction, wildcard globs.
+* **Router**: shared matcher core (`src/routing/matcher_core.zig`) exercised via both compile-time generator and runtime builder; covers method/path precedence, param extraction, wildcard globs.
 * **Body streaming**: backpressure and partial writes returning `Done`, trailers flow (`send_additional_headers(...is_trailer_section=true)` in the final phase). ([QUIC Docs][4])
 * **Timer wheel**: expiration, re-scheduling from `timeout()` durations (nanos), ensuring `on_timeout()` leads to new send opportunities. ([Docs.rs][2])
 

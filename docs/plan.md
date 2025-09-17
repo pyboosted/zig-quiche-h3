@@ -152,11 +152,12 @@ Status: Completed ✓
 - Test: `/api/users/:id` returns JSON; correct headers/status ✓
 
 Implementation Details:
-- Created HTTP abstraction layer in `src/http/`:
-  - `router.zig`: Path-based routing with parameter extraction (`:id` patterns)
-  - `request.zig`: Request object with headers, params, arena allocator
-  - `response.zig`: Response builder with status, headers, body methods
-  - `json.zig`: Type-safe JSON serialization using std.json API
+- Created dedicated routing + HTTP layers:
+  - `src/routing/generator.zig`: compile-time matcher tables built from `RouteDef` arrays.
+  - `src/routing/dynamic.zig`: runtime builder emitting the same literal/pattern layout using `matcher_core.zig`.
+  - `src/routing/matcher_core.zig`: shared literal/pattern segment tables and `matchPath`, keeping HEAD/405 handling consistent.
+  - `src/http/request.zig`: Request object with headers, params, arena allocator.
+  - `src/http/response.zig` / `response/*.zig`: Response builders, streaming helpers, JSON support via `src/http/json.zig`.
 - Router features:
   - Pattern matching for static paths and parameters (`:id`)
   - Wildcard support (`/files/*`)
@@ -325,7 +326,7 @@ Status: Completed ✓
   - E2E: `tests/e2e/basic/h3_dgram.test.ts`
 
 Milestone 8: WebTransport (Experimental) (Day 23–25)
-Status: Experimental — feature-flagged (enable with `-Dwith-webtransport=true` + `H3_WEBTRANSPORT=1`)
+Status: Completed ✓ — server-side WT surfaces (sessions, datagrams, uni/bidi streams) land behind the existing build/runtime flags; a true client/interop harness remains future work.
 
 Delivered (server):
 - Extended CONNECT session management (`:protocol = webtransport`) negotiated via SETTINGS.
@@ -356,7 +357,7 @@ Public APIs:
 - Server: `openWtUniStream(conn, session_state)`, `openWtBidiStream(conn, session_state)`, `sendWtStream(conn, stream, data, fin)`, `queueWtRegisterCapsule(session_state, stream_id)`.
 
 Testing status:
-- Current `wt-client` is a stub (no real handshake); server paths validated by build-time scaffolding and unit-level pieces. Real interop and a full client will be implemented next.
+- Current `wt-client` is a stub (no real handshake); server paths validated by unit-level pieces and simulated flows. A fully-fledged client/interop validation remains on the follow-up list.
 
 Milestone 8.1: Operational Hardening & Tooling (September 2025)
 Status: Completed ✓
@@ -380,15 +381,18 @@ Interop checklist (for next milestone):
   - Use WebTransport JS API to open session; create uni/bidi streams; verify callbacks fire and data E2E succeeds.
 - Observe qlogs for stream events; compare with expectations.
 
-Milestone 9: Interop + Performance (Day 26–28)
-Status: Planned
-- Quick interop sanity with another stack (e.g., ngtcp2/quic-go) on basic H3 routes.
-- Metrics + qlog hooks; pacing/params tuning; initial throughput/latency targets.
-- Tests (targets):
-  - Interop basic success
-  - 10k req/s benchmark target on loopback
+Milestone 9: Full HTTP/3/WebTransport Client Harness
+Status: Planned — spec in progress
+- Implement a Zig (or mixed) client that exercises streaming bodies, DATAGRAMs, and WebTransport flows against the server.
+- Provide CLI/batch modes for regression tests and load generation; mirror the example routes to cover edge cases (range, trailers, WT streams, etc.).
+- Serve as the foundation for Bun FFI validation (client side) and future benchmarking.
 
-Milestone 10: Bun FFI (Day 29–30)
+Milestone 10: Interop + Performance (shifted after M9)
+Status: Planned — blocked on M9 client harness
+- Once the dedicated client exists, run interop passes (quiche apps, ngtcp2, Chrome) and gather throughput/latency baselines.
+- Add metrics/qlog hooks, pacing tuning, and high-load tests driven by the new client.
+
+Milestone 11: Bun FFI (Day 29–30)
 Status: Planned (partial smoke test done)
 - Export thin C ABI for Bun (`zig_h3_server_new/start/stop`, routing, response, datagrams, WT session DATAGRAMs, `zig_h3_version`).
 - JS example using `bun:ffi` (`dlopen`, `JSCallback` or polling mode) to run server and handle requests.

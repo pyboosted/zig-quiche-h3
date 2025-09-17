@@ -3,8 +3,8 @@
 ## Project Structure & Module Organization
 - `build.zig` — Zig build script; installs to `zig-out/bin/`.
 - `src/` — main code:
-  - `net/` (event loop, UDP), `quic/` (config, connection, server), `ffi/` (quiche C FFI).
-  - `examples/`: `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`.
+  - `net/` (event loop, UDP), `quic/` (config, connection, server), `routing/` (generator, dynamic builder, matcher core), `http/` (request/response surfaces), `ffi/` (quiche C FFI).
+  - `examples/`: `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`, `wt_client.zig` (stub client used by tests).
   - `main.zig` (smoke binary), `tests.zig` (unit tests).
 - `third_party/quiche/` — Cloudflare quiche submodule (do not edit).
 - `docs/` — design notes; `qlogs/` — QUIC qlog output.
@@ -13,12 +13,14 @@
 - Init deps: `git submodule update --init --recursive`.
 - Build quiche (default when not using system lib): `zig build quiche` or simply `zig build` (runs Cargo for quiche).
 - Use system quiche: `zig build -Dsystem-quiche=true`.
-- Common flags: `-Dquiche-profile=release|debug`, `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…`, `-Dlink-ssl=true`.
+- Common flags: `-Dquiche-profile=release|debug`, `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…`, `-Dlink-ssl=true`, `-Dwith-webtransport=false|true` (default true).
 - Build binary: `zig build` → `zig-out/bin/zig-quiche-h3`.
 - Smoke app: `zig build run` (prints quiche version).
-- Examples:
+- Examples (libev required for server binaries):
   - UDP echo: `zig build echo` → send with `nc -u localhost 4433`.
   - QUIC server: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
+  - QUIC dgram echo: `zig build quic-dgram-echo -- --port 4433 --cert … --key …`.
+  - WebTransport stub client: `zig build wt-client -- https://127.0.0.1:4433/wt/echo`.
 - Tests: `zig build test` or `zig test src/tests.zig`.
 
 ## Coding Style & Naming Conventions
@@ -38,12 +40,12 @@
 
 ## Testing Guidelines
 - Unit tests live near code or in `src/tests.zig` using `test "…" {}`; name tests with short, imperative phrases.
- - E2E tests use Bun 1.x and live under `tests/e2e/`:
-   - Setup: `bun install`
-   - Run: `bun test tests/e2e`
-   - Stress: `H3_STRESS=1 bun test`
-   - Coverage: `bun test --coverage`
-   - Note: some helpers assume curl has HTTP/3; if not, use the quiche client from `third_party/quiche`.
+- E2E tests use Bun 1.x and live under `tests/e2e/`:
+  - Setup: `bun install`
+  - Run: `bun test tests/e2e`
+  - Stress: `H3_STRESS=1 bun test`
+  - Coverage: `bun test --coverage`
+  - WT suite currently relies on the stub client; a full H3/WT client harness is scheduled for Milestone 9.
 
 ## High-Impact Tips (for assistants)
 - Build fast:
@@ -55,12 +57,14 @@
   - Smoke: `zig build run` (prints quiche version)
   - QUIC server: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`
   - QUIC dgram echo: `zig build quic-dgram-echo -- --port 4433 --cert … --key …`
+  - WebTransport stub client: `zig build wt-client -- https://127.0.0.1:4433/wt/echo`
   - Client: `cd third_party/quiche && cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`
 - Code conventions:
   - Use the `Response` API (`status`, `header`, `write`/`writeAll`, `end`, `sendTrailers`); avoid the older `sendHead/sendBody` style in docs.
   - H3 DATAGRAM: gate on peer support and use `Response.sendH3Datagram()`; route via `router.routeH3Datagram()`.
   - Never modify `third_party/` sources.
   - Run `zig fmt .` before commit.
+  - Routing logic flows through `src/routing/matcher_core.zig`; add shared helpers there when extending matching rules.
 - Debugging:
   - Enable qlog via server flags/config; inspect `qlogs/` outputs for handshake/flow issues.
   - If curl lacks HTTP/3, prefer the quiche client.

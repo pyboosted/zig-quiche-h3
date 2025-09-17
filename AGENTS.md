@@ -3,8 +3,8 @@
 ## Project Structure & Module Organization
 - `build.zig` — Zig build script; installs to `zig-out/bin/`.
 - `src/` — main code:
-  - `net/` (event loop, UDP), `quic/` (config, connection, server), `ffi/` (quiche C FFI).
-  - `examples/`: `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`.
+  - `net/` (event loop, UDP), `quic/` (config, connection, server), `routing/` (generator, dynamic builder, matcher core), `http/` (request/response surfaces), `ffi/` (quiche C FFI shims).
+  - `examples/`: `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`, `wt_client.zig` (WebTransport stub client).
   - `main.zig` (smoke binary), `tests.zig` (unit tests).
 - `third_party/quiche/` — Cloudflare quiche submodule (do not edit).
 - `docs/` — design notes; `qlogs/` — QUIC qlog output.
@@ -16,9 +16,11 @@
 - Common flags: `-Dquiche-profile=release|debug`, `-Dwith-libev=true -Dlibev-include=… -Dlibev-lib=…`, `-Dlink-ssl=true`, `-Dwith-webtransport=false|true` (default: true).
 - Build binary: `zig build` → `zig-out/bin/zig-quiche-h3`.
 - Smoke app: `zig build run` (prints quiche version).
-- Examples (require `-Dwith-libev=true`):
+- Examples (require `-Dwith-libev=true` for server-style binaries):
   - UDP echo: `zig build echo` → send with `nc -u localhost 4433`.
   - QUIC server: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
+  - QUIC DATAGRAM echo: `zig build quic-dgram-echo -- --port 4433 --cert … --key …`.
+  - WebTransport client stub (no real handshake): `zig build wt-client -- https://host:port/wt/echo`.
 - Tests: `zig build test` or `zig test src/tests.zig`.
 
 ## Coding Style & Naming Conventions
@@ -43,6 +45,7 @@
   - Stress: `H3_STRESS=1 bun test`
   - Coverage: `bun test --coverage`
   - Note: curl helpers require HTTP/3 support; otherwise use the quiche client above.
+  - WebTransport suite currently relies on the stub `wt-client`; a full client harness is planned in the roadmap (Milestone 9).
 - Manual: run the server, then from `third_party/quiche`: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`.
 
 ## Commit & Pull Request Guidelines
@@ -63,12 +66,15 @@
   - Smoke: `zig build run`
   - QUIC server: `zig build quic-server -- --port 4433 --cert … --key …`
   - QUIC dgram echo: `zig build quic-dgram-echo -- --port 4433 --cert … --key …`
+  - WebTransport stub client: `zig build wt-client -- https://127.0.0.1:4433/wt/echo`
 - Coding surfaces to prefer:
   - `Response` API: `status/header/write/writeAll/end/sendTrailers` (not the deprecated sendHead/sendBody docs pattern).
   - H3 DATAGRAM: `router.routeH3Datagram()` and `Response.sendH3Datagram()`; QUIC DATAGRAM via `QuicServer.onDatagram()` and `sendDatagram()`.
   - WebTransport: compiled in by default; use `H3_WEBTRANSPORT=1` at runtime. WT shims live under `src/quic/server/webtransport.zig`.
   - Don’t touch `third_party/`.
+  - Routing: both compile-time and dynamic paths flow through `src/routing/matcher_core.zig`; keep new logic inside shared helpers when possible.
 - Housekeeping:
   - Run `zig fmt .` before proposing patches.
   - Keep links canonical (no tracking params) in docs.
   - Use `rg` for fast code/search and read files in ≤250‑line chunks when tooling limits apply.
+  - Roadmap: M9 introduces a dedicated HTTP/3/WebTransport client harness; interop/perf tuning and Bun FFI milestones now follow it.
