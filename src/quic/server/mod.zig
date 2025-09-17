@@ -61,7 +61,9 @@ pub const QuicServer = struct {
     local_conn_id_len: usize = 16, // Use 16 bytes for our SCIDs
     send_buf: [2048]u8 = undefined, // Buffer for sending packets
     conn_id_seed: [32]u8, // HMAC-SHA256 key for connection ID derivation (like Rust)
-    timeout_timer_started: bool = false, // Track if periodic timer for checking connection timeouts is started
+    timeout_timer: ?EventLoop.TimerHandle = null,
+    timeout_dirty: bool = false,
+    next_timeout_deadline_ms: ?i64 = null,
 
     // HTTP/3 configuration
     h3_config: ?h3.H3Config = null,
@@ -252,6 +254,11 @@ pub const QuicServer = struct {
     pub fn deinit(self: *QuicServer) void {
         self.stop();
 
+        if (self.timeout_timer) |handle| {
+            self.event_loop.destroyTimer(handle);
+            self.timeout_timer = null;
+        }
+
         // Clean up connections (including their H3 connections)
         var it = self.connections.map.iterator();
         while (it.next()) |entry| {
@@ -342,10 +349,6 @@ pub const QuicServer = struct {
             try self.event_loop.addUdpIo(sock.fd, onUdpReadable, self);
             std.debug.print("QUIC server bound to 0.0.0.0:{d}\n", .{self.config.bind_port});
         }
-
-        // Start periodic timer for checking connection timeouts (50ms interval)
-        try self.event_loop.addTimer(0.05, 0.05, onTimeoutTimer, self);
-        self.timeout_timer_started = true;
     }
 
     pub fn run(self: *QuicServer) !void {
@@ -404,11 +407,9 @@ pub const QuicServer = struct {
 
     fn onTimeoutTimer(user_data: *anyopaque) void {
         const self: *QuicServer = @ptrCast(@alignCast(user_data));
-        // TODO: Implement checkTimeouts or use existing timeout handling
-        _ = self;
-        // self.checkTimeouts() catch |err| {
-        //     std.debug.print("Error checking timeouts: {}\n", .{err});
-        // };
+        self.checkTimeouts() catch |err| {
+            std.debug.print("Error checking timeouts: {}\n", .{err});
+        };
     }
 
     // Derive connection ID using HMAC-SHA256 (like Rust implementation)
@@ -648,11 +649,12 @@ pub const QuicServer = struct {
                 }
                 try self.drainEgress(cconn);
                 const timeout_ms2 = cconn.conn.timeoutAsMillis();
-                try self.updateTimer(cconn, timeout_ms2);
+                self.updateTimer(cconn, timeout_ms2);
                 if (cconn.conn.isClosed()) {
                     self.closeConnection(cconn);
                 }
             }
+            try self.flushTimeoutReschedule();
         }
     }
 
@@ -756,15 +758,87 @@ pub const QuicServer = struct {
         return conn;
     }
 
-    /// Update the connection's timeout timer based on its current timeout value
-    pub fn updateTimer(self: *QuicServer, conn: *connection.Connection, timeout_ms: ?u64) !void {
-        _ = self;
-        // For now, we rely on the global timer that calls onTimeoutTimer periodically
-        // In a production implementation, we would update a per-connection timer here
-        // to fire exactly when the connection timeout expires
-        _ = conn;
-        _ = timeout_ms;
-        // TODO: Implement per-connection timer management
+    /// Update the connection's timeout deadline based on quiche's reported timeout.
+    pub fn updateTimer(self: *QuicServer, conn: *connection.Connection, timeout_ms: u64) void {
+        const sentinel = std.math.maxInt(u64);
+        if (timeout_ms == sentinel) {
+            conn.timeout_deadline_ms = null;
+        } else {
+            const now = nowMillis();
+            const delta_i64 = std.math.cast(i64, timeout_ms) orelse std.math.maxInt(i64);
+            var deadline: i64 = now;
+            if (timeout_ms > 0) {
+                deadline = std.math.add(i64, now, delta_i64) catch std.math.maxInt(i64);
+            }
+            conn.timeout_deadline_ms = deadline;
+        }
+        self.timeout_dirty = true;
+    }
+
+    fn nowMillis() i64 {
+        return std.time.milliTimestamp();
+    }
+
+    fn flushTimeoutReschedule(self: *QuicServer) !void {
+        if (!self.timeout_dirty) return;
+        self.timeout_dirty = false;
+        try self.rescheduleTimeoutTimer();
+    }
+
+    fn rescheduleTimeoutTimer(self: *QuicServer) !void {
+        const earliest = self.findEarliestDeadline();
+        if (earliest) |deadline| {
+            self.next_timeout_deadline_ms = deadline;
+            const now = nowMillis();
+            var delta_ms: i64 = deadline - now;
+            if (delta_ms < 0) delta_ms = 0;
+            const delta_s = @as(f64, @floatFromInt(delta_ms)) / 1000.0;
+            if (self.timeout_timer == null) {
+                self.timeout_timer = try self.event_loop.createTimer(onTimeoutTimer, self);
+            }
+            self.event_loop.startTimer(self.timeout_timer.?, delta_s, 0);
+        } else {
+            self.next_timeout_deadline_ms = null;
+            if (self.timeout_timer) |handle| {
+                self.event_loop.stopTimer(handle);
+            }
+        }
+    }
+
+    fn findEarliestDeadline(self: *QuicServer) ?i64 {
+        var earliest: ?i64 = null;
+        var iter = self.connections.map.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.*.timeout_deadline_ms) |deadline| {
+                if (earliest == null or deadline < earliest.?) {
+                    earliest = deadline;
+                }
+            }
+        }
+        return earliest;
+    }
+
+    fn checkTimeouts(self: *QuicServer) !void {
+        const now = nowMillis();
+        var due = std.ArrayList(*connection.Connection).init(self.allocator);
+        defer due.deinit();
+        var iter = self.connections.map.iterator();
+        while (iter.next()) |entry| {
+            const conn = entry.value_ptr.*;
+            if (conn.timeout_deadline_ms) |deadline| {
+                if (deadline <= now) {
+                    try due.append(conn);
+                }
+            }
+        }
+
+        for (due.items) |conn| {
+            self.onTimeout(conn) catch |err| {
+                std.debug.print("Error handling timeout: {}\n", .{err});
+            };
+        }
+
+        try self.flushTimeoutReschedule();
     }
 
     pub fn drainEgress(self: *QuicServer, conn: *connection.Connection) !void {
@@ -920,18 +994,19 @@ pub const QuicServer = struct {
         self.h3.dgrams_sent += 1;
     }
 
-    fn onTimeout(self: *QuicServer, conn: *connection.Connection) void {
+    fn onTimeout(self: *QuicServer, conn: *connection.Connection) !void {
         conn.conn.onTimeout();
-
-        // Drain egress after timeout using the connection's socket
-        self.drainEgress(conn) catch {};
-
+        try self.drainEgress(conn);
+        const timeout_ms = conn.conn.timeoutAsMillis();
+        self.updateTimer(conn, timeout_ms);
         if (conn.conn.isClosed()) {
             self.closeConnection(conn);
         }
     }
 
     fn closeConnection(self: *QuicServer, conn: *connection.Connection) void {
+        conn.timeout_deadline_ms = null;
+        self.timeout_dirty = true;
         // Clean up any pending stream states for this connection first
         var to_remove = std.ArrayList(conn_state.StreamKey){};
         defer to_remove.deinit(self.allocator);

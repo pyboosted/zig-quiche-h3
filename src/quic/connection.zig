@@ -2,6 +2,7 @@ const std = @import("std");
 const quiche = @import("quiche");
 
 const c = quiche.c;
+const event_loop = @import("net/event_loop.zig");
 
 // Connection key for hash map - includes DCID and address family
 pub const ConnectionKey = struct {
@@ -25,8 +26,7 @@ pub const ConnectionKeyContext = struct {
     }
 };
 
-// Timer handle from event loop (will be defined there)
-pub const TimerHandle = opaque {};
+pub const TimerHandle = event_loop.TimerHandle;
 
 // Connection state
 pub const Connection = struct {
@@ -46,8 +46,7 @@ pub const Connection = struct {
     dcid_len: u8,
 
     // State tracking
-    timeout_deadline_ms: i64,
-    timer_handle: ?*TimerHandle = null,
+    timeout_deadline_ms: ?i64 = null,
     handshake_logged: bool = false,
 
     // HTTP/3 connection (lazy-initialized)
@@ -175,7 +174,7 @@ pub fn createConnection(
         .scid = scid,
         .dcid = undefined,
         .dcid_len = @intCast(dcid.len),
-        .timeout_deadline_ms = 0,
+        .timeout_deadline_ms = null,
         .datagram_buf = undefined,
         .qlog_path = qlog_path,
     };

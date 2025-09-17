@@ -17,7 +17,7 @@ With those caveats in mind, the server is stable enough for a complementary HTTP
 
 ## Server Prerequisite
 
-Before implementation we must finish the server-side timeout loop (`onTimeoutTimer` / `updateTimer` in `src/quic/server/mod.zig`). Once that lands (tracked separately), the client can rely on timely idle cleanup and retransmit wakeups.
+The server-side timeout loop (`onTimeoutTimer` / `updateTimer` in `src/quic/server/mod.zig`) is now implemented, so the client can rely on idle connections being reaped and retransmit timers firing.
 
 **Goal:** Develop a `zig-quiche-h3` HTTP/3 **client** (in the same repository) using Cloudflare’s `quiche` library, analogous to the current server implementation. The client should be capable of performing **HTTP/3 requests over QUIC** and supporting all major HTTP/3 features. Specifically, the client will support:
 

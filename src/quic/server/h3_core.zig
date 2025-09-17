@@ -394,7 +394,7 @@ pub fn Impl(comptime S: type) type {
 
             try self.drainEgress(conn);
             const timeout_ms = conn.conn.timeoutAsMillis();
-            try self.updateTimer(conn, timeout_ms);
+            self.updateTimer(conn, timeout_ms);
         }
 
         pub fn sendErrorResponse(self: *Self, h3_conn: *h3.H3Connection, quic_conn: *quiche.Connection, stream_id: u64, status_code: u16) !void {

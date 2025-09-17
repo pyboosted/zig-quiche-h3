@@ -26,6 +26,10 @@ const TimerWatcher = struct {
     user_data: *anyopaque,
 };
 
+pub const TimerHandle = struct {
+    watcher: *TimerWatcher,
+};
+
 const SignalWatcher = struct {
     sig: c.ev_signal = undefined,
     cb: SignalCallback,
@@ -113,22 +117,43 @@ pub const EventLoop = struct {
     }
 
     pub fn addTimer(self: *EventLoop, after_s: f64, repeat_s: f64, cb: TimerCallback, user_data: *anyopaque) !void {
+        const handle = try self.createTimer(cb, user_data);
+        self.startTimer(handle, after_s, repeat_s);
+    }
+
+    pub fn createTimer(self: *EventLoop, cb: TimerCallback, user_data: *anyopaque) !TimerHandle {
         const w = try self.allocator.create(TimerWatcher);
         w.* = .{ .cb = cb, .user_data = user_data };
-        // Zero-initialize the ev_timer structure first
         w.timer = std.mem.zeroes(@TypeOf(w.timer));
-        // Manual init since ev_timer_init macro can't be imported
         w.timer.cb = timer_dispatch;
-        // ev_timer_start will convert relative time to absolute internally
-        // when the timer hasn't been started before
+        try self.timer_watchers.append(self.allocator, w);
+        return .{ .watcher = w };
+    }
+
+    pub fn startTimer(self: *EventLoop, handle: TimerHandle, after_s: f64, repeat_s: f64) void {
+        const w = handle.watcher;
+        if (w.timer.active != 0) {
+            c.ev_timer_stop(self.loop, &w.timer);
+        }
         w.timer.at = after_s;
         w.timer.repeat = repeat_s;
         c.ev_timer_start(self.loop, &w.timer);
-        errdefer {
+    }
+
+    pub fn stopTimer(self: *EventLoop, handle: TimerHandle) void {
+        const w = handle.watcher;
+        if (w.timer.active != 0) {
             c.ev_timer_stop(self.loop, &w.timer);
-            self.allocator.destroy(w);
         }
-        try self.timer_watchers.append(self.allocator, w);
+    }
+
+    pub fn destroyTimer(self: *EventLoop, handle: TimerHandle) void {
+        const w = handle.watcher;
+        if (w.timer.active != 0) {
+            c.ev_timer_stop(self.loop, &w.timer);
+        }
+        self.removeTimerWatcher(w);
+        self.allocator.destroy(w);
     }
 
     pub fn addSigint(self: *EventLoop, cb: SignalCallback, user_data: *anyopaque) !void {
@@ -153,6 +178,16 @@ pub const EventLoop = struct {
             self.allocator.destroy(w);
         }
         try self.sig_watchers.append(self.allocator, w);
+    }
+
+    fn removeTimerWatcher(self: *EventLoop, target: *TimerWatcher) void {
+        var i: usize = 0;
+        while (i < self.timer_watchers.items.len) : (i += 1) {
+            if (self.timer_watchers.items[i] == target) {
+                _ = self.timer_watchers.swapRemove(i);
+                return;
+            }
+        }
     }
 };
 
