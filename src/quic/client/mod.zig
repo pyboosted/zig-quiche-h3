@@ -22,6 +22,7 @@ const QuicServer = if (builtin.is_test) server_pkg.QuicServer else struct {};
 const H3Connection = h3.H3Connection;
 const H3Config = h3.H3Config;
 const h3_datagram = h3.datagram;
+const webtransport = @import("webtransport.zig");
 
 pub const HeaderPair = struct {
     name: []const u8,
@@ -138,6 +139,11 @@ const FetchState = struct {
     headers: std.array_list.Managed(HeaderPair),
     trailers: std.array_list.Managed(HeaderPair),
     have_headers: bool = false,
+
+    // WebTransport extensions - reusing existing state machine
+    is_webtransport: bool = false,
+    wt_session: ?*webtransport.WebTransportSession = null,
+    wt_datagrams_received: u32 = 0,
 
     fn init(allocator: std.mem.Allocator) !*FetchState {
         const self = try allocator.create(FetchState);
@@ -259,6 +265,9 @@ pub const QuicClient = struct {
 
     requests: AutoHashMap(u64, *FetchState),
 
+    // WebTransport sessions (stream_id -> session)
+    wt_sessions: AutoHashMap(u64, *webtransport.WebTransportSession),
+
     // Plain QUIC datagram callback
     on_quic_datagram: ?*const fn (client: *QuicClient, payload: []const u8, user: ?*anyopaque) void = null,
     on_quic_datagram_user: ?*anyopaque = null,
@@ -351,7 +360,10 @@ pub const QuicClient = struct {
             try quiche.enableDebugLogging(logging.debugLogCallback, log_ctx);
         }
 
-        var h3_cfg = try H3Config.initWithDefaults();
+        var h3_cfg = if (cfg.enable_webtransport)
+            try H3Config.initWithWebTransport()
+        else
+            try H3Config.initWithDefaults();
         var h3_cfg_cleanup = true;
         errdefer if (h3_cfg_cleanup) h3_cfg.deinit();
 
@@ -389,6 +401,7 @@ pub const QuicClient = struct {
             .server_port = null,
             .log_context = log_ctx,
             .requests = AutoHashMap(u64, *FetchState).init(allocator),
+            .wt_sessions = AutoHashMap(u64, *webtransport.WebTransportSession).init(allocator),
         };
 
         self.timeout_timer = try loop.createTimer(onQuicTimeout, self);
@@ -437,6 +450,21 @@ pub const QuicClient = struct {
             entry.value_ptr.*.destroy();
         }
         self.requests.deinit();
+
+        var wt_it = self.wt_sessions.iterator();
+        while (wt_it.next()) |entry| {
+            const session = entry.value_ptr.*;
+            // Free any queued datagrams
+            for (session.datagram_queue.items) |dgram| {
+                self.allocator.free(dgram);
+            }
+            // Deinit the queue itself
+            session.datagram_queue.deinit(self.allocator);
+            // Free the allocated path before destroying the session
+            self.allocator.free(session.path);
+            self.allocator.destroy(session);
+        }
+        self.wt_sessions.deinit();
 
         if (self.socket) |*sock| {
             sock.close();
@@ -711,6 +739,102 @@ pub const QuicClient = struct {
         self.afterQuicProgress();
     }
 
+    /// Open a WebTransport session via Extended CONNECT
+    /// Returns a session handle that can be used to send datagrams and manage the session
+    pub fn openWebTransport(self: *QuicClient, path: []const u8) ClientError!*webtransport.WebTransportSession {
+        if (self.state != .established) return ClientError.NoConnection;
+        if (self.server_authority == null) return ClientError.NoAuthority;
+        if (path.len == 0) return ClientError.InvalidRequest;
+
+        // Check if connection was negotiated with Extended CONNECT support
+        const conn = try self.requireConn();
+        try self.ensureH3();
+        const h3_conn = &self.h3_conn.?;
+
+        // Check if peer supports Extended CONNECT
+        if (!h3_conn.extendedConnectEnabledByPeer()) {
+            return ClientError.H3Error;  // Extended CONNECT not supported
+        }
+
+        // Build WebTransport CONNECT headers
+        const headers = webtransport.buildWebTransportHeaders(
+            self.allocator,
+            self.server_authority.?,
+            path,
+            &.{},
+        ) catch {
+            return ClientError.H3Error;
+        };
+        defer self.allocator.free(headers);
+
+        // Send Extended CONNECT request
+        const stream_id = h3_conn.sendRequest(conn, headers, false) catch {
+            return ClientError.H3Error;
+        };
+
+        // Create WebTransport session
+        const session = self.allocator.create(webtransport.WebTransportSession) catch {
+            return ClientError.H3Error;
+        };
+
+        const path_copy = self.allocator.dupe(u8, path) catch {
+            self.allocator.destroy(session);
+            return ClientError.H3Error;
+        };
+
+        session.* = .{
+            .session_id = stream_id,
+            .client = self,
+            .state = .connecting,
+            .path = path_copy,
+            .datagram_queue = std.ArrayList([]u8).init(self.allocator),
+        };
+
+        // Track session
+        self.wt_sessions.put(stream_id, session) catch {
+            session.datagram_queue.deinit(self.allocator);
+            self.allocator.free(path_copy);
+            self.allocator.destroy(session);
+            return ClientError.H3Error;
+        };
+
+        // Also track in requests for proper lifecycle management
+        var state = FetchState.init(self.allocator) catch {
+            _ = self.wt_sessions.remove(stream_id);
+            session.datagram_queue.deinit(self.allocator);
+            self.allocator.free(path_copy);
+            self.allocator.destroy(session);
+            return ClientError.H3Error;
+        };
+
+        state.stream_id = stream_id;
+        state.is_webtransport = true;
+        state.wt_session = session;
+        state.collect_body = false;  // Don't collect body for WT
+
+        self.requests.put(stream_id, state) catch {
+            state.destroy();
+            _ = self.wt_sessions.remove(stream_id);
+            session.datagram_queue.deinit(self.allocator);
+            self.allocator.free(path_copy);
+            self.allocator.destroy(session);
+            return ClientError.H3Error;
+        };
+
+        self.flushSend() catch |err| {
+            _ = self.requests.remove(stream_id);
+            state.destroy();
+            _ = self.wt_sessions.remove(stream_id);
+            session.datagram_queue.deinit(self.allocator);
+            self.allocator.free(path_copy);
+            self.allocator.destroy(session);
+            return err;
+        };
+
+        self.afterQuicProgress();
+        return session;
+    }
+
     pub fn startRequest(self: *QuicClient, allocator: std.mem.Allocator, options: FetchOptions) ClientError!FetchHandle {
         if (self.state != .established) return ClientError.NoConnection;
         if (self.server_authority == null) return ClientError.NoAuthority;
@@ -958,6 +1082,19 @@ pub const QuicClient = struct {
     fn finalizeFetch(self: *QuicClient, stream_id: u64) ClientError!FetchResponse {
         const state = self.requests.get(stream_id) orelse return ClientError.ResponseIncomplete;
         defer {
+            // Clean up WebTransport session if this was a WT CONNECT request
+            if (state.is_webtransport) {
+                if (self.wt_sessions.get(stream_id)) |session| {
+                    if (session.state == .established) {
+                        // For established sessions, remove from tracking but don't destroy
+                        // The user now owns this session and must call close() on it
+                        _ = self.wt_sessions.remove(stream_id);
+                    } else {
+                        // Failed sessions get cleaned up immediately
+                        self.cleanupWebTransportSession(stream_id);
+                    }
+                }
+            }
             _ = self.requests.remove(stream_id);
             state.destroy();
         }
@@ -1247,16 +1384,34 @@ pub const QuicClient = struct {
         const varint = h3_datagram.decodeVarint(payload) catch return false;
         if (varint.consumed >= payload.len) return false;
 
-        const flow_id = varint.value;
+        const id = varint.value;
         const h3_payload = payload[varint.consumed..];
-        const stream_id = h3_datagram.streamIdForFlow(flow_id);
+
+        // Check if this is a WebTransport datagram (session_id prefix)
+        if (self.wt_sessions.get(id)) |session| {
+            // This is a WebTransport datagram
+            // Queue it in the session for the user to retrieve
+            session.queueDatagram(h3_payload) catch {
+                // If we can't queue it (out of memory), drop it
+                return false;
+            };
+
+            // Update stats on the FetchState if it exists
+            if (self.requests.get(id)) |state| {
+                state.wt_datagrams_received += 1;
+            }
+            return true;
+        }
+
+        // Otherwise, treat as regular H3 datagram with flow-id
+        const stream_id = h3_datagram.streamIdForFlow(id);
 
         // Route to the appropriate request
         if (self.requests.get(stream_id)) |state| {
             if (state.response_callback) |_| {
                 // Must copy for the event since we don't own the buffer
                 const copy = state.allocator.dupe(u8, h3_payload) catch return false;
-                const event = ResponseEvent{ .datagram = .{ .flow_id = flow_id, .payload = copy } };
+                const event = ResponseEvent{ .datagram = .{ .flow_id = id, .payload = copy } };
                 _ = self.emitEvent(state, event);
                 state.allocator.free(copy);
                 return true;
@@ -1283,6 +1438,23 @@ pub const QuicClient = struct {
                     return;
                 };
                 state.status = parsed;
+
+                // Handle WebTransport CONNECT response
+                if (state.is_webtransport and state.wt_session != null) {
+                    state.wt_session.?.handleConnectResponse(parsed);
+
+                    if (parsed == 200) {
+                        // Success: Keep FetchState alive for datagram routing
+                        // The FetchState will be cleaned up when the session closes
+                        // or when the client deinits
+                        state.finished = true;
+                    } else {
+                        // Failure: trigger failFetch to clean up properly
+                        // This will mark session as closed and remove FetchState
+                        self.failFetch(stream_id, ClientError.H3Error);
+                        return;
+                    }
+                }
             }
             dest.append(.{ .name = header.name, .value = header.value }) catch {
                 self.failFetch(stream_id, ClientError.H3Error);
@@ -1336,6 +1508,9 @@ pub const QuicClient = struct {
         state.finished = true;
         _ = self.emitEvent(state, ResponseEvent.finished);
         if (state.awaiting) self.event_loop.stop();
+
+        // For WebTransport, we keep the FetchState alive for datagram routing
+        // It will be cleaned up when the user calls close() on the session
     }
 
     fn onH3Reset(self: *QuicClient, stream_id: u64) void {
@@ -1367,18 +1542,48 @@ pub const QuicClient = struct {
             // If we can't allocate, at least mark the state
             return;
         };
-        defer to_cancel.deinit();
+        defer to_cancel.deinit(self.allocator);
 
         var it = self.requests.iterator();
         while (it.next()) |entry| {
             if (entry.key_ptr.* > last_accepted_id) {
-                to_cancel.append(entry.key_ptr.*) catch continue;
+                to_cancel.append(self.allocator, entry.key_ptr.*) catch continue;
             }
         }
 
         // Use failFetch for proper cleanup and event emission
         for (to_cancel.items) |stream_id| {
             self.failFetch(stream_id, ClientError.GoAwayReceived);
+        }
+    }
+
+    /// Helper to mark a WebTransport session as closed without destroying it
+    /// Used when the session might still have user references
+    fn markWebTransportSessionClosed(self: *QuicClient, stream_id: u64) void {
+        if (self.wt_sessions.get(stream_id)) |session| {
+            session.state = .closed;
+            // Keep it tracked so close() can still clean up properly
+            // User's reference remains valid but session is marked closed
+        }
+    }
+
+    /// Helper to properly clean up a WebTransport session
+    /// Only use when certain no user references exist
+    fn cleanupWebTransportSession(self: *QuicClient, stream_id: u64) void {
+        if (self.wt_sessions.get(stream_id)) |session| {
+            session.state = .closed;
+            // Free any queued datagrams
+            for (session.datagram_queue.items) |dgram| {
+                self.allocator.free(dgram);
+            }
+            // Deinit the queue itself
+            session.datagram_queue.deinit(self.allocator);
+            // Free the path string
+            self.allocator.free(session.path);
+            // Remove from map
+            _ = self.wt_sessions.remove(stream_id);
+            // Destroy the session struct
+            self.allocator.destroy(session);
         }
     }
 
@@ -1389,6 +1594,21 @@ pub const QuicClient = struct {
             _ = self.emitEvent(state, ResponseEvent.finished);
             if (state.awaiting) {
                 self.event_loop.stop();
+            }
+
+            // Handle WebTransport session cleanup
+            if (state.is_webtransport) {
+                if (self.wt_sessions.get(stream_id)) |session| {
+                    // Mark session as closed so users can observe the failure
+                    session.state = .closed;
+                    // Note: We keep the session in wt_sessions so that when the user
+                    // calls close() on their reference, it will properly free memory
+                }
+
+                // Remove and destroy the FetchState for WebTransport
+                // WebTransport doesn't use finalizeFetch, so we must clean up here
+                _ = self.requests.remove(stream_id);
+                state.destroy();
             }
         }
     }

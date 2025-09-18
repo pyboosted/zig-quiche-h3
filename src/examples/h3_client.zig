@@ -130,6 +130,7 @@ fn mainImpl() !void {
     var client_config = client.ClientConfig{};
     client_config.verify_peer = parsed.verify_peer;
     client_config.idle_timeout_ms = parsed.timeout_ms;
+    client_config.enable_webtransport = parsed.enable_webtransport;
     if (parsed.dgram_count > 0) {
         client_config.enable_dgram = true;
         client_config.dgram_recv_queue_len = 64;
@@ -246,6 +247,7 @@ const CliArgs = struct {
     dgram_interval_ms: u64 = 0,
     dgram_wait_ms: u64 = 0,
     repeat: usize = 1,
+    enable_webtransport: bool = false,
 
     pub const descriptions = .{
         .url = "Target URL (https://host[:port]/path)",
@@ -266,6 +268,7 @@ const CliArgs = struct {
         .dgram_interval_ms = "Delay in milliseconds between DATAGRAM sends (default: 0)",
         .dgram_wait_ms = "Extra time to wait for DATAGRAM echoes after sends (default: 0)",
         .repeat = "Number of concurrent identical requests (default: 1)",
+        .enable_webtransport = "Enable WebTransport Extended CONNECT support",
     };
 
     pub fn validate(self: *CliArgs) !void {

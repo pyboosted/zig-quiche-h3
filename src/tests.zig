@@ -3,9 +3,6 @@ const std = @import("std");
 const _server_tests = @import("quic/server.zig");
 const _client_tests = @import("client");
 const _goaway_tests = @import("quic/client/goaway_test.zig");
-const _routing_api_tests = @import("routing");
-const _routing_gen_tests = @import("routing_gen");
-const http = @import("http");
 const _errors_tests = @import("errors_test.zig");
 // Header validation tests are included via the http module
 
@@ -18,11 +15,4 @@ test "print quiche version" {
     try std.testing.expect(ver.len > 0);
 }
 
-test "http: formatAllowFromEnumSet" {
-    var set = std.enums.EnumSet(http.Method){};
-    set.insert(.GET);
-    set.insert(.POST);
-    const allow = try http.formatAllowFromEnumSet(std.testing.allocator, set);
-    defer std.testing.allocator.free(allow);
-    try std.testing.expect(std.mem.eql(u8, allow, "GET, POST"));
-}
+// HTTP tests are included via the http module import in server/client modules

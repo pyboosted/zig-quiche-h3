@@ -61,3 +61,13 @@ pub fn formatAllowFromEnumSet(
     }
     return allocator.dupe(u8, out.items);
 }
+
+test "formatAllowFromEnumSet" {
+    const testing = std.testing;
+    var set = std.enums.EnumSet(Method){};
+    set.insert(.GET);
+    set.insert(.POST);
+    const allow = try formatAllowFromEnumSet(testing.allocator, set);
+    defer testing.allocator.free(allow);
+    try testing.expect(std.mem.eql(u8, allow, "GET, POST"));
+}
