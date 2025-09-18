@@ -67,16 +67,8 @@ pub fn main() !void {
         routing_gen.GET("/stream/1gb", handlers.stream1GBHandler),
         routing_gen.GET("/stream/test", handlers.streamTestHandler),
         routing_gen.GET("/trailers/demo", handlers.trailersDemoHandler),
-        routing_gen.STREAM("/upload/stream", .{ 
-            .on_headers = handlers.uploadStreamOnHeaders, 
-            .on_body_chunk = handlers.uploadStreamOnChunk, 
-            .on_body_complete = handlers.uploadStreamOnComplete 
-        }),
-        routing_gen.STREAM("/upload/echo", .{ 
-            .on_headers = handlers.uploadEchoOnHeaders, 
-            .on_body_chunk = handlers.uploadEchoOnChunk, 
-            .on_body_complete = handlers.uploadEchoOnComplete 
-        }),
+        routing_gen.STREAM("/upload/stream", .{ .on_headers = handlers.uploadStreamOnHeaders, .on_body_chunk = handlers.uploadStreamOnChunk, .on_body_complete = handlers.uploadStreamOnComplete }),
+        routing_gen.STREAM("/upload/echo", .{ .on_headers = handlers.uploadEchoOnHeaders, .on_body_chunk = handlers.uploadEchoOnChunk, .on_body_complete = handlers.uploadEchoOnComplete }),
         routing_gen.ROUTE_OPTS(.GET, "/h3dgram/echo", handlers.h3dgramEchoHandler, .{ .on_h3_dgram = handlers.h3dgramEchoCallback }),
     });
     var router = RouterT{};

@@ -862,6 +862,15 @@ pub const h3 = struct {
             return c.quiche_h3_extended_connect_enabled_by_peer(self.ptr);
         }
 
+        /// Send a GOAWAY frame to the peer indicating graceful shutdown.
+        /// @param id The last stream ID that will be processed
+        pub fn sendGoaway(self: *h3.Connection, conn: *QuicConnection, id: u64) !void {
+            const res = c.quiche_h3_send_goaway(self.ptr, conn.ptr, id);
+            if (res < 0) {
+                try h3.mapError(@intCast(-res));
+            }
+        }
+
         pub const PollResult = struct {
             stream_id: u64,
             event: ?*c.quiche_h3_event,

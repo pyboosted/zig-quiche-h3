@@ -2,6 +2,7 @@ const std = @import("std");
 // Import modules with inline tests so they get compiled and executed
 const _server_tests = @import("quic/server.zig");
 const _client_tests = @import("client");
+const _goaway_tests = @import("quic/client/goaway_test.zig");
 const _routing_api_tests = @import("routing");
 const _routing_gen_tests = @import("routing_gen");
 const http = @import("http");

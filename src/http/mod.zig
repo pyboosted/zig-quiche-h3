@@ -47,7 +47,7 @@ pub fn formatAllowFromEnumSet(
     allocator: std.mem.Allocator,
     set: std.enums.EnumSet(Method),
 ) ![]u8 {
-    var out = std.ArrayList(u8){};
+    var out = try std.ArrayList(u8).initCapacity(allocator, 64);
     defer out.deinit(allocator);
 
     const all = [_]Method{ .GET, .POST, .PUT, .DELETE, .HEAD, .OPTIONS, .PATCH, .CONNECT, .CONNECT_UDP, .TRACE };

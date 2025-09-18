@@ -108,6 +108,8 @@ pub const ClientError = error{
     ResponseIncomplete,
     UnexpectedStream,
     NoAuthority,
+    GoAwayReceived,
+    ConnectionGoingAway,
     InvalidRequest,
     DatagramNotEnabled,
     DatagramTooLarge,
@@ -267,6 +269,17 @@ pub const QuicClient = struct {
         received: u64 = 0,
         dropped_send: u64 = 0,
     } = .{},
+
+    // GOAWAY state tracking
+    goaway_received: bool = false,
+    goaway_stream_id: ?u64 = null, // Last accepted request stream ID from server
+
+    // GOAWAY callback (runs on event loop thread)
+    on_goaway: ?*const fn (client: *QuicClient, last_stream_id: u64, user: ?*anyopaque) void = null,
+    on_goaway_user: ?*anyopaque = null,
+
+    // Track most recent request stream ID for comparison
+    last_request_stream_id: ?u64 = null,
 
     pub fn init(allocator: std.mem.Allocator, cfg: ClientConfig) !*QuicClient {
         try cfg.validate();
@@ -655,6 +668,19 @@ pub const QuicClient = struct {
         self.on_quic_datagram_user = user;
     }
 
+    /// Register a callback for GOAWAY events (runs on event loop thread).
+    /// The callback is invoked when the server sends a GOAWAY frame indicating
+    /// the connection will be closed gracefully.
+    /// @param last_stream_id The last stream ID that the server will process
+    pub fn onGoaway(
+        self: *QuicClient,
+        cb: *const fn (client: *QuicClient, last_stream_id: u64, user: ?*anyopaque) void,
+        user: ?*anyopaque,
+    ) void {
+        self.on_goaway = cb;
+        self.on_goaway_user = user;
+    }
+
     /// Send a plain QUIC datagram without H3 flow-id prefix.
     /// This sends raw payload directly via the QUIC transport.
     pub fn sendQuicDatagram(self: *QuicClient, payload: []const u8) ClientError!void {
@@ -690,6 +716,13 @@ pub const QuicClient = struct {
         if (self.server_authority == null) return ClientError.NoAuthority;
         if (options.path.len == 0) return ClientError.InvalidRequest;
 
+        // Check GOAWAY state before allocating any resources
+        if (self.goaway_received) {
+            // If we have a GOAWAY and know the last request ID, check if new requests would exceed it
+            // Since we can't predict the next stream ID, we conservatively reject all new requests
+            return ClientError.ConnectionGoingAway;
+        }
+
         const conn = try self.requireConn();
         try self.ensureH3();
         const h3_conn = &self.h3_conn.?;
@@ -724,6 +757,9 @@ pub const QuicClient = struct {
             return ClientError.H3Error;
         };
         state.stream_id = stream_id;
+
+        // Track the most recent request stream ID
+        self.last_request_stream_id = stream_id;
 
         self.requests.put(stream_id, state) catch {
             state.destroy();
@@ -1146,7 +1182,7 @@ pub const QuicClient = struct {
                 .Headers => self.onH3Headers(poll.stream_id, poll.raw_event),
                 .Data => self.onH3Data(poll.stream_id),
                 .Finished => self.onH3Finished(poll.stream_id),
-                .GoAway => {},
+                .GoAway => self.onH3GoAway(poll.stream_id),
                 .Reset => self.onH3Reset(poll.stream_id),
                 .PriorityUpdate => {},
             }
@@ -1304,6 +1340,46 @@ pub const QuicClient = struct {
 
     fn onH3Reset(self: *QuicClient, stream_id: u64) void {
         self.failFetch(stream_id, ClientError.H3Error);
+    }
+
+    fn onH3GoAway(self: *QuicClient, last_accepted_id: u64) void {
+        // Note: The stream_id from poll might be the GOAWAY stream ID,
+        // but for HTTP/3 GOAWAY, it represents the last accepted request ID
+
+        // Ignore duplicate GOAWAYs with higher IDs
+        if (self.goaway_received) {
+            if (self.goaway_stream_id) |existing_id| {
+                if (last_accepted_id >= existing_id) return;
+            }
+        }
+
+        self.goaway_received = true;
+        self.goaway_stream_id = last_accepted_id;
+
+        // Notify application callback if registered
+        if (self.on_goaway) |cb| {
+            cb(self, last_accepted_id, self.on_goaway_user);
+        }
+
+        // Cancel all requests with stream_id > last_accepted_id
+        // Collect IDs first to avoid iterator invalidation
+        var to_cancel = std.ArrayList(u64).initCapacity(self.allocator, self.requests.count()) catch {
+            // If we can't allocate, at least mark the state
+            return;
+        };
+        defer to_cancel.deinit();
+
+        var it = self.requests.iterator();
+        while (it.next()) |entry| {
+            if (entry.key_ptr.* > last_accepted_id) {
+                to_cancel.append(entry.key_ptr.*) catch continue;
+            }
+        }
+
+        // Use failFetch for proper cleanup and event emission
+        for (to_cancel.items) |stream_id| {
+            self.failFetch(stream_id, ClientError.GoAwayReceived);
+        }
     }
 
     fn failFetch(self: *QuicClient, stream_id: u64, err: ClientError) void {
@@ -1954,7 +2030,7 @@ test "quic client H3 vs plain datagram routing" {
         // Varint encoding of flow_id = 42 (single byte for values < 64)
         h3_buf[0] = 42; // flow_id
         const h3_payload = "h3 datagram payload";
-        @memcpy(h3_buf[1..1 + h3_payload.len], h3_payload);
+        @memcpy(h3_buf[1 .. 1 + h3_payload.len], h3_payload);
 
         // In real processDatagrams, this would try processH3Datagram first
         // For test purposes, we simulate detecting it's an H3 datagram
