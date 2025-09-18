@@ -105,6 +105,7 @@ pub const ClientError = error{
     QlogSetupFailed,
     KeylogSetupFailed,
     ConnectionClosed,
+    StreamReset,
     H3Error,
     ResponseIncomplete,
     UnexpectedStream,
@@ -115,6 +116,7 @@ pub const ClientError = error{
     DatagramNotEnabled,
     DatagramTooLarge,
     DatagramSendFailed,
+    ConnectionPoolExhausted,
 };
 
 const State = enum { idle, connecting, established, closed };
@@ -260,6 +262,7 @@ pub const QuicClient = struct {
     server_host: ?[]u8 = null,
     server_authority: ?[]u8 = null,
     server_port: ?u16 = null,
+    server_sni: ?[]u8 = null,  // Store SNI for reconnection
 
     log_context: ?*logging.LogContext = null,
 
@@ -443,6 +446,11 @@ pub const QuicClient = struct {
         if (self.server_authority) |authority| {
             self.allocator.free(authority);
             self.server_authority = null;
+        }
+
+        if (self.server_sni) |sni| {
+            self.allocator.free(sni);
+            self.server_sni = null;
         }
 
         var it = self.requests.iterator();
@@ -637,6 +645,124 @@ pub const QuicClient = struct {
 
     pub fn startGet(self: *QuicClient, allocator: std.mem.Allocator, path: []const u8) ClientError!FetchHandle {
         return self.startRequest(allocator, .{ .path = path });
+    }
+
+    /// Check if client is idle (no active requests or WebTransport sessions)
+    /// Note: This only checks active request/session maps, not pending body providers or timers.
+    pub fn isIdle(self: *QuicClient) bool {
+        return self.requests.count() == 0 and self.wt_sessions.count() == 0;
+    }
+
+    /// Reconnect to the server (closes existing connection and establishes new one)
+    pub fn reconnect(self: *QuicClient) ClientError!void {
+        // Close existing connection if present
+        if (self.conn) |*conn| {
+            conn.close(true, 0, "reconnecting") catch {}; // Best-effort close
+            conn.deinit();
+            self.conn = null;
+        }
+
+        // Clear H3 connection
+        if (self.h3_conn) |*h3_conn| {
+            h3_conn.deinit();
+            self.h3_conn = null;
+        }
+
+        // Close the socket properly
+        if (self.socket) |*sock| {
+            sock.close();
+            self.socket = null;
+        }
+
+        // Clear pending requests properly to avoid iterator invalidation
+        // Collect keys first, then clean up
+        var req_keys = std.ArrayList(u64).init(self.allocator);
+        defer req_keys.deinit();
+        var req_it = self.requests.iterator();
+        while (req_it.next()) |entry| {
+            try req_keys.append(entry.key_ptr.*);
+        }
+        // Now clean up using collected keys
+        for (req_keys.items) |stream_id| {
+            if (self.requests.fetchRemove(stream_id)) |kv| {
+                kv.value.destroy();
+            }
+        }
+
+        // Clear WebTransport sessions properly
+        var wt_keys = std.ArrayList(u64).init(self.allocator);
+        defer wt_keys.deinit();
+        var wt_it = self.wt_sessions.iterator();
+        while (wt_it.next()) |entry| {
+            try wt_keys.append(entry.key_ptr.*);
+        }
+        for (wt_keys.items) |stream_id| {
+            if (self.wt_sessions.fetchRemove(stream_id)) |kv| {
+                // close() returns void and handles all cleanup including destroy()
+                kv.value.close();
+                // Do NOT call destroy() - close() already handles that
+            }
+        }
+
+        // Reset state to idle
+        self.state = .idle;
+
+        // Re-establish connection using saved endpoint with SNI
+        if (self.server_host != null and self.server_port != null) {
+            const endpoint = ServerEndpoint{
+                .host = self.server_host.?,
+                .port = self.server_port.?,
+                .sni = self.server_sni,
+            };
+            try self.connect(endpoint);
+        } else {
+            return ClientError.NoConnection;
+        }
+    }
+
+    /// Fetch with automatic retry on transient failures
+    /// Note: Requests with streaming body_provider are NOT supported as the
+    /// provider will be exhausted after the first attempt. This method will
+    /// return an error if a body_provider is specified.
+    pub fn fetchWithRetry(
+        self: *QuicClient,
+        allocator: std.mem.Allocator,
+        options: FetchOptions,
+        max_retries: u32,
+    ) ClientError!FetchResponse {
+        // Reject if body_provider is present (can't retry streaming bodies)
+        if (options.body_provider != null) {
+            return ClientError.InvalidRequest;
+        }
+
+        var attempt: u32 = 0;
+        while (attempt < max_retries) : (attempt += 1) {
+            const result = self.fetchWithOptions(allocator, options) catch |err| {
+                // On last attempt, return the error
+                if (attempt == max_retries - 1) return err;
+
+                // Retry on specific transient errors
+                switch (err) {
+                    ClientError.ConnectionClosed,
+                    ClientError.StreamReset,
+                    ClientError.HandshakeTimeout,
+                    ClientError.QuicSendFailed,
+                    ClientError.QuicRecvFailed => {
+                        // Try to reconnect and retry
+                        self.reconnect() catch |reconnect_err| {
+                            // If reconnect fails on last retry attempt, return that error
+                            if (attempt == max_retries - 2) return reconnect_err;
+                            // Otherwise continue to next retry
+                            continue;
+                        };
+                        continue;
+                    },
+                    else => return err, // Non-transient error, fail immediately
+                }
+            };
+            return result;
+        }
+        unreachable;
     }
 
     pub fn sendH3Datagram(self: *QuicClient, stream_id: u64, payload: []const u8) ClientError!void {
@@ -910,15 +1036,8 @@ pub const QuicClient = struct {
     }
 
     fn rememberEndpoint(self: *QuicClient, endpoint: ServerEndpoint) ClientError!void {
-        if (self.server_host) |prev| {
-            self.allocator.free(prev);
-            self.server_host = null;
-        }
-        if (self.server_authority) |prev| {
-            self.allocator.free(prev);
-            self.server_authority = null;
-        }
-
+        // Duplicate new values first before freeing old ones to avoid use-after-free
+        // when reconnect() passes pointers to our own stored strings
         const host_copy = self.allocator.dupe(u8, endpoint.host) catch {
             return ClientError.H3Error;
         };
@@ -936,9 +1055,32 @@ pub const QuicClient = struct {
             };
         errdefer self.allocator.free(authority);
 
+        const sni_copy = if (endpoint.sni) |sni|
+            self.allocator.dupe(u8, sni) catch {
+                self.allocator.free(host_copy);
+                self.allocator.free(authority);
+                return ClientError.H3Error;
+            }
+        else
+            null;
+        errdefer if (sni_copy) |s| self.allocator.free(s);
+
+        // Now free old values and replace with new ones
+        if (self.server_host) |prev| {
+            self.allocator.free(prev);
+        }
+        if (self.server_authority) |prev| {
+            self.allocator.free(prev);
+        }
+        if (self.server_sni) |prev_sni| {
+            self.allocator.free(prev_sni);
+        }
+
+        // Store new values
         self.server_host = host_copy;
         self.server_authority = authority;
         self.server_port = endpoint.port;
+        self.server_sni = sni_copy;
     }
 
     fn ensureH3(self: *QuicClient) !void {

@@ -454,6 +454,31 @@ pub fn build(b: *std.Build) void {
         wt_client_step.dependOn(&run_wt_client.step);
     }
 
+    // Pool client example: demonstrate connection pooling
+    {
+        const pool_client_mod = b.createModule(.{
+            .root_source_file = b.path("src/examples/pool_client.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        pool_client_mod.addImport("client", client_mod);
+        pool_client_mod.addImport("args", args_mod);
+
+        const pool_client = b.addExecutable(.{
+            .name = "pool-client",
+            .root_module = pool_client_mod,
+        });
+        pool_client.root_module.addIncludePath(b.path(quiche_include_dir));
+        addQuicheLink(b, pool_client, use_system_quiche, quiche_lib_path, cargo_step);
+        linkCommon(target, pool_client, link_ssl, with_libev, libev_lib_dir, true);
+        b.installArtifact(pool_client);
+
+        const run_pool_client = b.addRunArtifact(pool_client);
+        if (b.args) |args| run_pool_client.addArgs(args);
+        const pool_client_step = b.step("pool-client", "Run the connection pool client example");
+        pool_client_step.dependOn(&run_pool_client.step);
+    }
+
     // Unit tests: run a test that prints quiche version
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),

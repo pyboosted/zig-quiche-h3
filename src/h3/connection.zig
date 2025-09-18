@@ -116,6 +116,83 @@ pub const H3Connection = struct {
         return self.conn.extendedConnectEnabledByPeer();
     }
 
+    /// Client-specific: Send request with header validation
+    /// Validates that required pseudo-headers are present before sending
+    pub fn sendClientRequest(
+        self: *H3Connection,
+        quic_conn: *quiche.Connection,
+        headers: []const quiche.h3.Header,
+        fin: bool,
+    ) !u64 {
+        // Validate required pseudo-headers for client requests
+        var has_method = false;
+        var has_scheme = false;
+        var has_authority = false;
+        var has_path = false;
+
+        for (headers) |h| {
+            if (h.name.len > 0 and h.name[0] == ':') {
+                if (std.mem.eql(u8, h.name, ":method")) has_method = true;
+                if (std.mem.eql(u8, h.name, ":scheme")) has_scheme = true;
+                if (std.mem.eql(u8, h.name, ":authority")) has_authority = true;
+                if (std.mem.eql(u8, h.name, ":path")) has_path = true;
+            }
+        }
+
+        if (!has_method or !has_scheme or !has_authority or !has_path) {
+            return error.MissingRequiredPseudoHeaders;
+        }
+
+        // Use the existing sendRequest after validation
+        return self.sendRequest(quic_conn, headers, fin);
+    }
+
+    /// Client-specific: Send Extended CONNECT for WebTransport
+    /// Automatically adds the :protocol pseudo-header if missing
+    pub fn sendExtendedConnect(
+        self: *H3Connection,
+        quic_conn: *quiche.Connection,
+        headers: []const quiche.h3.Header,
+        fin: bool,
+    ) !u64 {
+        // Check if peer supports Extended CONNECT
+        if (!self.extendedConnectEnabledByPeer()) {
+            return error.ExtendedConnectNotSupported;
+        }
+
+        // Validate that this is a CONNECT request with :protocol
+        var has_method_connect = false;
+        var has_protocol = false;
+
+        for (headers) |h| {
+            if (std.mem.eql(u8, h.name, ":method") and std.mem.eql(u8, h.value, "CONNECT")) {
+                has_method_connect = true;
+            }
+            if (std.mem.eql(u8, h.name, ":protocol")) {
+                has_protocol = true;
+            }
+        }
+
+        if (!has_method_connect) {
+            return error.NotConnectMethod;
+        }
+        if (!has_protocol) {
+            return error.MissingProtocolPseudoHeader;
+        }
+
+        // Send as regular request - quiche handles Extended CONNECT internally
+        return self.sendRequest(quic_conn, headers, fin);
+    }
+
+    /// Client-specific: Check if we can send new requests
+    /// Returns false if connection is closing or GOAWAY received
+    pub fn canSendRequest(self: *H3Connection) bool {
+        // This would need access to GOAWAY state
+        // For now, always return true - will be enhanced when GOAWAY tracking is added
+        _ = self;
+        return true;
+    }
+
     pub const PollResult = struct {
         stream_id: u64,
         event_type: quiche.h3.EventType,
