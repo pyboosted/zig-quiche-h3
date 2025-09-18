@@ -97,6 +97,16 @@ pub const Config = struct {
         if (res < 0) return error.KeyLoadFailed;
     }
 
+    pub fn loadVerifyLocationsFromFile(self: *Config, path: [:0]const u8) error{LoadVerifyFailed}!void {
+        const res = c.quiche_config_load_verify_locations_from_file(self.ptr, path.ptr);
+        if (res < 0) return error.LoadVerifyFailed;
+    }
+
+    pub fn loadVerifyLocationsFromDirectory(self: *Config, path: [:0]const u8) error{LoadVerifyFailed}!void {
+        const res = c.quiche_config_load_verify_locations_from_directory(self.ptr, path.ptr);
+        if (res < 0) return error.LoadVerifyFailed;
+    }
+
     pub fn setApplicationProtos(self: *Config, protos: []const u8) !void {
         const res = c.quiche_config_set_application_protos(self.ptr, protos.ptr, protos.len);
         if (res < 0) return error.AlpnSetFailed;
@@ -132,6 +142,10 @@ pub const Config = struct {
 
     pub fn setDisableActiveMigration(self: *Config, v: bool) void {
         c.quiche_config_set_disable_active_migration(self.ptr, v);
+    }
+
+    pub fn verifyPeer(self: *Config, verify: bool) void {
+        c.quiche_config_verify_peer(self.ptr, verify);
     }
 
     pub fn enableDgram(self: *Config, enabled: bool, recv_queue_len: usize, send_queue_len: usize) void {
@@ -462,6 +476,29 @@ pub fn accept(
     return Connection{ .ptr = ptr };
 }
 
+pub fn connect(
+    server_name: [:0]const u8,
+    scid: []const u8,
+    local: *const std.posix.sockaddr,
+    local_len: std.posix.socklen_t,
+    peer: *const std.posix.sockaddr,
+    peer_len: std.posix.socklen_t,
+    config: *Config,
+) !Connection {
+    const ptr = c.quiche_connect(
+        server_name.ptr,
+        scid.ptr,
+        scid.len,
+        @ptrCast(local),
+        local_len,
+        @ptrCast(peer),
+        peer_len,
+        config.ptr,
+    ) orelse return error.ConnectFailed;
+
+    return Connection{ .ptr = ptr };
+}
+
 // Version negotiation
 pub fn versionIsSupported(ver: u32) bool {
     return c.quiche_version_is_supported(ver);
@@ -726,6 +763,26 @@ pub const h3 = struct {
                 try h3.mapError(res);
                 return error.SendResponseFailed;
             }
+        }
+
+        pub fn sendRequest(
+            self: *h3.Connection,
+            quic_conn: *QuicConnection,
+            headers: []const Header,
+            fin: bool,
+        ) !u64 {
+            const res = c.quiche_h3_send_request(
+                self.ptr,
+                quic_conn.ptr,
+                @ptrCast(headers.ptr),
+                headers.len,
+                fin,
+            );
+            if (res < 0) {
+                try h3.mapError(@intCast(res));
+                return error.SendRequestFailed;
+            }
+            return @intCast(res);
         }
 
         pub fn sendBody(

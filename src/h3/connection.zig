@@ -72,6 +72,15 @@ pub const H3Connection = struct {
         };
     }
 
+    pub fn sendRequest(
+        self: *H3Connection,
+        quic_conn: *quiche.Connection,
+        headers: []const quiche.h3.Header,
+        fin: bool,
+    ) !u64 {
+        return self.conn.sendRequest(quic_conn, headers, fin);
+    }
+
     pub fn sendAdditionalHeaders(
         self: *H3Connection,
         quic_conn: *quiche.Connection,

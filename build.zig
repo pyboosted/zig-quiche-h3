@@ -165,6 +165,7 @@ pub fn build(b: *std.Build) void {
     });
     connection_mod.addImport("quiche", quiche_ffi_mod);
     connection_mod.addImport("utils", utils_mod);
+    connection_mod.addImport("event_loop", event_loop_mod);
 
     const config_mod = b.createModule(.{
         .root_source_file = b.path("src/quic/config.zig"),
@@ -244,6 +245,31 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("routing", routing_mod);
     server_mod.addImport("utils", utils_mod);
     server_mod.addOptions("build_options", build_opts);
+
+    const client_mod = b.createModule(.{
+        .root_source_file = b.path("src/quic/client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    client_mod.addImport("quiche", quiche_ffi_mod);
+    client_mod.addImport("config", config_mod);
+    client_mod.addImport("event_loop", event_loop_mod);
+    client_mod.addImport("udp", udp_mod);
+    client_mod.addImport("connection", connection_mod);
+    client_mod.addImport("h3", h3_mod);
+    client_mod.addImport("http", http_mod);
+    // Note: server removed to avoid circular dependency
+    // Tests that need server should import it directly via test_mod
+    client_mod.addImport("routing", routing_mod);
+    client_mod.addImport("routing_gen", routing_gen_mod);
+
+    const h3_client_mod = b.createModule(.{
+        .root_source_file = b.path("src/examples/h3_client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    h3_client_mod.addImport("client", client_mod);
+    h3_client_mod.addImport("args", args_mod);
 
     // Consolidated hybrid router
     // no hybrid router in server
@@ -388,6 +414,17 @@ pub fn build(b: *std.Build) void {
         dgram_step.dependOn(&run_dgram.step);
     }
 
+    if (with_libev) {
+        const h3_client = b.addExecutable(.{ .name = "h3-client", .root_module = h3_client_mod });
+        addQuicheLink(b, h3_client, use_system_quiche, quiche_lib_path, cargo_step);
+        linkCommon(target, h3_client, link_ssl, with_libev, libev_lib_dir, true);
+        b.installArtifact(h3_client);
+        const run_h3_client = b.addRunArtifact(h3_client);
+        if (b.args) |cli_args| run_h3_client.addArgs(cli_args);
+        const h3_client_step = b.step("h3-client", "Run the HTTP/3 client CLI");
+        h3_client_step.dependOn(&run_h3_client.step);
+    }
+
     // WebTransport test client (only when explicitly enabled)
     if (with_webtransport) {
         const wt_client_mod = b.createModule(.{
@@ -428,6 +465,8 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("routing", routing_mod);
     test_mod.addImport("routing_gen", routing_gen_mod);
     test_mod.addImport("routing_dyn", routing_dyn_mod);
+    test_mod.addImport("client", client_mod);
+    test_mod.addImport("server", server_mod); // For client tests that need a server
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     unit_tests.root_module.addIncludePath(b.path(quiche_include_dir));
     addQuicheLink(b, unit_tests, use_system_quiche, quiche_lib_path, cargo_step);

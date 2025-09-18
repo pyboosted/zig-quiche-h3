@@ -174,35 +174,29 @@ pub const Response = struct {
         return self.ended;
     }
 
-    fn sendHeaders(self: *Response, fin: bool) !void {
+    pub fn sendHeaders(self: *Response, fin: bool) !void {
         if (self.headers_sent) return;
 
         var final_headers = std.ArrayList(quiche.h3.Header){};
         defer final_headers.deinit(self.allocator);
 
-        const status_text = @import("../status_strings.zig").getText(self.status_code);
         var status_buf: [5]u8 = undefined;
         const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{self.status_code});
 
-        if (status_text.len > 0) {
-            const combined = try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ status_str, status_text });
-            defer self.allocator.free(combined);
-            try final_headers.append(self.allocator, quiche.h3.Header{
-                .name = ":status",
-                .name_len = 7,
-                .value = combined.ptr,
-                .value_len = combined.len,
-            });
-        } else {
-            const status_copy = try self.allocator.dupe(u8, status_str);
-            defer self.allocator.free(status_copy);
-            try final_headers.append(self.allocator, quiche.h3.Header{
-                .name = ":status",
-                .name_len = 7,
-                .value = status_copy.ptr,
-                .value_len = status_copy.len,
-            });
-        }
+        // Create status header value - HTTP/3 requires only numeric status code
+        // without the reason phrase in the :status pseudo-header
+        const status_value = try self.allocator.dupe(u8, status_str);
+
+        // Ensure status_value is freed after headers are sent
+        defer self.allocator.free(status_value);
+
+        // Add to final_headers for sending
+        try final_headers.append(self.allocator, quiche.h3.Header{
+            .name = ":status",
+            .name_len = 7,
+            .value = status_value.ptr,
+            .value_len = status_value.len,
+        });
 
         var has_server = false;
         for (self.header_buffer.items) |hdr| {

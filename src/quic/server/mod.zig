@@ -2,7 +2,9 @@ const std = @import("std");
 const quiche = @import("quiche");
 const connection = @import("connection");
 const config_mod = @import("config");
-const EventLoop = @import("event_loop").EventLoop;
+const event_loop = @import("event_loop");
+const EventLoop = event_loop.EventLoop;
+const TimerHandle = event_loop.TimerHandle;
 const udp = @import("udp");
 const h3 = @import("h3");
 const h3_datagram = @import("h3").datagram;
@@ -61,7 +63,7 @@ pub const QuicServer = struct {
     local_conn_id_len: usize = 16, // Use 16 bytes for our SCIDs
     send_buf: [2048]u8 = undefined, // Buffer for sending packets
     conn_id_seed: [32]u8, // HMAC-SHA256 key for connection ID derivation (like Rust)
-    timeout_timer: ?EventLoop.TimerHandle = null,
+    timeout_timer: ?TimerHandle = null,
     timeout_dirty: bool = false,
     next_timeout_deadline_ms: ?i64 = null,
 
@@ -820,14 +822,14 @@ pub const QuicServer = struct {
 
     fn checkTimeouts(self: *QuicServer) !void {
         const now = nowMillis();
-        var due = std.ArrayList(*connection.Connection).init(self.allocator);
-        defer due.deinit();
+        var due = std.ArrayListUnmanaged(*connection.Connection){};
+        defer due.deinit(self.allocator);
         var iter = self.connections.map.iterator();
         while (iter.next()) |entry| {
             const conn = entry.value_ptr.*;
             if (conn.timeout_deadline_ms) |deadline| {
                 if (deadline <= now) {
-                    try due.append(conn);
+                    try due.append(self.allocator, conn);
                 }
             }
         }

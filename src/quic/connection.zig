@@ -2,7 +2,7 @@ const std = @import("std");
 const quiche = @import("quiche");
 
 const c = quiche.c;
-const event_loop = @import("net/event_loop.zig");
+const event_loop = @import("event_loop");
 
 // Connection key for hash map - includes DCID and address family
 pub const ConnectionKey = struct {
