@@ -97,7 +97,7 @@ fn runWithPool(
         };
 
         // Use the connection
-        const response = conn.fetch(.{
+        const response = conn.fetchWithOptions(allocator, .{
             .method = "GET",
             .path = path,
         }) catch |err| {
@@ -178,7 +178,7 @@ fn runWithoutPool(
             continue;
         };
 
-        const response = conn.fetch(.{
+        const response = conn.fetchWithOptions(allocator, .{
             .method = "GET",
             .path = path,
         }) catch |err| {

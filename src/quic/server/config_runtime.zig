@@ -18,6 +18,17 @@ pub fn applyRuntimeOverrides(
 ) !RuntimeOverrides {
     var cfg_eff = cfg;
 
+    const truthy = struct {
+        fn value(bytes: []const u8) bool {
+            return std.mem.eql(u8, bytes, "1") or
+                std.mem.eql(u8, bytes, "true") or
+                std.mem.eql(u8, bytes, "on") or
+                std.mem.eql(u8, bytes, "yes") or
+                std.mem.eql(u8, bytes, "enable") or
+                std.mem.eql(u8, bytes, "enabled");
+        }
+    };
+
     if (server_logging.parseLevel(build_options.log_level)) |lvl| {
         cfg_eff.log_level = lvl;
     }
@@ -129,6 +140,26 @@ pub fn applyRuntimeOverrides(
         }
         break :blk false;
     };
+
+    var enable_h3_dgram = cfg_eff.enable_dgram;
+
+    if (std.process.getEnvVarOwned(allocator, "H3_ENABLE_DGRAM")) |env_val| {
+        defer allocator.free(env_val);
+        enable_h3_dgram = truthy.value(env_val);
+    } else |_| {}
+
+    if (std.process.getEnvVarOwned(allocator, "H3_DGRAM_ECHO")) |env_val| {
+        defer allocator.free(env_val);
+        if (truthy.value(env_val)) {
+            enable_h3_dgram = true;
+        }
+    } else |_| {}
+
+    if (enable_h3_dgram) {
+        cfg_eff.enable_dgram = true;
+        if (cfg_eff.dgram_recv_queue_len == 0) cfg_eff.dgram_recv_queue_len = 1024;
+        if (cfg_eff.dgram_send_queue_len == 0) cfg_eff.dgram_send_queue_len = 1024;
+    }
 
     return RuntimeOverrides{
         .config = cfg_eff,

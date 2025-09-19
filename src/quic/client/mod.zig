@@ -117,6 +117,7 @@ pub const ClientError = error{
     DatagramTooLarge,
     DatagramSendFailed,
     ConnectionPoolExhausted,
+    OutOfMemory,
 };
 
 const State = enum { idle, connecting, established, closed };
@@ -262,7 +263,7 @@ pub const QuicClient = struct {
     server_host: ?[]u8 = null,
     server_authority: ?[]u8 = null,
     server_port: ?u16 = null,
-    server_sni: ?[]u8 = null,  // Store SNI for reconnection
+    server_sni: ?[]u8 = null, // Store SNI for reconnection
 
     log_context: ?*logging.LogContext = null,
 
@@ -314,7 +315,13 @@ pub const QuicClient = struct {
         q_cfg.setMaxSendUdpPayloadSize(cfg.max_send_udp_payload_size);
         q_cfg.setDisableActiveMigration(cfg.disable_active_migration);
         q_cfg.enablePacing(cfg.enable_pacing);
-        q_cfg.enableDgram(cfg.enable_dgram, cfg.dgram_recv_queue_len, cfg.dgram_send_queue_len);
+        if (cfg.enable_dgram) {
+            const recv_len = if (cfg.dgram_recv_queue_len == 0) 128 else cfg.dgram_recv_queue_len;
+            const send_len = if (cfg.dgram_send_queue_len == 0) 128 else cfg.dgram_send_queue_len;
+            q_cfg.enableDgram(true, recv_len, send_len);
+        } else {
+            q_cfg.enableDgram(false, cfg.dgram_recv_queue_len, cfg.dgram_send_queue_len);
+        }
         q_cfg.grease(cfg.grease);
 
         const cc_algo = try allocator.dupeZ(u8, cfg.cc_algorithm);
@@ -402,6 +409,7 @@ pub const QuicClient = struct {
             .server_host = null,
             .server_authority = null,
             .server_port = null,
+            .server_sni = null,
             .log_context = log_ctx,
             .requests = AutoHashMap(u64, *FetchState).init(allocator),
             .wt_sessions = AutoHashMap(u64, *webtransport.WebTransportSession).init(allocator),
@@ -743,11 +751,7 @@ pub const QuicClient = struct {
 
                 // Retry on specific transient errors
                 switch (err) {
-                    ClientError.ConnectionClosed,
-                    ClientError.StreamReset,
-                    ClientError.HandshakeTimeout,
-                    ClientError.QuicSendFailed,
-                    ClientError.QuicRecvFailed => {
+                    ClientError.ConnectionClosed, ClientError.StreamReset, ClientError.HandshakeTimeout, ClientError.QuicSendFailed, ClientError.QuicRecvFailed => {
                         // Try to reconnect and retry
                         self.reconnect() catch |reconnect_err| {
                             // If reconnect fails on last retry attempt, return that error
@@ -766,10 +770,10 @@ pub const QuicClient = struct {
     }
 
     pub fn sendH3Datagram(self: *QuicClient, stream_id: u64, payload: []const u8) ClientError!void {
-        const conn = try self.requireConn();
-        try self.ensureH3();
-        const h3_conn = &self.h3_conn.?;
+        try self.ensureH3DatagramNegotiated();
 
+        const conn = try self.requireConn();
+        const h3_conn = &self.h3_conn.?;
         if (!h3_conn.dgramEnabledByPeer(conn)) return ClientError.DatagramNotEnabled;
 
         const flow_id = h3_datagram.flowIdForStream(stream_id);
@@ -879,7 +883,7 @@ pub const QuicClient = struct {
 
         // Check if peer supports Extended CONNECT
         if (!h3_conn.extendedConnectEnabledByPeer()) {
-            return ClientError.H3Error;  // Extended CONNECT not supported
+            return ClientError.H3Error; // Extended CONNECT not supported
         }
 
         // Build WebTransport CONNECT headers
@@ -936,7 +940,7 @@ pub const QuicClient = struct {
         state.stream_id = stream_id;
         state.is_webtransport = true;
         state.wt_session = session;
-        state.collect_body = false;  // Don't collect body for WT
+        state.collect_body = false; // Don't collect body for WT
 
         self.requests.put(stream_id, state) catch {
             state.destroy();
@@ -1090,6 +1094,27 @@ pub const QuicClient = struct {
             return ClientError.H3Error;
         };
         self.h3_conn = h3_conn;
+    }
+
+    fn ensureH3DatagramNegotiated(self: *QuicClient) ClientError!void {
+        var conn = try self.requireConn();
+        try self.ensureH3();
+        var h3_conn = &self.h3_conn.?;
+        if (h3_conn.dgramEnabledByPeer(conn)) return;
+
+        var attempts: usize = 0;
+        while (attempts < 5) : (attempts += 1) {
+            self.event_loop.runOnce();
+            self.afterQuicProgress();
+
+            conn = try self.requireConn();
+            h3_conn = &self.h3_conn.?;
+
+            if (h3_conn.dgramEnabledByPeer(conn)) return;
+            if (conn.isClosed()) return ClientError.ConnectionClosed;
+        }
+
+        return ClientError.DatagramNotEnabled;
     }
 
     fn loadNextBodyChunk(self: *QuicClient, state: *FetchState) !void {

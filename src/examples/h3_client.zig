@@ -8,7 +8,22 @@ const math = std.math;
 
 pub fn main() !void {
     mainImpl() catch |err| {
-        std.debug.print("Error: {s}\n", .{@errorName(err)});
+        // Check if we're in silent mode by peeking at args
+        var silent = false;
+        const argv = std.process.argsAlloc(std.heap.page_allocator) catch {
+            std.debug.print("Error: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer std.process.argsFree(std.heap.page_allocator, argv);
+        for (argv) |arg| {
+            if (std.mem.eql(u8, arg, "--silent") or std.mem.eql(u8, arg, "-s")) {
+                silent = true;
+                break;
+            }
+        }
+        if (!silent) {
+            std.debug.print("Error: {s}\n", .{@errorName(err)});
+        }
         std.process.exit(1);
     };
 }
@@ -22,54 +37,54 @@ fn mainImpl() !void {
     defer std.process.argsFree(allocator, argv);
 
     const parser = args.Parser(CliArgs);
-    const parsed = parser.parse(allocator, argv) catch |err| switch (err) {
-        error.MissingUrl => {
-            std.debug.print("Error: --url is required\n", .{});
-            std.process.exit(2);
-        },
-        error.LimitRateRequiresStream => {
-            std.debug.print("Error: --limit-rate requires --stream\n", .{});
-            std.process.exit(2);
-        },
-        error.StreamRequiresFile => {
-            std.debug.print("Error: --body-file-stream requires --body-file\n", .{});
-            std.process.exit(2);
-        },
-        error.ConflictingDatagramPayloadSources => {
-            std.debug.print("Error: specify either --dgram-payload or --dgram-payload-file, not both\n", .{});
-            std.process.exit(2);
-        },
-        error.DatagramRequiresStream => {
-            std.debug.print("Error: --dgram options require --stream\n", .{});
-            std.process.exit(2);
-        },
-        error.InvalidRepeat => {
-            std.debug.print("Error: --repeat must be at least 1\n", .{});
-            std.process.exit(2);
-        },
-        error.RepeatRequiresBuffered => {
-            std.debug.print("Error: --repeat>1 cannot be combined with --stream\n", .{});
-            std.process.exit(2);
-        },
-        error.DatagramRepeatUnsupported => {
-            std.debug.print("Error: --repeat>1 with DATAGRAMs is not supported yet\n", .{});
-            std.process.exit(2);
-        },
-        else => return err,
+    const parsed = parser.parse(allocator, argv) catch |err| {
+        // Check if silent mode is requested
+        var silent = false;
+        for (argv) |arg| {
+            if (std.mem.eql(u8, arg, "--silent") or std.mem.eql(u8, arg, "-s")) {
+                silent = true;
+                break;
+            }
+        }
+
+        if (!silent) {
+            switch (err) {
+                error.MissingUrl => std.debug.print("Error: --url is required\n", .{}),
+                error.LimitRateRequiresStream => std.debug.print("Error: --limit-rate requires --stream\n", .{}),
+                error.StreamRequiresFile => std.debug.print("Error: --body-file-stream requires --body-file\n", .{}),
+                error.ConflictingDatagramPayloadSources => std.debug.print("Error: specify either --dgram-payload or --dgram-payload-file, not both\n", .{}),
+                error.DatagramRequiresStream => std.debug.print("Error: --dgram options require --stream\n", .{}),
+                error.InvalidRepeat => std.debug.print("Error: --repeat must be at least 1\n", .{}),
+                error.RepeatRequiresBuffered => std.debug.print("Error: --repeat>1 cannot be combined with --stream\n", .{}),
+                error.DatagramRepeatUnsupported => std.debug.print("Error: --repeat>1 with DATAGRAMs is not supported yet\n", .{}),
+                else => {},
+            }
+        }
+
+        switch (err) {
+            error.MissingUrl, error.LimitRateRequiresStream, error.StreamRequiresFile, error.ConflictingDatagramPayloadSources, error.DatagramRequiresStream, error.InvalidRepeat, error.RepeatRequiresBuffered, error.DatagramRepeatUnsupported => std.process.exit(2),
+            else => return err,
+        }
     };
 
     const uri = std.Uri.parse(parsed.url) catch {
-        std.debug.print("Error: invalid URL '{s}'\n", .{parsed.url});
+        if (!parsed.silent) {
+            std.debug.print("Error: invalid URL '{s}'\n", .{parsed.url});
+        }
         std.process.exit(2);
     };
 
     if (uri.scheme.len == 0 or !std.mem.eql(u8, uri.scheme, "https")) {
-        std.debug.print("Error: only https:// URLs are supported\n", .{});
+        if (!parsed.silent) {
+            std.debug.print("Error: only https:// URLs are supported\n", .{});
+        }
         std.process.exit(2);
     }
 
     const host_component = uri.host orelse {
-        std.debug.print("Error: URL missing host\n", .{});
+        if (!parsed.silent) {
+            std.debug.print("Error: URL missing host\n", .{});
+        }
         std.process.exit(2);
     };
 
@@ -128,10 +143,11 @@ fn mainImpl() !void {
     }
 
     var client_config = client.ClientConfig{};
-    client_config.verify_peer = parsed.verify_peer;
+    client_config.verify_peer = if (parsed.insecure) false else parsed.verify_peer;
     client_config.idle_timeout_ms = parsed.timeout_ms;
     client_config.enable_webtransport = parsed.enable_webtransport;
-    if (parsed.dgram_count > 0) {
+    // Enable DATAGRAMs if any DATAGRAM-related option is provided
+    if (parsed.dgram_count > 0 or parsed.dgram_payload.len > 0 or parsed.dgram_payload_file.len > 0) {
         client_config.enable_dgram = true;
         client_config.dgram_recv_queue_len = 64;
         client_config.dgram_send_queue_len = 64;
@@ -176,10 +192,17 @@ fn mainImpl() !void {
     defer if (use_stream_file) file_stream_ctx.file.close();
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer_impl = std.fs.File.stdout().writerStreaming(&stdout_buffer);
+    var output_file = if (parsed.output.len > 0) blk: {
+        break :blk try std.fs.cwd().createFile(parsed.output, .{});
+    } else std.fs.File.stdout();
+    defer if (parsed.output.len > 0) output_file.close();
+
+    var stdout_writer_impl = output_file.writerStreaming(&stdout_buffer);
     const stdout_writer = &stdout_writer_impl.interface;
     defer stdout_writer.flush() catch |flush_err| {
-        std.debug.print("Error flushing stdout: {}\n", .{flush_err});
+        if (!parsed.silent) {
+            std.debug.print("Error flushing output: {}\n", .{flush_err});
+        }
     };
     var rate_limiter_storage: RateLimiter = undefined;
     var rate_limiter_ptr: ?*RateLimiter = null;
@@ -248,6 +271,12 @@ const CliArgs = struct {
     dgram_wait_ms: u64 = 0,
     repeat: usize = 1,
     enable_webtransport: bool = false,
+    // Curl compatibility flags
+    curl_compat: bool = false,
+    include_headers: bool = false,
+    silent: bool = false,
+    insecure: bool = false,
+    output: []const u8 = "",
 
     pub const descriptions = .{
         .url = "Target URL (https://host[:port]/path)",
@@ -269,6 +298,12 @@ const CliArgs = struct {
         .dgram_wait_ms = "Extra time to wait for DATAGRAM echoes after sends (default: 0)",
         .repeat = "Number of concurrent identical requests (default: 1)",
         .enable_webtransport = "Enable WebTransport Extended CONNECT support",
+        // Curl compatibility
+        .curl_compat = "Enable curl-compatible output format",
+        .include_headers = "Include headers in output (curl -i)",
+        .silent = "Silent mode, suppress debug output (curl -s)",
+        .insecure = "Allow insecure connections (curl -k)",
+        .output = "Write output to file instead of stdout (curl -o)",
     };
 
     pub fn validate(self: *CliArgs) !void {
@@ -570,6 +605,8 @@ fn outputResponse(
     if (parsed.stream) {
         if (parsed.json) {
             try printJsonResponse(writer, allocator, response, false);
+        } else if (parsed.curl_compat or parsed.include_headers) {
+            try printCurlCompatResponse(writer, response, false);
         } else {
             try writer.print("status {d}\n", .{response.status});
         }
@@ -578,6 +615,11 @@ fn outputResponse(
 
     if (parsed.json) {
         try printJsonResponse(writer, allocator, response, parsed.output_body);
+        return;
+    }
+
+    if (parsed.curl_compat or parsed.include_headers) {
+        try printCurlCompatResponse(writer, response, parsed.output_body);
         return;
     }
 
@@ -597,6 +639,53 @@ fn outputResponse(
         try writer.writeAll(response.body);
         try writer.writeByte('\n');
     }
+}
+
+fn printCurlCompatResponse(
+    writer: anytype,
+    response: client.FetchResponse,
+    include_body: bool,
+) !void {
+    // Output HTTP/3 status line like curl does
+    const status_text = getStatusText(response.status);
+    try writer.print("HTTP/3 {d} {s}\r\n", .{ response.status, status_text });
+
+    // Output headers
+    for (response.headers) |pair| {
+        try writer.print("{s}: {s}\r\n", .{ pair.name, pair.value });
+    }
+
+    // Empty line between headers and body
+    try writer.writeAll("\r\n");
+
+    // Output body if requested
+    if (include_body and response.body.len > 0) {
+        try writer.writeAll(response.body);
+    }
+}
+
+fn getStatusText(status: u16) []const u8 {
+    return switch (status) {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        else => "",
+    };
 }
 
 fn loadDatagramPayload(allocator: std.mem.Allocator, parsed: CliArgs) ![]const u8 {

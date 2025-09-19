@@ -129,49 +129,62 @@ pub const QuicServer = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, cfg: config_mod.ServerConfig, matcher: routing.Matcher) !*QuicServer {
-        // Validate config
-        try cfg.validate();
+        const overrides = try runtime_config.applyRuntimeOverrides(allocator, cfg, WithWT);
+        const cfg_eff = overrides.config;
 
-        // Create qlog directory if needed
-        try cfg.ensureQlogDir();
+        // Validate effective config after overrides and create qlog dir if needed
+        try cfg_eff.validate();
+        try cfg_eff.ensureQlogDir();
 
-        // Create quiche config
+        // Create quiche config using effective settings
         var q_cfg = try quiche.Config.new(quiche.PROTOCOL_VERSION);
         errdefer q_cfg.deinit();
 
         // Load TLS certificates
-        const cert_path = try allocator.dupeZ(u8, cfg.cert_path);
+        const cert_path = try allocator.dupeZ(u8, cfg_eff.cert_path);
         defer allocator.free(cert_path);
-        const key_path = try allocator.dupeZ(u8, cfg.key_path);
+        const key_path = try allocator.dupeZ(u8, cfg_eff.key_path);
         defer allocator.free(key_path);
 
         try q_cfg.loadCertChainFromPemFile(cert_path);
         try q_cfg.loadPrivKeyFromPemFile(key_path);
 
         // Set ALPN protocols with proper wire format
-        const alpn_wire = try quiche.encodeAlpn(allocator, cfg.alpn_protocols);
+        const alpn_wire = try quiche.encodeAlpn(allocator, cfg_eff.alpn_protocols);
         defer allocator.free(alpn_wire);
         try q_cfg.setApplicationProtos(alpn_wire);
 
         // Configure transport parameters
-        q_cfg.setMaxIdleTimeout(cfg.idle_timeout_ms);
-        q_cfg.setInitialMaxData(cfg.initial_max_data);
-        q_cfg.setInitialMaxStreamDataBidiLocal(cfg.initial_max_stream_data_bidi_local);
-        q_cfg.setInitialMaxStreamDataBidiRemote(cfg.initial_max_stream_data_bidi_remote);
-        q_cfg.setInitialMaxStreamDataUni(cfg.initial_max_stream_data_uni);
-        q_cfg.setInitialMaxStreamsBidi(cfg.initial_max_streams_bidi);
-        q_cfg.setInitialMaxStreamsUni(cfg.initial_max_streams_uni);
-        q_cfg.setMaxRecvUdpPayloadSize(cfg.max_recv_udp_payload_size);
-        q_cfg.setMaxSendUdpPayloadSize(cfg.max_send_udp_payload_size);
+        q_cfg.setMaxIdleTimeout(cfg_eff.idle_timeout_ms);
+        q_cfg.setInitialMaxData(cfg_eff.initial_max_data);
+        q_cfg.setInitialMaxStreamDataBidiLocal(cfg_eff.initial_max_stream_data_bidi_local);
+        q_cfg.setInitialMaxStreamDataBidiRemote(cfg_eff.initial_max_stream_data_bidi_remote);
+        q_cfg.setInitialMaxStreamDataUni(cfg_eff.initial_max_stream_data_uni);
+        q_cfg.setInitialMaxStreamsBidi(cfg_eff.initial_max_streams_bidi);
+        q_cfg.setInitialMaxStreamsUni(cfg_eff.initial_max_streams_uni);
+        q_cfg.setMaxRecvUdpPayloadSize(cfg_eff.max_recv_udp_payload_size);
+        q_cfg.setMaxSendUdpPayloadSize(cfg_eff.max_send_udp_payload_size);
 
         // Features
-        q_cfg.setDisableActiveMigration(cfg.disable_active_migration);
-        q_cfg.enablePacing(cfg.enable_pacing);
-        q_cfg.enableDgram(cfg.enable_dgram, cfg.dgram_recv_queue_len, cfg.dgram_send_queue_len);
-        q_cfg.grease(cfg.grease);
+        q_cfg.setDisableActiveMigration(cfg_eff.disable_active_migration);
+        q_cfg.enablePacing(cfg_eff.enable_pacing);
+        if (cfg_eff.enable_dgram) {
+            const recv_len = if (cfg_eff.dgram_recv_queue_len == 0) 1024 else cfg_eff.dgram_recv_queue_len;
+            const send_len = if (cfg_eff.dgram_send_queue_len == 0) 1024 else cfg_eff.dgram_send_queue_len;
+            if (cfg_eff.enable_debug_logging) {
+                std.debug.print("[init] enabling QUIC DATAGRAM (recv_queue={d}, send_queue={d})\n", .{ recv_len, send_len });
+            }
+            q_cfg.enableDgram(true, recv_len, send_len);
+        } else {
+            if (cfg_eff.enable_debug_logging) {
+                std.debug.print("[init] QUIC DATAGRAM disabled via config\n", .{});
+            }
+            q_cfg.enableDgram(false, cfg_eff.dgram_recv_queue_len, cfg_eff.dgram_send_queue_len);
+        }
+        q_cfg.grease(cfg_eff.grease);
 
         // Set congestion control
-        const cc_algo = try allocator.dupeZ(u8, cfg.cc_algorithm);
+        const cc_algo = try allocator.dupeZ(u8, cfg_eff.cc_algorithm);
         defer allocator.free(cc_algo);
         if (q_cfg.setCcAlgorithmName(cc_algo)) |_| {
             // ok
@@ -179,7 +192,7 @@ pub const QuicServer = struct {
             // Log warning about unsupported CC algorithm
             // During init, we don't have a server instance yet, so use std.debug.print directly
             // This is a one-time initialization message
-            std.debug.print("[WARN] cc={s} unsupported ({any}); falling back to cubic\n", .{ cfg.cc_algorithm, err });
+            std.debug.print("[WARN] cc={s} unsupported ({any}); falling back to cubic\n", .{ cfg_eff.cc_algorithm, err });
             const fallback = try allocator.dupeZ(u8, "cubic");
             defer allocator.free(fallback);
             _ = q_cfg.setCcAlgorithmName(fallback) catch {};
@@ -196,9 +209,6 @@ pub const QuicServer = struct {
         // Generate random HMAC seed for connection ID derivation
         var conn_id_seed: [32]u8 = undefined;
         std.crypto.random.bytes(&conn_id_seed);
-
-        const overrides = try runtime_config.applyRuntimeOverrides(allocator, cfg, WithWT);
-        const cfg_eff = overrides.config;
 
         var stream_states = std.hash_map.HashMap(conn_state.StreamKey, *RequestState, conn_state.StreamKeyContext, 80).init(allocator);
         errdefer stream_states.deinit();
@@ -226,6 +236,15 @@ pub const QuicServer = struct {
             .h3 = h3_state,
             .wt = wt_state,
         };
+
+        // Reapply DATAGRAM setting on stored quiche config to ensure move semantics
+        if (server.config.enable_dgram) {
+            const recv_len = if (server.config.dgram_recv_queue_len == 0) 1024 else server.config.dgram_recv_queue_len;
+            const send_len = if (server.config.dgram_send_queue_len == 0) 1024 else server.config.dgram_send_queue_len;
+            server.quiche_config.enableDgram(true, recv_len, send_len);
+        } else {
+            server.quiche_config.enableDgram(false, server.config.dgram_recv_queue_len, server.config.dgram_send_queue_len);
+        }
 
         // Create H3 config; WebTransport requires explicit build flag
         if (WithWT and overrides.webtransport_enabled) {
@@ -591,6 +610,14 @@ pub const QuicServer = struct {
                                 );
                                 conn.?.http3 = h3_conn;
                                 std.debug.print("✓ HTTP/3 connection created for DCID: {s}\n", .{hex_dcid});
+                                if (self.config.enable_dgram) {
+                                    const max_dgram = conn.?.conn.dgramMaxWritableLen();
+                                    if (max_dgram) |len| {
+                                        server_logging.infof(self, "  QUIC DATAGRAM enabled (max_writable={d})\n", .{len});
+                                    } else {
+                                        server_logging.warnf(self, "  QUIC DATAGRAM disabled: max_writable unavailable\n", .{});
+                                    }
+                                }
                             }
                         } else if (!std.mem.eql(u8, proto, "h3")) {
                             // Log when we're not using H3 (e.g., hq-interop)

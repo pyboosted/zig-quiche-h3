@@ -95,6 +95,10 @@ pub const EventLoop = struct {
         _ = c.ev_run(self.loop, 0);
     }
 
+    pub fn runOnce(self: *EventLoop) void {
+        _ = c.ev_run(self.loop, c.EVRUN_ONCE);
+    }
+
     pub fn stop(self: *EventLoop) void {
         c.ev_break(self.loop, c.EVBREAK_ALL);
     }

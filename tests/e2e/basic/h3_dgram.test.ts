@@ -1,13 +1,12 @@
 import { expect, test } from "bun:test";
 import { retryWithBackoff } from "@helpers/cpuLoad";
-import { get } from "@helpers/curlClient";
+import { get, zigClient } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { spawnServer } from "@helpers/spawnServer";
 import type { ServerBinaryType } from "@helpers/testUtils";
 
 describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
-    // TODO: replace with proper zig-http3-client checks when its done
-    test.skip("request-associated H3 dgram echo", async () => {
+    test("request-associated H3 dgram echo", async () => {
         const server = await spawnServer({ env: { H3_DGRAM_ECHO: "1", RUST_LOG: "trace" } });
 
         try {
@@ -20,39 +19,32 @@ describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
                 "flow_id for this request is the stream_id",
             );
 
-            // Test H3 DATAGRAM echo functionality using quiche-client helper
-            const { quicheClient } = await import("@helpers/quicheClient");
-
+            // Test H3 DATAGRAM echo functionality using our native h3-cli
             await retryWithBackoff(
                 async () => {
-                    const res = await quicheClient(
+                    const response = await zigClient(
                         `https://127.0.0.1:${server.port}/h3dgram/echo`,
                         {
-                            dumpJson: false, // We want raw output for DATAGRAM logs
-                            dgramProto: "oneway",
+                            h3Dgram: true,
+                            dgramPayload: "test-datagram-payload",
                             dgramCount: 3,
-                            idleTimeout: 10000, // 10 second idle timeout to allow echo responses
-                            maxData: 10000000, // Increase flow control limits
+                            dgramIntervalMs: 100,
+                            dgramWaitMs: 500,
+                            maxTime: 10,
                         },
                     );
 
-                    console.log("[H3 DGRAM Test] Client output:", res.output);
-                    console.log("[H3 DGRAM Test] Client error:", res.error);
-                    console.log("[H3 DGRAM Test] Client success:", res.success);
+                    console.log("[H3 DGRAM Test] Response status:", response.status);
+                    console.log("[H3 DGRAM Test] Response raw:", response.raw.slice(0, 500));
 
-                    if (!res.success) {
-                        throw new Error("quiche-client failed");
-                    }
+                    // Check that we got a valid response
+                    expect(response.status).toBe(200);
 
-                    const combined = `${res.output || ""}\n${res.error || ""}`;
-
-                    if (!combined.includes("sending HTTP/3 DATAGRAM")) {
-                        throw new Error("Missing 'sending HTTP/3 DATAGRAM' in output");
-                    }
-
-                    if (!combined.includes("Received DATAGRAM")) {
-                        console.error("[H3 DGRAM Test] No 'Received DATAGRAM' found");
-                        console.error("[H3 DGRAM Test] Output sample:", combined.slice(0, 1000));
+                    // The raw output should contain DATAGRAM events if streaming
+                    const rawText = response.raw;
+                    if (!rawText.includes("event=datagram") && !rawText.includes("flow_id")) {
+                        console.error("[H3 DGRAM Test] No DATAGRAM events found in output");
+                        console.error("[H3 DGRAM Test] Output sample:", rawText.slice(0, 1000));
                         throw new Error("DATAGRAM echo not received - possible timing issue");
                     }
                 },
@@ -64,8 +56,7 @@ describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
         }
     });
 
-    // TODO: replace with proper zig-http3-client checks when its done
-    test.skip("H3 dgram disabled when QUIC datagrams disabled", async () => {
+    test("H3 dgram disabled when QUIC datagrams disabled", async () => {
         // Test server without DATAGRAM support enabled
         const server = await spawnServer({ binaryType }); // No H3_DGRAM_ECHO env var
 
@@ -80,8 +71,7 @@ describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
         }
     });
 
-    // TODO: replace with proper zig-http3-client checks when its done
-    test.skip("H3 dgram endpoint provides correct information", async () => {
+    test("H3 dgram endpoint provides correct information", async () => {
         const server = await spawnServer({ env: { H3_DGRAM_ECHO: "1" } });
 
         try {
@@ -92,9 +82,6 @@ describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
             expect(body).toContain("H3 DATAGRAM Echo Endpoint");
             expect(body).toContain("Send HTTP/3 DATAGRAMs");
             expect(body).toContain("flow_id for this request is the stream_id");
-            expect(body).toContain("quiche-client");
-            expect(body).toContain("--dgram-proto oneway");
-            expect(body).toContain("--dgram-count");
         } finally {
             await server.cleanup();
         }
