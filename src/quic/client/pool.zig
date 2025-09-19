@@ -7,6 +7,9 @@ const ClientError = @import("mod.zig").ClientError;
 /// Connection pool for efficient HTTP/3 connection reuse
 /// Manages multiple connections per host with automatic cleanup
 pub const ConnectionPool = struct {
+    const QuicClientInitResult = @typeInfo(@TypeOf(QuicClient.init)).Fn.return_type.?;
+    const QuicClientInitError = @typeInfo(QuicClientInitResult).ErrorUnion.error_set;
+    pub const AcquireError = ClientError || QuicClientInitError;
     allocator: std.mem.Allocator,
     connections: std.StringHashMap(ConnectionEntry),
     config: ClientConfig,
@@ -21,15 +24,29 @@ pub const ConnectionPool = struct {
     const ConnectionEntry = struct {
         allocator: std.mem.Allocator,
         endpoint: ServerEndpoint,
-        clients: std.ArrayList(*QuicClient),
-        last_used: std.ArrayList(i64),
+        host_storage: []u8,
+        sni_storage: ?[]u8,
+        clients: std.ArrayListUnmanaged(*QuicClient),
+        last_used: std.ArrayListUnmanaged(i64),
 
-        fn init(allocator: std.mem.Allocator, endpoint: ServerEndpoint) ConnectionEntry {
-            return .{
+        fn init(allocator: std.mem.Allocator, endpoint: ServerEndpoint) !ConnectionEntry {
+            const host_copy = try allocator.dupe(u8, endpoint.host);
+            errdefer allocator.free(host_copy);
+
+            const sni_copy = if (endpoint.sni) |s| try allocator.dupe(u8, s) else null;
+            errdefer if (sni_copy) |s| allocator.free(s);
+
+            return ConnectionEntry{
                 .allocator = allocator,
-                .endpoint = endpoint,
-                .clients = std.ArrayList(*QuicClient).init(allocator),
-                .last_used = std.ArrayList(i64).init(allocator),
+                .endpoint = .{
+                    .host = host_copy,
+                    .port = endpoint.port,
+                    .sni = if (sni_copy) |s| s else null,
+                },
+                .host_storage = host_copy,
+                .sni_storage = sni_copy,
+                .clients = .{},
+                .last_used = .{},
             };
         }
 
@@ -39,8 +56,10 @@ pub const ConnectionPool = struct {
                 client.deinit();
                 self.allocator.destroy(client);
             }
-            self.clients.deinit();
-            self.last_used.deinit();
+            self.clients.deinit(self.allocator);
+            self.last_used.deinit(self.allocator);
+            self.allocator.free(self.host_storage);
+            if (self.sni_storage) |s| self.allocator.free(s);
         }
 
         /// Find an idle connection or null if none available
@@ -96,23 +115,45 @@ pub const ConnectionPool = struct {
 
     /// Get or create a connection to the specified endpoint
     /// Returns a borrowed connection that should be released after use
-    pub fn acquire(self: *Self, endpoint: ServerEndpoint) ClientError!*QuicClient {
+    pub fn acquire(self: *Self, endpoint: ServerEndpoint) AcquireError!*QuicClient {
         const key = try self.makeKey(endpoint);
         defer self.allocator.free(key);
 
         const now = std.time.milliTimestamp();
 
-        // Get or create entry for this host
-        const gop = try self.connections.getOrPut(try self.allocator.dupe(u8, key));
-        if (!gop.found_existing) {
-            gop.value_ptr.* = ConnectionEntry.init(self.allocator, endpoint);
-        }
+        var entry: *ConnectionEntry = undefined;
 
-        var entry = gop.value_ptr;
+        if (self.connections.getPtr(key)) |existing| {
+            entry = existing;
+        } else {
+            const key_owned = try self.allocator.dupe(u8, key);
+            const gop = self.connections.getOrPut(key_owned) catch |err| {
+                self.allocator.free(key_owned);
+                switch (err) {
+                    error.OutOfMemory => return ClientError.OutOfMemory,
+                }
+            };
+
+            if (gop.found_existing) {
+                self.allocator.free(key_owned);
+                entry = gop.value_ptr;
+            } else {
+                gop.value_ptr.* = ConnectionEntry.init(self.allocator, endpoint) catch |err| {
+                    switch (err) {
+                        error.OutOfMemory => return ClientError.OutOfMemory,
+                    }
+                };
+                entry = gop.value_ptr;
+            }
+        }
 
         // Clean up stale connections first
         const removed = entry.removeStale(now, self.max_idle_ms);
-        self.total_count -= removed;
+        if (removed > self.total_count) {
+            self.total_count = 0;
+        } else {
+            self.total_count -= removed;
+        }
 
         // Try to find an idle connection
         if (entry.findIdle()) |result| {
@@ -139,8 +180,8 @@ pub const ConnectionPool = struct {
             self.allocator.destroy(client);
         }
 
-        try entry.clients.append(client);
-        try entry.last_used.append(now);
+        try entry.clients.append(self.allocator, client);
+        try entry.last_used.append(self.allocator, now);
         self.total_count += 1;
 
         return client;
@@ -217,7 +258,11 @@ pub const ConnectionPool = struct {
         while (iter.next()) |entry| {
             const removed = entry.value_ptr.removeStale(now, self.max_idle_ms);
             total_removed += removed;
-            self.total_count -= removed;
+            if (removed > self.total_count) {
+                self.total_count = 0;
+            } else {
+                self.total_count -= removed;
+            }
         }
 
         return total_removed;
@@ -229,11 +274,13 @@ pub const ConnectionPool = struct {
         return std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ endpoint.host, endpoint.port });
     }
 
-    fn createConnection(self: *Self, endpoint: ServerEndpoint) !*QuicClient {
-        const client = try self.allocator.create(QuicClient);
-        errdefer self.allocator.destroy(client);
-
-        client.* = try QuicClient.init(self.allocator, self.config);
+    fn createConnection(self: *Self, endpoint: ServerEndpoint) AcquireError!*QuicClient {
+        const client = QuicClient.init(self.allocator, self.config) catch |err| {
+            return switch (err) {
+                error.OutOfMemory => ClientError.OutOfMemory,
+                else => err,
+            };
+        };
         errdefer client.deinit();
 
         try client.connect(endpoint);
@@ -299,7 +346,7 @@ test "ConnectionEntry stale removal" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var entry = ConnectionPool.ConnectionEntry.init(allocator, .{
+    var entry = try ConnectionPool.ConnectionEntry.init(allocator, .{
         .host = "test",
         .port = 443,
     });
