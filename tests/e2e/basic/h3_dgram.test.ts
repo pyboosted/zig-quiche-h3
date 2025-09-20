@@ -27,7 +27,6 @@ describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
                     dgramPayload: "test-datagram-payload",
                     dgramCount: 3,
                     dgramIntervalMs: 0,
-                    waitForDgrams: 1,
                     maxTime: 10,
                 },
             );

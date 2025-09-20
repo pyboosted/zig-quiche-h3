@@ -14,7 +14,6 @@ describeBoth("QUIC DATAGRAM echo", (_binaryType: ServerBinaryType) => {
                     dgramPayload: "test-dgram-payload",
                     dgramCount: 3,
                     dgramIntervalMs: 0,
-                    waitForDgrams: 1,
                     curlCompat: false,
                 });
 
