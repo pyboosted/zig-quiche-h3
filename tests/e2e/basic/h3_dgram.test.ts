@@ -1,9 +1,8 @@
 import { expect, test } from "bun:test";
-import { retryWithBackoff } from "@helpers/cpuLoad";
-import { get, zigClient } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { spawnServer } from "@helpers/spawnServer";
 import type { ServerBinaryType } from "@helpers/testUtils";
+import { get, zigClient } from "@helpers/zigClient";
 
 describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
     test("request-associated H3 dgram echo", async () => {
@@ -14,43 +13,39 @@ describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
             const response = await get(`https://127.0.0.1:${server.port}/h3dgram/echo`);
 
             expect(response.status).toBe(200);
-            expect(new TextDecoder().decode(response.body)).toContain("H3 DATAGRAM Echo Endpoint");
-            expect(new TextDecoder().decode(response.body)).toContain(
-                "flow_id for this request is the stream_id",
+            const bodyText = new TextDecoder().decode(response.body);
+            console.log("[DEBUG] Response body:", bodyText);
+            console.log("[DEBUG] Response body length:", response.body.length);
+            expect(bodyText).toContain("H3 DATAGRAM Echo Endpoint");
+            expect(bodyText).toContain("flow_id for this request is the stream_id");
+
+            // Test H3 DATAGRAM echo functionality using our native h3-client
+            const datagramResponse = await zigClient(
+                `https://127.0.0.1:${server.port}/h3dgram/echo`,
+                {
+                    h3Dgram: true,
+                    dgramPayload: "test-datagram-payload",
+                    dgramCount: 3,
+                    dgramIntervalMs: 100,
+                    dgramWaitMs: 800, // Increased wait time to ensure all echoes are received
+                    maxTime: 10,
+                },
             );
 
-            // Test H3 DATAGRAM echo functionality using our native h3-cli
-            await retryWithBackoff(
-                async () => {
-                    const response = await zigClient(
-                        `https://127.0.0.1:${server.port}/h3dgram/echo`,
-                        {
-                            h3Dgram: true,
-                            dgramPayload: "test-datagram-payload",
-                            dgramCount: 3,
-                            dgramIntervalMs: 100,
-                            dgramWaitMs: 500,
-                            maxTime: 10,
-                        },
-                    );
+            // Check that we got a valid response
+            expect(datagramResponse.status).toBe(200);
 
-                    console.log("[H3 DGRAM Test] Response status:", response.status);
-                    console.log("[H3 DGRAM Test] Response raw:", response.raw.slice(0, 500));
+            // The raw output should contain DATAGRAM events when streaming
+            const rawText = datagramResponse.raw;
+            expect(rawText).toContain("event=datagram");
 
-                    // Check that we got a valid response
-                    expect(response.status).toBe(200);
+            // Verify we received datagram echo events with flow_id
+            const datagramEvents = rawText.match(/event=datagram/g);
+            expect(datagramEvents).toBeTruthy();
+            expect(datagramEvents!.length).toBeGreaterThan(0);
 
-                    // The raw output should contain DATAGRAM events if streaming
-                    const rawText = response.raw;
-                    if (!rawText.includes("event=datagram") && !rawText.includes("flow_id")) {
-                        console.error("[H3 DGRAM Test] No DATAGRAM events found in output");
-                        console.error("[H3 DGRAM Test] Output sample:", rawText.slice(0, 1000));
-                        throw new Error("DATAGRAM echo not received - possible timing issue");
-                    }
-                },
-                3,
-                2000,
-            ); // 3 retries with 2 second delay
+            // The output should also contain flow_id information
+            expect(rawText).toContain("flow");
         } finally {
             await server.cleanup();
         }

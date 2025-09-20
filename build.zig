@@ -420,21 +420,10 @@ pub fn build(b: *std.Build) void {
         linkCommon(target, h3_client, link_ssl, with_libev, libev_lib_dir, true);
         b.installArtifact(h3_client);
 
-        // Also build as h3-cli for curl compatibility
-        const h3_cli = b.addExecutable(.{ .name = "h3-cli", .root_module = h3_client_mod });
-        addQuicheLink(b, h3_cli, use_system_quiche, quiche_lib_path, cargo_step);
-        linkCommon(target, h3_cli, link_ssl, with_libev, libev_lib_dir, true);
-        b.installArtifact(h3_cli);
-
         const run_h3_client = b.addRunArtifact(h3_client);
         if (b.args) |cli_args| run_h3_client.addArgs(cli_args);
-        const h3_client_step = b.step("h3-client", "Run the HTTP/3 client CLI");
+        const h3_client_step = b.step("h3-client", "Run the HTTP/3 client CLI (curl-compatible)");
         h3_client_step.dependOn(&run_h3_client.step);
-
-        const run_h3_cli = b.addRunArtifact(h3_cli);
-        if (b.args) |cli_args| run_h3_cli.addArgs(cli_args);
-        const h3_cli_step = b.step("h3-cli", "Run the HTTP/3 CLI (curl-compatible)");
-        h3_cli_step.dependOn(&run_h3_cli.step);
     }
 
     // WebTransport test client (only when explicitly enabled)

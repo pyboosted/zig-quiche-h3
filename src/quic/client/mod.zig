@@ -113,6 +113,7 @@ pub const ClientError = error{
     GoAwayReceived,
     ConnectionGoingAway,
     InvalidRequest,
+    InvalidState,
     DatagramNotEnabled,
     DatagramTooLarge,
     DatagramSendFailed,
@@ -503,8 +504,8 @@ pub const QuicClient = struct {
             // Failing to unregister would cause use-after-free when quiche tries to log
             quiche.enableDebugLogging(null, null) catch {
                 // Even if disabling fails, we still need to clean up
-                // Log the error but continue with cleanup
-                std.debug.print("Warning: Failed to disable debug logging\n", .{});
+                // Silently continue with cleanup - don't pollute stdout
+                // The error is not critical and the cleanup must proceed
             };
             self.allocator.destroy(ctx);
             self.log_context = null;
@@ -1147,6 +1148,7 @@ pub const QuicClient = struct {
 
     fn trySendBody(self: *QuicClient, stream_id: u64, state: *FetchState) ClientError!bool {
         const conn = try self.requireConn();
+        var h3_conn = self.h3_conn orelse return ClientError.InvalidState;
         var wrote_any = false;
 
         while (state.hasPendingBody()) {
@@ -1162,11 +1164,6 @@ pub const QuicClient = struct {
                 if (state.body_buffer.len == 0 and state.provider_done) break;
             }
 
-            const capacity = conn.streamCapacity(stream_id) catch {
-                return ClientError.H3Error;
-            };
-            if (capacity == 0) break;
-
             const buf_len = state.body_buffer.len;
             if (state.body_sent >= buf_len) {
                 if (!state.provider_done) continue;
@@ -1174,15 +1171,18 @@ pub const QuicClient = struct {
             }
 
             const remaining = buf_len - state.body_sent;
-            const chunk_len = if (capacity < remaining) capacity else remaining;
+            // Limit chunk size by remaining data and buffer size
+            const chunk_len = @min(remaining, self.send_buf.len);
             if (chunk_len == 0) break;
 
             const end_index = state.body_sent + chunk_len;
             const chunk = state.body_buffer[state.body_sent..end_index];
             const fin = end_index == state.body_buffer.len and state.provider_done;
 
-            const written = conn.streamSend(stream_id, chunk, fin) catch |err| switch (err) {
-                error.SendFailed => return ClientError.H3Error,
+            // Use H3 sendBody to properly wrap data in HTTP/3 DATA frames
+            const written = h3_conn.sendBody(conn, stream_id, chunk, fin) catch |err| switch (err) {
+                quiche.h3.Error.StreamBlocked,
+                quiche.h3.Error.Done => break,
                 else => return ClientError.H3Error,
             };
 

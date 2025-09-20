@@ -1,5 +1,5 @@
 import { type Subprocess, spawn } from "bun";
-import { get } from "./curlClient";
+import { get } from "./zigClient";
 import {
     checkDependencies,
     getCertPath,

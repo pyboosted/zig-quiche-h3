@@ -1,6 +1,6 @@
 import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { curl, get } from "@helpers/curlClient";
+import { zigClient, get } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, type ServerBinaryType } from "@helpers/testUtils";
@@ -31,7 +31,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01, 0x02, 0x03]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -50,7 +50,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -69,7 +69,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -90,7 +90,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -110,7 +110,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -128,7 +128,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(100, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -149,7 +149,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -167,7 +167,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -184,7 +184,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -215,7 +215,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             expect(fullResponse.status).toBe(200);
 
             // Get range
-            const rangeResponse = await curl(
+            const rangeResponse = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -235,15 +235,15 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
             // Request three different ranges
-            const range1 = await curl(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
+            const range1 = await zigClient(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
                 headers: { Range: "bytes=0-99" },
             });
 
-            const range2 = await curl(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
+            const range2 = await zigClient(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
                 headers: { Range: "bytes=500-599" },
             });
 
-            const range3 = await curl(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
+            const range3 = await zigClient(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
                 headers: { Range: "bytes=-100" },
             });
 
@@ -268,7 +268,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0xff]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -288,7 +288,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0xaa, 0xbb]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -307,7 +307,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(0, new Uint8Array([]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {
@@ -327,7 +327,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     method: "HEAD",
@@ -347,7 +347,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const testFile = await mkfile(100, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     method: "HEAD",
@@ -371,7 +371,7 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
             // Request middle 1MB
-            const response = await curl(
+            const response = await zigClient(
                 `https://127.0.0.1:${server.port}/download/${relativePath}`,
                 {
                     headers: {

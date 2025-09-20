@@ -2,7 +2,7 @@ import "../test-runner";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { spawnServer, type ServerInstance } from "@helpers/spawnServer";
-import { ensureQuicheBuilt, quicheClient } from "@helpers/quicheClient";
+import { zigClient } from "@helpers/zigClient";
 import { mkfile, type ServerBinaryType } from "@helpers/testUtils";
 
 function extractStatuses(jsonLines: string): number[] {
@@ -25,7 +25,6 @@ describeBoth("Per-connection request cap", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {
-        await ensureQuicheBuilt();
         server = await spawnServer({
             binaryType,
             // Cap requests to 2; leave downloads effectively unlimited
@@ -43,26 +42,25 @@ describeBoth("Per-connection request cap", (binaryType: ServerBinaryType) => {
     });
 
     describe("rejects N+1 requests with 503 on same connection", () => {
-        it.skip("third concurrent request gets 503 when cap=2", async () => {
-            // NOTE: quiche-client's --requests flag sends requests sequentially,
-            // not concurrently. However, if we use a slow handler that delays
-            // the response, we can create overlapping requests on the same connection.
+        it("third concurrent request gets 503 when cap=2", async () => {
+            const url = `https://127.0.0.1:${server.port}/slow?delay=1500`;
 
-            // The problem is that quiche-client waits for each request to fully complete
-            // before sending the next one. So this test won't work as expected with
-            // the current quiche-client implementation.
+            const response = await zigClient(url, {
+                concurrent: 3,
+                curlCompat: true,
+            });
 
-            // For now, we'll mark this test as a known limitation and provide
-            // a manual test procedure instead.
+            const responses = response.responses ?? [response];
+            expect(responses.length).toBe(3);
 
-            console.log("WARNING: This test requires a client that can send truly concurrent requests.");
-            console.log("The quiche-client sends requests sequentially, so the cap may not trigger.");
-            console.log("Manual test: Use curl --http3-only with multiple parallel requests.");
+            const statusCounts = responses.reduce((acc, res) => {
+                const key = res.status;
+                acc[key] = (acc[key] ?? 0) + 1;
+                return acc;
+            }, {} as Record<number, number>);
 
-            // Skip this test for now
-            // TODO: Implement when we have our own H3 client that supports truly concurrent requests
-            // The current clients (curl, quiche-client) create separate connections or send sequentially
-            expect(true).toBe(true);
+            expect(statusCounts[200] ?? 0).toBe(2);
+            expect(statusCounts[503] ?? 0).toBe(1);
         });
 
         it("manual test instructions", () => {

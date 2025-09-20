@@ -338,11 +338,6 @@ export async function checkDependencies(): Promise<void> {
     const dependencies = [
         { cmd: "zig", name: "Zig", install: "https://ziglang.org/download/" },
         { cmd: "cargo", name: "Cargo (Rust)", install: "https://rustup.rs/" },
-        {
-            cmd: "curl",
-            name: "curl",
-            install: "brew install curl (macOS) or apt-get install curl (Linux)",
-        },
     ];
 
     for (const dep of dependencies) {

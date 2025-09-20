@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, it } from "bun:test";
-import { curl, get, head, post } from "@helpers/curlClient";
+import { zigClient, get, head, post } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { expectJson, parseContentLength, type ServerBinaryType } from "@helpers/testUtils";
@@ -68,10 +68,12 @@ describeBoth("HTTP/3 Basic", (binaryType: ServerBinaryType) => {
 
     it("POST /api/users creates user (201)", async () => {
         const userData = JSON.stringify({ name: "Test User", email: "test@example.com" });
+        const userBytes = new TextEncoder().encode(userData);
 
         const response = await post(`https://127.0.0.1:${server.port}/api/users`, userData, {
             headers: {
                 "content-type": "application/json",
+                "content-length": userBytes.length.toString(),
             },
         });
 
@@ -85,13 +87,16 @@ describeBoth("HTTP/3 Basic", (binaryType: ServerBinaryType) => {
 
     it("POST /api/echo returns request body as JSON", async () => {
         const testData = { message: "Hello, HTTP/3!", timestamp: Date.now() };
+        const body = JSON.stringify(testData);
+        const bodyBytes = new TextEncoder().encode(body);
 
         const response = await post(
             `https://127.0.0.1:${server.port}/api/echo`,
-            JSON.stringify(testData),
+            body,
             {
                 headers: {
                     "content-type": "application/json",
+                    "content-length": bodyBytes.length.toString(),
                 },
             },
         );
@@ -115,7 +120,7 @@ describeBoth("HTTP/3 Basic", (binaryType: ServerBinaryType) => {
     });
 
     it("DELETE /api/users returns 405 with Allow header", async () => {
-        const response = await curl(`https://127.0.0.1:${server.port}/api/users`, {
+        const response = await zigClient(`https://127.0.0.1:${server.port}/api/users`, {
             method: "DELETE",
         });
 
@@ -131,25 +136,14 @@ describeBoth("HTTP/3 Basic", (binaryType: ServerBinaryType) => {
 
     it("TLS validation fails without -k flag", async () => {
         // Test with a curl command that doesn't skip certificate validation
-        const proc = Bun.spawn({
-            cmd: [
-                "curl",
-                "--http3-only",
-                "--max-time",
-                "5", // Short timeout
-                `https://127.0.0.1:${server.port}/`,
-            ],
-            stdout: "pipe",
-            stderr: "pipe",
-        });
-
-        await proc.exited;
-
-        // Should fail due to self-signed certificate (or timeout)
-        expect(proc.exitCode).not.toBe(0);
-
-        // Don't check stderr content as curl behavior varies
-        // The important thing is that it fails without -k flag
+        await expect(
+            zigClient(`https://127.0.0.1:${server.port}/`, {
+                method: "GET",
+                insecure: false,
+                verifyPeer: true,
+                curlCompat: false,
+            }),
+        ).rejects.toThrow();
     });
 
     it("Custom headers are handled correctly", async () => {

@@ -120,6 +120,7 @@ fn mainImpl() !void {
             body_owned = data;
         }
     } else if (parsed.body.len > 0) {
+        std.debug.print("[h3-cli] inline body length = {d}\n", .{parsed.body.len});
         body_owned = try allocator.dupe(u8, parsed.body);
     }
     defer if (body_owned) |buf| allocator.free(buf);
@@ -606,7 +607,7 @@ fn outputResponse(
         if (parsed.json) {
             try printJsonResponse(writer, allocator, response, false);
         } else if (parsed.curl_compat or parsed.include_headers) {
-            try printCurlCompatResponse(writer, response, false);
+            try printCurlCompatResponse(writer, response, false, null);
         } else {
             try writer.print("status {d}\n", .{response.status});
         }
@@ -619,7 +620,7 @@ fn outputResponse(
     }
 
     if (parsed.curl_compat or parsed.include_headers) {
-        try printCurlCompatResponse(writer, response, parsed.output_body);
+        try printCurlCompatResponse(writer, response, parsed.output_body, null);
         return;
     }
 
@@ -645,6 +646,7 @@ fn printCurlCompatResponse(
     writer: anytype,
     response: client.FetchResponse,
     include_body: bool,
+    stats: ?RequestStats,
 ) !void {
     // Output HTTP/3 status line like curl does
     const status_text = getStatusText(response.status);
@@ -655,12 +657,23 @@ fn printCurlCompatResponse(
         try writer.print("{s}: {s}\r\n", .{ pair.name, pair.value });
     }
 
+    if (stats) |meta| {
+        const duration_ms = RequestStats.toMillis(meta.durationNs());
+        try writer.print("x-h3cli-request-index: {d}\r\n", .{meta.index});
+        try writer.print("x-h3cli-stream-id: {d}\r\n", .{meta.stream_id});
+        try writer.print("x-h3cli-duration-ms: {d}\r\n", .{duration_ms});
+    }
+
     // Empty line between headers and body
     try writer.writeAll("\r\n");
 
     // Output body if requested
     if (include_body and response.body.len > 0) {
         try writer.writeAll(response.body);
+    }
+
+    if (stats != null) {
+        try writer.writeAll("\r\n");
     }
 }
 
@@ -713,15 +726,46 @@ fn sendDatagramsForHandle(
     }
 }
 
+const RequestStats = struct {
+    index: usize,
+    stream_id: u64,
+    started_ns: i128,
+    completed_ns: i128,
+
+    fn durationNs(self: RequestStats) i128 {
+        return if (self.completed_ns > self.started_ns)
+            self.completed_ns - self.started_ns
+        else
+            0;
+    }
+
+    fn toMillis(ns: i128) i128 {
+        return @divTrunc(ns, std.time.ns_per_ms);
+    }
+};
+
 fn printJsonResponseWithId(
     writer: *std.io.Writer,
     allocator: std.mem.Allocator,
     response: client.FetchResponse,
     include_body: bool,
-    request_index: usize,
+    stats: RequestStats,
 ) !void {
     try writer.writeByte('{');
-    try writer.print("\"request\":{d},\"status\":{d}", .{ request_index, response.status });
+    const status_text = getStatusText(response.status);
+    const started_ms = RequestStats.toMillis(stats.started_ns);
+    const completed_ms = RequestStats.toMillis(stats.completed_ns);
+    const duration_ms = RequestStats.toMillis(stats.durationNs());
+
+    try writer.print(
+        "\"request\":{d},\"status\":{d},\"status_text\":",
+        .{ stats.index, response.status },
+    );
+    try writeJsonString(writer, status_text);
+    try writer.print(
+        ",\"stream_id\":{d},\"started_at_ms\":{d},\"completed_at_ms\":{d},\"duration_ms\":{d}",
+        .{ stats.stream_id, started_ms, completed_ms, duration_ms },
+    );
 
     try writer.writeAll(",\"headers\":[");
     for (response.headers, 0..) |pair, idx| {
@@ -763,9 +807,13 @@ fn printPlainResponseWithId(
     writer: *std.io.Writer,
     response: client.FetchResponse,
     include_body: bool,
-    request_index: usize,
+    stats: RequestStats,
 ) !void {
-    try writer.print("request {d}: status {d}\n", .{ request_index, response.status });
+    const duration_ms = RequestStats.toMillis(stats.durationNs());
+    try writer.print(
+        "request {d}: status {d} (stream={d}, duration_ms={d})\n",
+        .{ stats.index, response.status, stats.stream_id, duration_ms },
+    );
     try writer.writeAll("headers:\n");
     for (response.headers) |pair| {
         try writer.print("  {s}: {s}\n", .{ pair.name, pair.value });
@@ -797,7 +845,13 @@ fn runRepeatedRequests(
     };
     defer allocator.free(handles);
 
+    var stats = allocator.alloc(RequestStats, count) catch {
+        return client.ClientError.H3Error;
+    };
+    defer allocator.free(stats);
+
     for (handles, 0..) |*slot, idx| {
+        const started_ns = std.time.nanoTimestamp();
         slot.* = quic_client.startRequest(allocator, options) catch |err| {
             // drain already-started requests to keep client state clean
             for (handles[0..idx]) |started| {
@@ -805,6 +859,12 @@ fn runRepeatedRequests(
                 cleanup.deinit(allocator);
             }
             return err;
+        };
+        stats[idx] = .{
+            .index = idx,
+            .stream_id = slot.stream_id,
+            .started_ns = started_ns,
+            .completed_ns = started_ns,
         };
     }
 
@@ -818,6 +878,8 @@ fn runRepeatedRequests(
     }
 
     var first = true;
+    const use_curl_format = parsed.curl_compat or parsed.include_headers;
+
     if (parsed.json) {
         stdout_writer.writeByte('[') catch return client.ClientError.H3Error;
     }
@@ -828,18 +890,29 @@ fn runRepeatedRequests(
         };
         defer response.deinit(allocator);
 
+        stats[idx].completed_ns = std.time.nanoTimestamp();
+
         if (parsed.json) {
             if (!first) stdout_writer.writeAll(",\n") catch return client.ClientError.H3Error;
             first = false;
-            printJsonResponseWithId(stdout_writer, allocator, response, parsed.output_body, idx) catch return client.ClientError.H3Error;
+            printJsonResponseWithId(stdout_writer, allocator, response, parsed.output_body, stats[idx]) catch return client.ClientError.H3Error;
         } else {
-            if (idx != 0) stdout_writer.writeByte('\n') catch return client.ClientError.H3Error;
-            printPlainResponseWithId(stdout_writer, response, parsed.output_body, idx) catch return client.ClientError.H3Error;
+            if (!use_curl_format and idx != 0) {
+                stdout_writer.writeByte('\n') catch return client.ClientError.H3Error;
+            }
+
+            if (use_curl_format) {
+                printCurlCompatResponse(stdout_writer, response, parsed.output_body, stats[idx]) catch return client.ClientError.H3Error;
+            } else {
+                printPlainResponseWithId(stdout_writer, response, parsed.output_body, stats[idx]) catch return client.ClientError.H3Error;
+            }
         }
     }
 
     if (parsed.json) {
         stdout_writer.writeAll("]\n") catch return client.ClientError.H3Error;
+    } else if (!use_curl_format) {
+        stdout_writer.print("repeat-count: {d}\n", .{count}) catch return client.ClientError.IoFailure;
     }
 }
 

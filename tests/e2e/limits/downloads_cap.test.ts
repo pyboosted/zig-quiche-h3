@@ -2,30 +2,13 @@ import "../test-runner";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { spawnServer, type ServerInstance } from "@helpers/spawnServer";
-import { ensureQuicheBuilt, quicheClient } from "@helpers/quicheClient";
+import { zigClient } from "@helpers/zigClient";
 import { mkfile, type ServerBinaryType } from "@helpers/testUtils";
-
-function extractStatuses(jsonLines: string): number[] {
-    const statuses: number[] = [];
-    for (const line of jsonLines.split("\n")) {
-        const t = line.trim();
-        if (!t.startsWith("{")) continue;
-        try {
-            const obj = JSON.parse(t);
-            const s = obj.status ?? obj.status_code;
-            if (typeof s === "number") statuses.push(s);
-        } catch {
-            // ignore
-        }
-    }
-    return statuses;
-}
 
 describeBoth("Per-connection download cap", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {
-        await ensureQuicheBuilt();
         server = await spawnServer({
             binaryType,
             env: {
@@ -41,32 +24,34 @@ describeBoth("Per-connection download cap", (binaryType: ServerBinaryType) => {
         await server.cleanup();
     });
 
-    it.skip("rejects second concurrent file download with 503 when cap=1", async () => {
-        // TODO: Implement when we have our own H3 client that supports truly concurrent requests
-        // The current quiche-client sends requests sequentially, not concurrently
-        // Prepare a small test file (~3MB) so the first download stays active
+    it("rejects second concurrent file download with 503 when cap=1", async () => {
         const tf = await mkfile(3 * 1024 * 1024);
         const relativePath = tf.path.split("/tests/").pop() || tf.path;
         const url = `https://127.0.0.1:${server.port}/download/${relativePath}`;
 
-        const resp = await quicheClient(url, { requests: 2, dumpJson: true, maxData: 20000000 });
+        const response = await zigClient(url, {
+            concurrent: 2,
+            curlCompat: true,
+        });
 
-        // quiche-client may exit non-zero when one request returns 503
-        const statuses = extractStatuses(resp.output);
+        const responses = response.responses ?? [response];
+        expect(responses.length).toBe(2);
+
+        const statuses = responses.map((r) => r.status);
         const ok = statuses.filter((s) => s === 200).length;
         const svc = statuses.filter((s) => s === 503).length;
-        expect(statuses.length).toBe(2);
         expect(ok).toBe(1);
         expect(svc).toBe(1);
     });
 
-    it.skip("does not count memory streaming as downloads", async () => {
-        // TODO: Test with concurrent client - memory streams shouldn't count against download cap
-        // With download cap=1, two memory-backed streams should both succeed
+    it("does not count memory streaming as downloads", async () => {
         const url = `https://127.0.0.1:${server.port}/stream/test`;
-        const resp = await quicheClient(url, { requests: 2, dumpJson: true, maxData: 20000000 });
-        const statuses = extractStatuses(resp.output);
-        expect(statuses.length).toBe(2);
-        expect(statuses.every((s) => s === 200)).toBeTrue();
+        const response = await zigClient(url, {
+            concurrent: 2,
+            curlCompat: true,
+        });
+        const responses = response.responses ?? [response];
+        expect(responses.length).toBe(2);
+        expect(responses.every((res) => res.status === 200)).toBeTrue();
     });
 });

@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { get, post } from "@helpers/curlClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { expectJson, type ServerBinaryType } from "@helpers/testUtils";
+import { get, post } from "@helpers/zigClient";
 
 console.log(`[E2E] routing.test.ts loaded at ${new Date().toISOString()}`);
 

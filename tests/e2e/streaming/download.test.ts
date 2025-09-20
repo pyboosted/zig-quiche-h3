@@ -1,7 +1,7 @@
 import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { curl, get } from "@helpers/curlClient";
+import { zigClient, get } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, parseContentLength, type ServerBinaryType } from "@helpers/testUtils";
@@ -67,8 +67,8 @@ describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
         const shouldRunStress = process.env.H3_STRESS === "1";
 
         it.skipIf(!shouldRunStress)("returns 1GB with correct content-length", async () => {
-            const response = await curl(`https://127.0.0.1:${server.port}/stream/1gb`, {
-                outputNull: true, // Don't buffer the body, just check headers
+            const response = await zigClient(`https://127.0.0.1:${server.port}/stream/1gb`, {
+                outputNull: true,
             });
 
             expect(response.status).toBe(200);
@@ -86,10 +86,10 @@ describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
             "1GB download completes without memory exhaustion",
             async () => {
                 // Test with limited rate to simulate real-world conditions
-                const response = await curl(`https://127.0.0.1:${server.port}/stream/1gb`, {
+                const response = await zigClient(`https://127.0.0.1:${server.port}/stream/1gb`, {
                     outputNull: true,
-                    limitRate: "30M", // 10MB/s rate limit
-                    maxTime: 120, // 2 minute timeout
+                    limitRate: "30M",
+                    maxTime: 120,
                 });
 
                 expect(response.status).toBe(200);
@@ -170,10 +170,11 @@ describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
 
     describe("Streaming behavior", () => {
         it("supports partial content ranges (if implemented)", async () => {
-            const response = await curl(`https://127.0.0.1:${server.port}/stream/test`, {
+            const response = await zigClient(`https://127.0.0.1:${server.port}/stream/test`, {
                 headers: {
-                    Range: "bytes=0-1023", // First 1KB
+                    Range: "bytes=0-1023",
                 },
+                curlCompat: false,
             });
 
             // Server may or may not support ranges, but should not crash
@@ -188,13 +189,11 @@ describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
 
         it("handles client disconnect gracefully", async () => {
             // Start a request with a very short timeout to simulate disconnect
-            try {
-                await curl(`https://127.0.0.1:${server.port}/stream/test`, {
-                    maxTime: 0.1, // 100ms timeout
-                });
-            } catch {
-                // Expected to timeout/fail
-            }
+            await expect(
+                zigClient(`https://127.0.0.1:${server.port}/stream/test`, {
+                    maxTime: 0.1,
+                }),
+            ).rejects.toThrow();
 
             // Server should still be responsive after client disconnect
             const response = await get(`https://127.0.0.1:${server.port}/`);

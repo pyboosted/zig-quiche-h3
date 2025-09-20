@@ -82,6 +82,7 @@ pub fn echoHandler(req: *http.Request, res: *http.Response) http.HandlerError!vo
 
 pub fn createUserHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
     const body = try req.readAll(1024 * 1024); // 1MB max
+    std.debug.print("[server] received body len={d} data={s}", .{ body.len, body });
 
     if (body.len > 0) {
         res.status(@intFromEnum(http.Status.Created)) catch return error.InternalServerError;

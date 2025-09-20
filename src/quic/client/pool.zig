@@ -7,8 +7,18 @@ const ClientError = @import("mod.zig").ClientError;
 /// Connection pool for efficient HTTP/3 connection reuse
 /// Manages multiple connections per host with automatic cleanup
 pub const ConnectionPool = struct {
-    const QuicClientInitResult = @typeInfo(@TypeOf(QuicClient.init)).Fn.return_type.?;
-    const QuicClientInitError = @typeInfo(QuicClientInitResult).ErrorUnion.error_set;
+    const init_type = @typeInfo(@TypeOf(QuicClient.init));
+    const QuicClientInitError = switch (init_type) {
+        .@"fn" => blk: {
+            const ret_type = init_type.@"fn".return_type.?;
+            const ret_info = @typeInfo(ret_type);
+            break :blk switch (ret_info) {
+                .error_union => |err_info| err_info.error_set,
+                else => @compileError("QuicClient.init must return an error union"),
+            };
+        },
+        else => @compileError("QuicClient.init is not a function"),
+    };
     pub const AcquireError = ClientError || QuicClientInitError;
     allocator: std.mem.Allocator,
     connections: std.StringHashMap(ConnectionEntry),
