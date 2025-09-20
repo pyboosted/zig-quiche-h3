@@ -43,6 +43,11 @@ pub const RequestState = struct {
     // H3 DATAGRAM callback for request-associated datagrams
     on_h3_dgram: ?http.OnH3Datagram = null,
 
+    // Whether the handler wants to keep the request alive for DATAGRAM echoing
+    retain_for_datagram: bool = false,
+    // Flag set once the stream has been detached but DATAGRAM flow still active
+    datagram_detached: bool = false,
+
     // WebTransport session flag
     is_webtransport: bool = false,
 };
@@ -611,12 +616,12 @@ pub const QuicServer = struct {
                                 conn.?.http3 = h3_conn;
                                 std.debug.print("✓ HTTP/3 connection created for DCID: {s}\n", .{hex_dcid});
                                 if (self.config.enable_dgram) {
-                                    const max_dgram = conn.?.conn.dgramMaxWritableLen();
-                                    if (max_dgram) |len| {
-                                        server_logging.infof(self, "  QUIC DATAGRAM enabled (max_writable={d})\n", .{len});
-                                    } else {
-                                        server_logging.warnf(self, "  QUIC DATAGRAM disabled: max_writable unavailable\n", .{});
-                                    }
+                                    // Note: H3 DATAGRAM negotiation happens via SETTINGS exchange
+                                    // At this point (immediately after H3 creation), the SETTINGS frames
+                                    // haven't been exchanged yet, so dgramEnabledByPeer() will return false.
+                                    // The actual negotiation completes shortly after, during the first
+                                    // request processing. This is normal and expected behavior.
+                                    server_logging.debugPrint(self, "  QUIC DATAGRAM enabled, H3 DATAGRAM SETTINGS will be exchanged\n", .{});
                                 }
                             }
                         } else if (!std.mem.eql(u8, proto, "h3")) {
@@ -1067,7 +1072,12 @@ pub const QuicServer = struct {
                 }
             }
             for (flow_keys_to_remove.items) |fk| {
-                _ = self.h3.dgram_flows.remove(fk);
+                if (self.h3.dgram_flows.fetchRemove(fk)) |kv| {
+                    const retained = kv.value;
+                    retained.response.deinit();
+                    retained.arena.deinit();
+                    self.allocator.destroy(retained);
+                }
             }
         }
 

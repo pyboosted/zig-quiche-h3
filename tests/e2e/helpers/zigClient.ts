@@ -27,6 +27,7 @@ export interface ZigClientOptions extends CurlOptions {
     json?: boolean;
     insecure?: boolean;
     verifyPeer?: boolean;
+    waitForDgrams?: number;
 }
 
 /**
@@ -158,6 +159,9 @@ export async function zigClient(
         if (options.dgramWaitMs) {
             args.push("--dgram-wait-ms", options.dgramWaitMs.toString());
         }
+        if (options.waitForDgrams && options.waitForDgrams > 0) {
+            args.push("--wait-for-dgrams", options.waitForDgrams.toString());
+        }
     }
 
     // WebTransport
@@ -206,6 +210,9 @@ export async function zigClient(
     return parseResponse(rawBytes, options.outputNull === true);
 }
 
+const HTTP_MARKER_BYTES = new TextEncoder().encode("HTTP/3 ");
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: false });
+
 /**
  * Parse h3-client response bytes into structured format
  * The output format matches curl with --include-headers flag
@@ -213,8 +220,7 @@ export async function zigClient(
 function parseResponse(rawBytes: Uint8Array, headersOnly = false): ZigClientResponse {
     const multi = parseMultipleResponses(rawBytes, headersOnly);
     if (multi) {
-        const decoder = new TextDecoder("utf-8", { fatal: false });
-        const rawText = decoder.decode(rawBytes);
+        const rawText = UTF8_DECODER.decode(rawBytes);
         const primary = { ...multi[0] };
         primary.raw = rawText;
         return { ...primary, responses: multi };
@@ -224,203 +230,167 @@ function parseResponse(rawBytes: Uint8Array, headersOnly = false): ZigClientResp
 }
 
 function parseMultipleResponses(rawBytes: Uint8Array, headersOnly: boolean): CurlResponse[] | null {
-    const marker = new TextEncoder().encode("HTTP/3 ");
-    if (rawBytes.length < marker.length) return null;
-
-    const starts: number[] = [];
-    outer: for (let i = 0; i <= rawBytes.length - marker.length; i++) {
-        for (let j = 0; j < marker.length; j++) {
-            if (rawBytes[i + j] !== marker[j]) {
-                continue outer;
-            }
-        }
-        starts.push(i);
-    }
-
-    if (starts.length <= 1) return null;
+    const firstMarker = indexOfSequence(rawBytes, HTTP_MARKER_BYTES);
+    if (firstMarker === -1) return null;
 
     const responses: CurlResponse[] = [];
-    for (let idx = 0; idx < starts.length; idx++) {
-        const start = starts[idx]!;
-        const end = idx + 1 < starts.length ? starts[idx + 1]! : rawBytes.length;
-        const slice = rawBytes.slice(start, end);
-        responses.push(parseSingleResponse(slice, headersOnly));
+    let offset = firstMarker;
+
+    while (offset >= 0 && offset < rawBytes.length) {
+        const parsed = parseResponseAt(rawBytes, offset, headersOnly);
+        if (!parsed) break;
+        const { response, consumed } = parsed;
+        response.raw = UTF8_DECODER.decode(rawBytes.slice(offset, offset + consumed));
+        responses.push(response);
+
+        offset += consumed;
+        const nextMarker = indexOfSequence(rawBytes, HTTP_MARKER_BYTES, offset);
+        if (nextMarker === -1) break;
+        offset = nextMarker;
     }
 
-    return responses;
+    return responses.length > 1 ? responses : null;
 }
 
 function parseSingleResponse(rawBytes: Uint8Array, headersOnly = false): CurlResponse {
-    const headers = new Map<string, string>();
-    let status = 0;
-    let statusText = "";
+    const httpStart = indexOfSequence(rawBytes, HTTP_MARKER_BYTES);
 
-    // First, find where the actual HTTP response starts (skip debug logs)
-    const httpMarker = new TextEncoder().encode("HTTP/3 ");
-    let httpStart = -1;
-
-    // Search for "HTTP/3 " in the raw bytes
-    for (let i = 0; i <= rawBytes.length - httpMarker.length; i++) {
-        let match = true;
-        for (let j = 0; j < httpMarker.length; j++) {
-            if (rawBytes[i + j] !== httpMarker[j]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            httpStart = i;
-            break;
-        }
-    }
-
-    // If no HTTP/3 response found, treat as raw body
     if (httpStart === -1) {
         return {
             status: 200,
             statusText: "OK",
             headers: new Map(),
             body: rawBytes,
-            raw: new TextDecoder("utf-8", { fatal: false }).decode(rawBytes),
+            raw: UTF8_DECODER.decode(rawBytes),
         };
     }
 
-    // Work with bytes starting from HTTP/3
-    const responseBytes = rawBytes.slice(httpStart);
+    const parsed = parseResponseAt(rawBytes, httpStart, headersOnly);
+    if (!parsed) {
+        return {
+            status: 200,
+            statusText: "OK",
+            headers: new Map(),
+            body: rawBytes,
+            raw: UTF8_DECODER.decode(rawBytes),
+        };
+    }
 
-    // Parse headers line by line to find the blank line separator
-    let headerEndPos = -1;
-    const _currentPos = 0;
-    let _foundStatusLine = false;
-    const _lineStart = 0;
+    const { response, consumed } = parsed;
+    // Preserve any streaming event output that occurs before the HTTP block
+    const prefix = httpStart > 0 ? UTF8_DECODER.decode(rawBytes.slice(0, httpStart)) : "";
+    const httpText = UTF8_DECODER.decode(rawBytes.slice(httpStart, httpStart + consumed));
+    response.raw = prefix + httpText;
+    return response;
+}
 
-    // Convert to string for easier line-by-line parsing
-    const responseText = new TextDecoder("utf-8").decode(responseBytes);
-    const lines = responseText.split(/\r?\n/);
+type ParsedResponse = { response: CurlResponse; consumed: number };
 
-    let _headerLineCount = 0;
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
+function parseResponseAt(
+    rawBytes: Uint8Array,
+    start: number,
+    headersOnly: boolean,
+): ParsedResponse | null {
+    const headerBoundary = findHeaderBodyBoundary(rawBytes, start);
+    if (headerBoundary <= start) return null;
 
-        // First line should be status line
+    const headerBytes = rawBytes.slice(start, headerBoundary);
+    const headerLines = UTF8_DECODER.decode(headerBytes).split(/\r?\n/);
+
+    const headers = new Map<string, string>();
+    let status = 200;
+    let statusText = "";
+    let contentLength: number | null = null;
+
+    for (let i = 0; i < headerLines.length; i++) {
+        const line = headerLines[i]!.trim();
+        if (line.length === 0) continue;
         if (i === 0) {
-            if (line.startsWith("HTTP/3 ")) {
-                const match = line.match(/^HTTP\/3\s+(\d+)\s*(.*)$/);
-                if (match) {
-                    status = Number.parseInt(match[1]!, 10);
-                    statusText = match[2]!.trim();
-                    _foundStatusLine = true;
-                }
+            const match = line.match(/^HTTP\/3\s+(\d+)\s*(.*)$/);
+            if (match) {
+                status = Number.parseInt(match[1]!, 10);
+                statusText = match[2]!.trim();
             }
-            _headerLineCount++;
             continue;
         }
 
-        // Empty line indicates end of headers
-        if (line.trim() === "") {
-            // Calculate byte position of header end
-            // Sum up byte lengths of all header lines plus line endings
-            let bytePos = 0;
-            for (let j = 0; j <= i; j++) {
-                bytePos += new TextEncoder().encode(lines[j]).length;
-                if (j < i) {
-                    // Add line ending bytes (check if \r\n or \n)
-                    const lineEndingBytes = responseText.includes("\r\n") ? 2 : 1;
-                    bytePos += lineEndingBytes;
-                }
-            }
-            headerEndPos = bytePos;
-            break;
-        }
-
-        // Parse header line
         const colonIndex = line.indexOf(":");
-        if (colonIndex > 0) {
-            const key = line.slice(0, colonIndex).trim().toLowerCase();
-            const value = line.slice(colonIndex + 1).trim();
-            // Skip pseudo-headers like :status
-            if (!key.startsWith(":")) {
-                headers.set(key, value);
+        if (colonIndex <= 0) continue;
+        const key = line.slice(0, colonIndex).trim().toLowerCase();
+        if (key.startsWith(":")) continue;
+        const value = line.slice(colonIndex + 1).trim();
+        headers.set(key, value);
+        if (key === "content-length") {
+            const parsedLength = Number.parseInt(value, 10);
+            if (Number.isFinite(parsedLength) && parsedLength >= 0) {
+                contentLength = parsedLength;
             }
         }
-        _headerLineCount++;
     }
 
-    // Extract body as raw bytes
-    let body: Uint8Array = new Uint8Array(0);
-    if (!headersOnly && headerEndPos !== -1) {
-        // Skip the blank line separator
-        const lineEndingBytes = responseText.includes("\r\n") ? 2 : 1;
-        // headerEndPos is relative to responseBytes/responseText, so we need to add it to httpStart
-        const bodyStartIndex = httpStart + headerEndPos + lineEndingBytes;
+    const bodyStart = headerBoundary;
+    let bodyEnd = rawBytes.length;
+    if (contentLength !== null) {
+        bodyEnd = Math.min(bodyStart + contentLength, rawBytes.length);
+    }
 
-        if (bodyStartIndex < rawBytes.length) {
-            // Extract body, but also check for trailing debug messages
-            let bodyEndIndex = rawBytes.length;
+    const body = headersOnly ? new Uint8Array(0) : rawBytes.slice(bodyStart, bodyEnd);
 
-            // Look for common trailing debug messages and exclude them
-            const warningMarker = new TextEncoder().encode(
-                "Warning: Failed to disable debug logging",
-            );
-            for (let i = bodyStartIndex; i <= rawBytes.length - warningMarker.length; i++) {
-                let match = true;
-                for (let j = 0; j < warningMarker.length; j++) {
-                    if (rawBytes[i + j] !== warningMarker[j]) {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match) {
-                    // Found warning message, exclude it from body
-                    bodyEndIndex = i;
-                    // Remove trailing newline before warning if present
-                    if (bodyEndIndex > bodyStartIndex && rawBytes[bodyEndIndex - 1] === 0x0a) {
-                        bodyEndIndex--;
-                        if (bodyEndIndex > bodyStartIndex && rawBytes[bodyEndIndex - 1] === 0x0d) {
-                            bodyEndIndex--;
-                        }
-                    }
-                    break;
-                }
-            }
-
-            body = rawBytes.slice(bodyStartIndex, bodyEndIndex);
-        }
+    let nextOffset = bodyEnd;
+    while (
+        nextOffset < rawBytes.length &&
+        (rawBytes[nextOffset] === 0x0a || rawBytes[nextOffset] === 0x0d)
+    ) {
+        nextOffset += 1;
     }
 
     return {
-        status,
-        statusText,
-        headers,
-        body,
-        raw: new TextDecoder("utf-8", { fatal: false }).decode(rawBytes),
+        response: {
+            status,
+            statusText,
+            headers,
+            body,
+            raw: "",
+        },
+        consumed: nextOffset - start,
     };
 }
 
-/**
- * Find the end of HTTP headers in raw bytes
- */
-function _findHeaderEnd(bytes: Uint8Array): number {
-    // Look for \r\n\r\n (0x0d 0x0a 0x0d 0x0a)
-    for (let i = 0; i < bytes.length - 3; i++) {
-        if (
-            bytes[i] === 0x0d &&
-            bytes[i + 1] === 0x0a &&
-            bytes[i + 2] === 0x0d &&
-            bytes[i + 3] === 0x0a
-        ) {
-            return i;
+function indexOfSequence(
+    buffer: Uint8Array,
+    sequence: Uint8Array,
+    fromIndex = 0,
+): number {
+    outer: for (let i = fromIndex; i <= buffer.length - sequence.length; i++) {
+        for (let j = 0; j < sequence.length; j++) {
+            if (buffer[i + j] !== sequence[j]) {
+                continue outer;
+            }
         }
+        return i;
     }
-
-    // Look for \n\n (0x0a 0x0a)
-    for (let i = 0; i < bytes.length - 1; i++) {
-        if (bytes[i] === 0x0a && bytes[i + 1] === 0x0a) {
-            return i;
-        }
-    }
-
     return -1;
+}
+
+function findHeaderBodyBoundary(bytes: Uint8Array, start: number): number {
+    const CR = 0x0d;
+    const LF = 0x0a;
+    for (let i = start; i + 3 < bytes.length; i++) {
+        if (
+            bytes[i] === CR &&
+            bytes[i + 1] === LF &&
+            bytes[i + 2] === CR &&
+            bytes[i + 3] === LF
+        ) {
+            return i + 4;
+        }
+    }
+    for (let i = start; i + 1 < bytes.length; i++) {
+        if (bytes[i] === LF && bytes[i + 1] === LF) {
+            return i + 2;
+        }
+    }
+    return bytes.length;
 }
 
 /**

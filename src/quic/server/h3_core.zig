@@ -160,7 +160,10 @@ pub fn Impl(comptime S: type) type {
                                     state.request.params = params;
 
                                     // Install handler/callbacks
-                                    if (f.route.on_h3_dgram) |cb| state.on_h3_dgram = cb;
+                                    if (f.route.on_h3_dgram) |cb| {
+                                        state.on_h3_dgram = cb;
+                                        state.retain_for_datagram = true;
+                                    }
                                     if (f.route.on_headers != null or f.route.on_body_chunk != null or f.route.on_body_complete != null) {
                                         state.is_streaming = true;
                                         state.on_headers = f.route.on_headers;
@@ -368,25 +371,41 @@ pub fn Impl(comptime S: type) type {
                                 continue;
                             }
                             std.debug.print("Error processing partial response for stream {}: {}\n", .{ stream_id, err });
-                            if (state.on_h3_dgram != null) {
-                                const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
-                                _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
+                            if (state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
+                                state.datagram_detached = true;
+                                state.retain_for_datagram = false;
+                                if (conn.active_requests > 0) conn.active_requests -= 1;
+                                if (state.is_download and conn.active_downloads > 0) conn.active_downloads -= 1;
+                                _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
+                            } else {
+                                if (state.on_h3_dgram != null) {
+                                    const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
+                                    _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
+                                }
+                                state.response.deinit();
+                                state.arena.deinit();
+                                self.allocator.destroy(state);
+                                _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                             }
-                            state.response.deinit();
-                            state.arena.deinit();
-                            self.allocator.destroy(state);
-                            _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                         };
 
                         if (state.response.isEnded() and state.response.partial_response == null) {
-                            if (state.on_h3_dgram != null) {
-                                const flow_id2 = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
-                                _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id2 });
+                            if (state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
+                                state.datagram_detached = true;
+                                state.retain_for_datagram = false;
+                                if (conn.active_requests > 0) conn.active_requests -= 1;
+                                if (state.is_download and conn.active_downloads > 0) conn.active_downloads -= 1;
+                                _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
+                            } else {
+                                if (state.on_h3_dgram != null) {
+                                    const flow_id2 = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
+                                    _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id2 });
+                                }
+                                state.response.deinit();
+                                state.arena.deinit();
+                                self.allocator.destroy(state);
+                                _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                             }
-                            state.response.deinit();
-                            state.arena.deinit();
-                            self.allocator.destroy(state);
-                            _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                         }
                     }
                 }
@@ -422,6 +441,13 @@ pub fn Impl(comptime S: type) type {
 
         pub fn cleanupStreamState(self: *Self, conn: *connection.Connection, stream_id: u64, state: *RequestState) void {
             _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
+            if (state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
+                state.datagram_detached = true;
+                state.retain_for_datagram = false;
+                if (conn.active_requests > 0) conn.active_requests -= 1;
+                if (state.is_download and conn.active_downloads > 0) conn.active_downloads -= 1;
+                return;
+            }
             if (state.on_h3_dgram != null) {
                 const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
                 _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });

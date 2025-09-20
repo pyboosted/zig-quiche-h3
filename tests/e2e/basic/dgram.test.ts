@@ -13,8 +13,8 @@ describeBoth("QUIC DATAGRAM echo", (_binaryType: ServerBinaryType) => {
                     h3Dgram: true,
                     dgramPayload: "test-dgram-payload",
                     dgramCount: 3,
-                    dgramIntervalMs: 50,
-                    dgramWaitMs: 500, // Increased wait time to ensure echoes are received
+                    dgramIntervalMs: 0,
+                    waitForDgrams: 1,
                     curlCompat: false,
                 });
 

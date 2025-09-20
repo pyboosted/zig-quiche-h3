@@ -220,13 +220,23 @@ fn mainImpl() !void {
         .rate_limiter = rate_limiter_ptr,
     };
 
-    if (parsed.stream or limit_rate_bps != null or parsed.dgram_count > 0) {
-        options.on_event = streamCallback;
-        options.event_ctx = &stream_output;
-    }
-
+    // Precompute datagram payload if needed so it can be used in ctx
     const datagram_payload = try loadDatagramPayload(allocator, parsed);
     defer if (parsed.dgram_payload_file.len > 0 and parsed.dgram_count > 0) allocator.free(datagram_payload);
+
+    var dctx: SendDgramCtx = .{ .stream_out = stream_output, .quic_client = quic_client, .payload = datagram_payload, .count = parsed.dgram_count, .interval_ms = parsed.dgram_interval_ms };
+    if (parsed.stream or limit_rate_bps != null or parsed.dgram_count > 0) {
+        if (parsed.dgram_count > 0) {
+            // Keep context alive on stack for the duration of the request
+            options.on_event = streamCallbackWithDgrams;
+            options.event_ctx = &dctx;
+        } else {
+            options.on_event = streamCallback;
+            options.event_ctx = &stream_output;
+        }
+    }
+
+    // datagram_payload declared above
 
     if (parsed.repeat > 1) {
         try runRepeatedRequests(allocator, stdout_writer, quic_client, options, parsed, datagram_payload);
@@ -235,10 +245,24 @@ fn mainImpl() !void {
 
     if (parsed.dgram_count > 0) {
         var handle = try quic_client.startRequest(allocator, options);
-        try sendDatagramsForHandle(quic_client, handle.stream_id, datagram_payload, parsed.dgram_count, parsed.dgram_interval_ms);
-        if (parsed.dgram_wait_ms > 0) {
-            std.Thread.sleep(parsed.dgram_wait_ms * std.time.ns_per_ms);
+        // Provide stream id to the wrapper context and emit debug
+        dctx.stream_id = handle.stream_id;
+        dctx.assigned = true;
+
+        // If headers arrived first, flush the pending send now (no sleeps).
+        if (dctx.pending and !dctx.sent and parsed.dgram_count > 0) {
+            try sendDatagramsForHandle(quic_client, handle.stream_id, datagram_payload, parsed.dgram_count, parsed.dgram_interval_ms);
+            dctx.sent = true;
+            dctx.pending = false;
         }
+        // Deterministic wait for observed DATAGRAMs
+        const required_dgrams: usize = if (parsed.wait_for_dgrams > 0) parsed.wait_for_dgrams else 1;
+        var timer = try std.time.Timer.start();
+        const budget_ns: u64 = parsed.timeout_ms * std.time.ns_per_ms;
+        while (dctx.observed < required_dgrams and timer.read() < budget_ns) {
+            quic_client.event_loop.runOnce();
+        }
+
         var response = handle.await() catch |err| {
             return err;
         };
@@ -270,6 +294,7 @@ const CliArgs = struct {
     dgram_count: usize = 0,
     dgram_interval_ms: u64 = 0,
     dgram_wait_ms: u64 = 0,
+    wait_for_dgrams: usize = 0,
     repeat: usize = 1,
     enable_webtransport: bool = false,
     // Curl compatibility flags
@@ -297,6 +322,7 @@ const CliArgs = struct {
         .dgram_count = "Number of DATAGRAMs to send per request (default: 0)",
         .dgram_interval_ms = "Delay in milliseconds between DATAGRAM sends (default: 0)",
         .dgram_wait_ms = "Extra time to wait for DATAGRAM echoes after sends (default: 0)",
+        .wait_for_dgrams = "Wait until at least N DATAGRAM events observed (0 disables)",
         .repeat = "Number of concurrent identical requests (default: 1)",
         .enable_webtransport = "Enable WebTransport Extended CONNECT support",
         // Curl compatibility
@@ -356,8 +382,23 @@ const StreamOutput = struct {
     verbose: bool = false,
     rate_limiter: ?*RateLimiter = null,
     mode: Mode = .plain,
+    on_headers_flag: ?*bool = null,
 
     const Mode = enum { plain, json };
+};
+
+// Context used by the wrapper callback to trigger DATAGRAM sends on first headers
+const SendDgramCtx = struct {
+    stream_out: StreamOutput,
+    quic_client: *client.QuicClient,
+    stream_id: u64 = 0,
+    payload: []const u8 = &.{},
+    count: usize = 0,
+    interval_ms: u64 = 0,
+    sent: bool = false,
+    pending: bool = false,
+    assigned: bool = false,
+    observed: usize = 0,
 };
 
 fn streamCallback(event: client.ResponseEvent, ctx: ?*anyopaque) client.ClientError!void {
@@ -370,6 +411,7 @@ fn streamCallback(event: client.ResponseEvent, ctx: ?*anyopaque) client.ClientEr
                 for (headers) |pair| {
                     writer.print("{s}: {s}\n", .{ pair.name, pair.value }) catch return client.ClientError.H3Error;
                 }
+                if (stream.on_headers_flag) |ptr| ptr.* = true;
             },
             .data => |chunk| {
                 if (stream.rate_limiter) |rl| {
@@ -402,6 +444,7 @@ fn streamCallback(event: client.ResponseEvent, ctx: ?*anyopaque) client.ClientEr
         .json => switch (event) {
             .headers => |headers| {
                 writeJsonEventHeaders(writer, headers) catch return client.ClientError.H3Error;
+                if (stream.on_headers_flag) |ptr| ptr.* = true;
             },
             .data => |chunk| {
                 if (stream.rate_limiter) |rl| {
@@ -419,6 +462,29 @@ fn streamCallback(event: client.ResponseEvent, ctx: ?*anyopaque) client.ClientEr
                 writeJsonEventDatagram(stream, writer, d) catch return client.ClientError.H3Error;
             },
         },
+    }
+}
+
+fn streamCallbackWithDgrams(event: client.ResponseEvent, ctx: ?*anyopaque) client.ClientError!void {
+    const dctx = @as(*SendDgramCtx, @ptrCast(@alignCast(ctx.?)));
+    // forward to standard stream output
+    try streamCallback(event, &dctx.stream_out);
+    // trigger send on first headers once stream_id is known
+    switch (event) {
+        .headers => {
+            if (!dctx.sent and dctx.count > 0) {
+                if (dctx.assigned) {
+                    try sendDatagramsForHandle(dctx.quic_client, dctx.stream_id, dctx.payload, dctx.count, dctx.interval_ms);
+                    dctx.sent = true;
+                } else {
+                    dctx.pending = true;
+                }
+            }
+        },
+        .datagram => {
+            dctx.observed += 1;
+        },
+        else => {},
     }
 }
 
