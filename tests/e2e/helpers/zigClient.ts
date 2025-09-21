@@ -38,6 +38,12 @@ export async function zigClient(
     url: string,
     options: ZigClientOptions = {},
 ): Promise<ZigClientResponse> {
+    // Set default timeout to 5 seconds if not specified
+    const optionsWithTimeout = {
+        maxTime: 5,  // Default 5 second timeout
+        ...options   // Allow override if specified
+    };
+
     // Use absolute path to h3-client binary
     const projectRoot = getProjectRoot();
     const h3ClientPath = join(projectRoot, "zig-out", "bin", "h3-client");
@@ -47,15 +53,15 @@ export async function zigClient(
     args.push("--url", url);
 
     // Always enable curl compatibility mode for test output
-    const useCurlCompat = options.curlCompat !== false;
+    const useCurlCompat = optionsWithTimeout.curlCompat !== false;
     if (useCurlCompat) {
         args.push("--curl-compat");
     }
 
     // Include headers in output (curl -i)
-    if (useCurlCompat && options.outputNull !== true && options.includeHeaders !== false) {
+    if (useCurlCompat && optionsWithTimeout.outputNull !== true && optionsWithTimeout.includeHeaders !== false) {
         args.push("--include-headers");
-    } else if (!useCurlCompat && options.includeHeaders === true) {
+    } else if (!useCurlCompat && optionsWithTimeout.includeHeaders === true) {
         args.push("--include-headers");
     }
 
@@ -63,39 +69,39 @@ export async function zigClient(
     args.push("--silent");
 
     // Insecure mode for self-signed certs
-    if (options.insecure !== false) {
+    if (optionsWithTimeout.insecure !== false) {
         args.push("--insecure");
     }
-    if (options.verifyPeer) {
+    if (optionsWithTimeout.verifyPeer) {
         args.push("--verify-peer");
     }
 
-    if (options.json) {
+    if (optionsWithTimeout.json) {
         args.push("--json");
     }
-    if (options.outputBody === false) {
+    if (optionsWithTimeout.outputBody === false) {
         args.push("--output-body=false");
     }
 
     // Method
-    if (options.method && options.method !== "GET") {
-        args.push("--method", options.method);
+    if (optionsWithTimeout.method && optionsWithTimeout.method !== "GET") {
+        args.push("--method", optionsWithTimeout.method);
     }
 
     // Headers
     let contentLength: number | undefined;
-    if (typeof options.body === "string") {
-        contentLength = new TextEncoder().encode(options.body).length;
-    } else if (options.body instanceof Uint8Array) {
-        contentLength = options.body.length;
-    } else if (options.body instanceof File) {
-        contentLength = options.body.size;
+    if (typeof optionsWithTimeout.body === "string") {
+        contentLength = new TextEncoder().encode(optionsWithTimeout.body).length;
+    } else if (optionsWithTimeout.body instanceof Uint8Array) {
+        contentLength = optionsWithTimeout.body.length;
+    } else if (optionsWithTimeout.body instanceof File) {
+        contentLength = optionsWithTimeout.body.size;
     }
 
     const headerList: string[] = [];
     let hasContentLength = false;
-    if (options.headers) {
-        for (const [key, value] of Object.entries(options.headers)) {
+    if (optionsWithTimeout.headers) {
+        for (const [key, value] of Object.entries(optionsWithTimeout.headers)) {
             const headerValue = String(value);
             if (key.toLowerCase() === "content-length") {
                 hasContentLength = true;
@@ -111,72 +117,72 @@ export async function zigClient(
     }
 
     // Body
-    if (options.bodyFilePath) {
-        args.push("--body-file", options.bodyFilePath);
-    } else if (options.body) {
-        if (typeof options.body === "string") {
-            args.push("--body", options.body);
-        } else if (options.body instanceof Uint8Array) {
+    if (optionsWithTimeout.bodyFilePath) {
+        args.push("--body-file", optionsWithTimeout.bodyFilePath);
+    } else if (optionsWithTimeout.body) {
+        if (typeof optionsWithTimeout.body === "string") {
+            args.push("--body", optionsWithTimeout.body);
+        } else if (optionsWithTimeout.body instanceof Uint8Array) {
             // For binary data, write to temp file
             const tempFile = `./tmp/e2e/zig-${Date.now()}.bin`;
-            await Bun.write(tempFile, options.body);
+            await Bun.write(tempFile, optionsWithTimeout.body);
             args.push("--body-file", tempFile);
-        } else if (options.body instanceof File) {
+        } else if (optionsWithTimeout.body instanceof File) {
             // Write File contents to temp file
-            const tempFile = `./tmp/e2e/zig-${Date.now()}-${options.body.name}`;
-            await Bun.write(tempFile, await options.body.arrayBuffer());
+            const tempFile = `./tmp/e2e/zig-${Date.now()}-${optionsWithTimeout.body.name}`;
+            await Bun.write(tempFile, await optionsWithTimeout.body.arrayBuffer());
             args.push("--body-file", tempFile);
         }
     }
 
     // Rate limiting
-    if (options.limitRate) {
-        args.push("--limit-rate", options.limitRate);
+    if (optionsWithTimeout.limitRate) {
+        args.push("--limit-rate", optionsWithTimeout.limitRate);
         args.push("--stream"); // Rate limiting requires streaming
     }
 
     // Timeout
-    if (options.maxTime) {
-        args.push("--timeout-ms", (options.maxTime * 1000).toString());
+    if (optionsWithTimeout.maxTime) {
+        args.push("--timeout-ms", (optionsWithTimeout.maxTime * 1000).toString());
     }
 
     // Extended H3 DATAGRAM options
-    if (options.h3Dgram || options.dgramCount) {
+    if (optionsWithTimeout.h3Dgram || optionsWithTimeout.dgramCount) {
         args.push("--stream"); // DATAGRAMs require streaming
 
-        if (options.dgramPayload) {
-            args.push("--dgram-payload", options.dgramPayload);
+        if (optionsWithTimeout.dgramPayload) {
+            args.push("--dgram-payload", optionsWithTimeout.dgramPayload);
         }
-        if (options.dgramPayloadFile) {
-            args.push("--dgram-payload-file", options.dgramPayloadFile);
+        if (optionsWithTimeout.dgramPayloadFile) {
+            args.push("--dgram-payload-file", optionsWithTimeout.dgramPayloadFile);
         }
-        if (options.dgramCount) {
-            args.push("--dgram-count", options.dgramCount.toString());
+        if (optionsWithTimeout.dgramCount) {
+            args.push("--dgram-count", optionsWithTimeout.dgramCount.toString());
         }
-        if (options.dgramIntervalMs) {
-            args.push("--dgram-interval-ms", options.dgramIntervalMs.toString());
+        if (optionsWithTimeout.dgramIntervalMs) {
+            args.push("--dgram-interval-ms", optionsWithTimeout.dgramIntervalMs.toString());
         }
-        if (options.dgramWaitMs) {
-            args.push("--dgram-wait-ms", options.dgramWaitMs.toString());
+        if (optionsWithTimeout.dgramWaitMs) {
+            args.push("--dgram-wait-ms", optionsWithTimeout.dgramWaitMs.toString());
         }
-        if (options.waitForDgrams && options.waitForDgrams > 0) {
-            args.push("--wait-for-dgrams", options.waitForDgrams.toString());
+        if (optionsWithTimeout.waitForDgrams && optionsWithTimeout.waitForDgrams > 0) {
+            args.push("--wait-for-dgrams", optionsWithTimeout.waitForDgrams.toString());
         }
     }
 
     // WebTransport
-    if (options.webTransport) {
+    if (optionsWithTimeout.webTransport) {
         args.push("--enable-webtransport");
     }
 
     // Concurrent requests
-    if (options.concurrent && options.concurrent > 1) {
-        args.push("--repeat", options.concurrent.toString());
+    if (optionsWithTimeout.concurrent && optionsWithTimeout.concurrent > 1) {
+        args.push("--repeat", optionsWithTimeout.concurrent.toString());
     }
 
     // Output to file or null
     let outputFile: string | undefined;
-    if (options.outputNull) {
+    if (optionsWithTimeout.outputNull) {
         outputFile = "/dev/null";
         args.push("--output", outputFile);
         args.push("--output-body", "false");
@@ -207,7 +213,7 @@ export async function zigClient(
     const rawBytes = new Uint8Array(await new Response(proc.stdout).arrayBuffer());
 
     // Parse response using the same format as curl
-    return parseResponse(rawBytes, options.outputNull === true);
+    return parseResponse(rawBytes, optionsWithTimeout.outputNull === true);
 }
 
 const HTTP_MARKER_BYTES = new TextEncoder().encode("HTTP/3 ");

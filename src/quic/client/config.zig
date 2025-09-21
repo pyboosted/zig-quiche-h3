@@ -27,6 +27,7 @@ pub const ClientConfig = struct {
     debug_log_throttle: u32 = 10,
     connect_timeout_ms: u64 = 10_000,
     enable_webtransport: bool = false,
+    request_timeout_ms: u64 = 30_000,
 
     pub fn validate(self: *const ClientConfig) !void {
         if (self.alpn_protocols.len == 0) return error.EmptyAlpnList;

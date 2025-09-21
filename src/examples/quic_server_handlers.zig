@@ -433,11 +433,8 @@ pub fn streamTestHandler(req: *http.Request, res: *http.Response) http.HandlerEr
     res.header(http.Headers.ContentLength, "10485760") catch return error.InternalServerError;
     res.header("X-Checksum", &checksum_buf) catch return error.InternalServerError;
 
-    res.writeAll(data) catch |err| switch (err) {
-        error.StreamBlocked => return error.StreamBlocked,
-        else => return error.InternalServerError,
-    };
-    res.end(null) catch |err| switch (err) {
+    // Send data with FIN flag in a single operation to ensure proper stream completion
+    res.end(data) catch |err| switch (err) {
         error.StreamBlocked => return error.StreamBlocked,
         else => return error.InternalServerError,
     };

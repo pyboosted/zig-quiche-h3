@@ -146,6 +146,7 @@ fn mainImpl() !void {
     var client_config = client.ClientConfig{};
     client_config.verify_peer = if (parsed.insecure) false else parsed.verify_peer;
     client_config.idle_timeout_ms = parsed.timeout_ms;
+    client_config.request_timeout_ms = parsed.timeout_ms;  // Use same timeout for requests
     client_config.enable_webtransport = parsed.enable_webtransport;
     // Enable DATAGRAMs if any DATAGRAM-related option is provided
     if (parsed.dgram_count > 0 or parsed.dgram_payload.len > 0 or parsed.dgram_payload_file.len > 0) {

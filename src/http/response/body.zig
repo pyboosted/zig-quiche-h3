@@ -87,16 +87,53 @@ pub fn end(comptime Response: type, self: *Response, data: ?[]const u8) !void {
 
     if (data) |final_data| {
         if (final_data.len > 0 and !self.is_head_request) {
-            _ = self.h3_conn.sendBody(self.quic_conn, self.stream_id, final_data, true) catch |err| {
-                if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+            // Try to send data with FIN flag
+            var written: usize = 0;
+            while (written < final_data.len) {
+                const remaining = final_data[written..];
+                const is_final = true; // Always send with FIN for end()
+                const n = self.h3_conn.sendBody(self.quic_conn, self.stream_id, remaining, is_final) catch |err| {
+                    if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                        _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                        // Create partial response for retry with FIN flag
+                        if (self.partial_response == null) {
+                            const data_copy = try self.allocator.dupe(u8, remaining);
+                            self.partial_response = try streaming.PartialResponse.initMemory(self.allocator, data_copy, true);
+                        }
+                        return error.StreamBlocked;
+                    }
+                    return err;
+                };
+
+                if (n == 0) {
                     _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                    // Create partial response for retry with FIN flag
+                    if (self.partial_response == null) {
+                        const data_copy = try self.allocator.dupe(u8, remaining);
+                        self.partial_response = try streaming.PartialResponse.initMemory(self.allocator, data_copy, true);
+                    }
                     return error.StreamBlocked;
                 }
-                return err;
-            };
+
+                written += n;
+                // If we sent everything with FIN, we're done
+                if (n == remaining.len) break;
+            }
         }
     } else {
-        _ = try self.h3_conn.sendBody(self.quic_conn, self.stream_id, "", true);
+        // Send empty body with FIN
+        _ = self.h3_conn.sendBody(self.quic_conn, self.stream_id, "", true) catch |err| {
+            if (err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                _ = self.quic_conn.streamWritable(self.stream_id, 0) catch {};
+                // Create partial response for empty FIN retry
+                if (self.partial_response == null) {
+                    const empty_data = try self.allocator.dupe(u8, "");
+                    self.partial_response = try streaming.PartialResponse.initMemory(self.allocator, empty_data, true);
+                }
+                return error.StreamBlocked;
+            }
+            return err;
+        };
     }
 
     self.ended = true;

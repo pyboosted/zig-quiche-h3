@@ -114,6 +114,7 @@ pub const ClientError = error{
     ConnectionGoingAway,
     InvalidRequest,
     InvalidState,
+    RequestTimeout,
     DatagramNotEnabled,
     DatagramTooLarge,
     DatagramSendFailed,
@@ -136,6 +137,8 @@ const FetchState = struct {
     response_ctx: ?*anyopaque = null,
     body_buffer: []const u8 = &.{},
     body_sent: usize = 0,
+    content_length: ?usize = null,
+    bytes_received: usize = 0,
     body_owned: bool = false,
     body_finished: bool = true,
     body_provider: ?RequestBodyProvider = null,
@@ -171,6 +174,8 @@ const FetchState = struct {
             .headers = std.array_list.Managed(HeaderPair).init(allocator),
             .trailers = std.array_list.Managed(HeaderPair).init(allocator),
             .have_headers = false,
+            .content_length = null,
+            .bytes_received = 0,
         };
         return self;
     }
@@ -219,10 +224,23 @@ pub const FetchHandle = struct {
         const client = self.client;
         const state = client.requests.get(self.stream_id) orelse return ClientError.ResponseIncomplete;
 
+        // Add timeout tracking
+        const start_time = std.time.milliTimestamp();
+        const timeout_ms = client.config.request_timeout_ms;
+
         while (!state.finished and state.err == null) {
+            // Check timeout
+            const elapsed = std.time.milliTimestamp() - start_time;
+            if (elapsed > timeout_ms) {
+                client.failFetch(self.stream_id, ClientError.RequestTimeout);
+                return ClientError.RequestTimeout;
+            }
+
             state.awaiting = true;
             defer state.awaiting = false;
-            client.event_loop.run();
+
+            // Run event loop once with a short internal timeout to check conditions
+            client.event_loop.runOnce();
         }
 
         return client.finalizeFetch(self.stream_id);
@@ -1381,6 +1399,10 @@ pub const QuicClient = struct {
 
         try self.flushSend();
         self.afterQuicProgress();
+
+        // Critical: Flush any flow control updates generated during data processing
+        // This ensures MAX_STREAM_DATA frames are sent after consuming data
+        try self.flushSend();
     }
 
     fn flushSend(self: *QuicClient) ClientError!void {
@@ -1489,6 +1511,31 @@ pub const QuicClient = struct {
                 .GoAway => self.onH3GoAway(poll.stream_id),
                 .Reset => self.onH3Reset(poll.stream_id),
                 .PriorityUpdate => {},
+            }
+        }
+
+        // After processing all H3 events, check for stream completion
+        // This is a fallback for large transfers where Finished event might not arrive
+        var it = self.requests.iterator();
+        while (it.next()) |entry| {
+            const stream_id = entry.key_ptr.*;
+            const state = entry.value_ptr.*;
+            if (!state.finished and state.status != null) {
+                // First check if we've received all expected content
+                if (state.content_length) |expected| {
+                    if (state.bytes_received >= expected) {
+                        self.onH3Finished(stream_id);
+                        continue;
+                    }
+                    // If we haven't received all data yet, try to read more
+                    // This handles the case where H3 stops sending Data events
+                    self.onH3Data(stream_id);
+                }
+
+                // Also check if stream is actually finished at QUIC level
+                if (conn.streamFinished(stream_id)) {
+                    self.onH3Finished(stream_id);
+                }
             }
         }
     }
@@ -1622,6 +1669,12 @@ pub const QuicClient = struct {
                         return;
                     }
                 }
+            } else if (!is_trailer and std.mem.eql(u8, header.name, "content-length")) {
+                const len = std.fmt.parseUnsigned(usize, header.value, 10) catch {
+                    // Invalid content-length, ignore
+                    continue;
+                };
+                state.content_length = len;
             }
             dest.append(.{ .name = header.name, .value = header.value }) catch {
                 self.failFetch(stream_id, ClientError.H3Error);
@@ -1646,16 +1699,27 @@ pub const QuicClient = struct {
             return;
         };
         var chunk: [2048]u8 = undefined;
+        var total_received: usize = 0;
 
         while (true) {
             const read = h3_conn_ptr.recvBody(conn, stream_id, chunk[0..]) catch |err| switch (err) {
-                quiche.h3.Error.Done => break,
+                quiche.h3.Error.Done => {
+                    // No more data available right now, but stream might not be finished
+                    std.debug.print("DEBUG: Stream {} recvBody returned Done\n", .{stream_id});
+                    break;
+                },
                 else => {
+                    std.debug.print("DEBUG: Stream {} recvBody error: {}\n", .{ stream_id, err });
                     self.failFetch(stream_id, ClientError.H3Error);
                     return;
                 },
             };
-            if (read == 0) break;
+            if (read == 0) {
+                std.debug.print("DEBUG: Stream {} recvBody returned 0 bytes\n", .{stream_id});
+                break;
+            }
+            total_received += read;
+            state.bytes_received += read;
             const slice = chunk[0..read];
             if (state.collect_body) {
                 state.body_chunks.appendSlice(slice) catch {
@@ -1666,6 +1730,37 @@ pub const QuicClient = struct {
 
             if (!self.emitEvent(state, ResponseEvent{ .data = slice })) {
                 return;
+            }
+        }
+
+        // Debug: Log total received
+        if (self.config.enable_debug_logging and total_received > 0) {
+            std.debug.print("DEBUG: Stream {} received {} bytes total\n", .{ stream_id, total_received });
+        }
+
+        // Check if we've received all expected data based on content-length
+        if (state.content_length) |expected_len| {
+            std.debug.print("DEBUG: Stream {} has content-length={}, received={}\n", .{ stream_id, expected_len, state.bytes_received });
+            if (state.bytes_received >= expected_len) {
+                std.debug.print("DEBUG: Stream {} completed via content-length check\n", .{stream_id});
+                if (!state.finished) {
+                    // We've received all expected bytes, mark as finished
+                    self.onH3Finished(stream_id);
+                    return;
+                }
+            }
+        }
+
+        // Check if stream is finished after receiving all available data
+        // This is a fallback for when Finished event is not received
+        if (conn.streamFinished(stream_id)) {
+            if (self.config.enable_debug_logging) {
+                std.debug.print("DEBUG: Stream {} is finished (via streamFinished check)\n", .{stream_id});
+            }
+            if (!state.finished) {
+                // Stream is finished but we didn't get a Finished event
+                // Trigger completion manually
+                self.onH3Finished(stream_id);
             }
         }
     }
