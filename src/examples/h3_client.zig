@@ -1023,7 +1023,7 @@ fn parseHeaders(allocator: std.mem.Allocator, header_str: []const u8) ![]client.
         }
     }
 
-    var it = std.mem.tokenizeAny(u8, header_str, ",\n");
+    var it = std.mem.tokenizeScalar(u8, header_str, '\n');
     while (it.next()) |entry| {
         if (entry.len == 0) continue;
         const colon_index = std.mem.indexOfScalar(u8, entry, ':') orelse return error.InvalidHeader;

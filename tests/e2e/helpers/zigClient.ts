@@ -117,7 +117,7 @@ export async function zigClient(
         headerList.push(`content-length:${contentLength}`);
     }
     if (headerList.length > 0) {
-        args.push("--headers", headerList.join(","));
+        args.push("--headers", headerList.join("\n"));
     }
 
     // Body
