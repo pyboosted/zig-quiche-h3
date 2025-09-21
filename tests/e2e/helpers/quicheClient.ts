@@ -1,5 +1,5 @@
 import { spawn } from "bun";
-import { getQuicheDirectory } from "./testUtils";
+import { getQuicheDirectory, waitForProcessExit } from "./testUtils";
 
 /**
  * Response from quiche-client
@@ -147,10 +147,12 @@ export async function quicheClient(
         // If process is still running, kill it
         if (proc.exitCode === null) {
             proc.kill();
-            await proc.exited;
+            await waitForProcessExit(proc, 1000);
         }
     } else {
-        await proc.exited;
+        // Wait for process with timeout
+        const timeoutMs = (options.idleTimeout || 5000) + 1000;
+        await waitForProcessExit(proc, timeoutMs);
     }
 
     const stdout = await new Response(proc.stdout).text();
@@ -255,7 +257,7 @@ export async function checkQuicheClient(): Promise<boolean> {
             cwd: getQuicheDirectory(),
             env: process.env,
         });
-        await proc.exited;
+        await waitForProcessExit(proc, 5000);
         return proc.exitCode === 0;
     } catch {
         return false;
@@ -280,7 +282,9 @@ export async function ensureQuicheBuilt(): Promise<void> {
         env: process.env, // Use the system's PATH, don't hardcode user-specific paths
     });
 
-    await proc.exited;
+    // Wait for process with timeout (30s for build process)
+    const timeoutMs = 30 * 1000 + 1000;
+    await waitForProcessExit(proc, timeoutMs);
 
     if (proc.exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();

@@ -1,5 +1,4 @@
 import { type Subprocess, spawn } from "bun";
-import { get } from "./zigClient";
 import {
     checkDependencies,
     getCertPath,
@@ -8,7 +7,9 @@ import {
     randPort,
     ServerBinaryType,
     waitFor,
+    waitForProcessExit,
 } from "./testUtils";
+import { get } from "./zigClient";
 
 /**
  * Server instance with cleanup capability
@@ -57,7 +58,17 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
     const keyPath = getCertPath("cert.key");
 
     // Build server arguments
-    const args = [serverPath, "--port", port.toString(), "--cert", certPath, "--key", keyPath, "--files-dir", "tests"];
+    const args = [
+        serverPath,
+        "--port",
+        port.toString(),
+        "--cert",
+        certPath,
+        "--key",
+        keyPath,
+        "--files-dir",
+        "tests",
+    ];
 
     // QLOG configuration
     if (opts.qlog === false || (opts.qlog === undefined && !process.env.H3_QLOG)) {
@@ -106,13 +117,13 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
             // Wait for graceful shutdown with timeout
             await Promise.race([
                 proc.exited,
-                Bun.sleep(2000), // 2 second timeout
+                Bun.sleep(100), // 100ms timeout - Zig server shuts down quickly
             ]);
 
             // Force kill if still running
             if (!proc.killed) {
                 proc.kill("SIGKILL");
-                await proc.exited;
+                await waitForProcessExit(proc, 1000);
             }
         } catch (error) {
             console.warn(`Error during cleanup: ${error}`);
@@ -120,7 +131,7 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
     };
 
     // Wait for server to be ready
-    const timeoutMs = opts.timeoutMs ?? 10000;
+    const timeoutMs = opts.timeoutMs ?? 2000; // Reduced from 10s - server starts in <100ms
     const _deadline = Date.now() + timeoutMs;
 
     try {
@@ -144,7 +155,7 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
                 }
             },
             timeoutMs,
-            150,
+            50, // Reduced from 150ms - server starts almost instantly
         );
 
         console.log(`Server ready on port ${port}`);
@@ -257,7 +268,7 @@ export async function ensureServerBuilt(
     });
     console.log(`[E2E] Build process spawned, waiting for completion...`);
 
-    await proc.exited;
+    await waitForProcessExit(proc, 60000); // 60s for build process
     console.log(`[E2E] Build process exited with code: ${proc.exitCode}`);
 
     if (proc.exitCode !== 0) {

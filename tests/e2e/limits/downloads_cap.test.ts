@@ -1,9 +1,9 @@
 import "../test-runner";
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, expect, it } from "bun:test";
 import { describeBoth } from "@helpers/dualBinaryTest";
-import { spawnServer, type ServerInstance } from "@helpers/spawnServer";
-import { zigClient } from "@helpers/zigClient";
+import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, type ServerBinaryType } from "@helpers/testUtils";
+import { zigClient } from "@helpers/zigClient";
 
 describeBoth("Per-connection download cap", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;

@@ -1,9 +1,9 @@
 import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { zigClient, get } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, type ServerBinaryType } from "@helpers/testUtils";
+import { get, zigClient } from "@helpers/zigClient";
 
 describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
@@ -235,17 +235,26 @@ describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
             // Request three different ranges
-            const range1 = await zigClient(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
-                headers: { Range: "bytes=0-99" },
-            });
+            const range1 = await zigClient(
+                `https://127.0.0.1:${server.port}/download/${relativePath}`,
+                {
+                    headers: { Range: "bytes=0-99" },
+                },
+            );
 
-            const range2 = await zigClient(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
-                headers: { Range: "bytes=500-599" },
-            });
+            const range2 = await zigClient(
+                `https://127.0.0.1:${server.port}/download/${relativePath}`,
+                {
+                    headers: { Range: "bytes=500-599" },
+                },
+            );
 
-            const range3 = await zigClient(`https://127.0.0.1:${server.port}/download/${relativePath}`, {
-                headers: { Range: "bytes=-100" },
-            });
+            const range3 = await zigClient(
+                `https://127.0.0.1:${server.port}/download/${relativePath}`,
+                {
+                    headers: { Range: "bytes=-100" },
+                },
+            );
 
             expect(range1.status).toBe(206);
             expect(range2.status).toBe(206);

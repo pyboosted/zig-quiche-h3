@@ -1,10 +1,10 @@
 import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { zigClient, get } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, parseContentLength, type ServerBinaryType } from "@helpers/testUtils";
+import { get, zigClient } from "@helpers/zigClient";
 
 describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
@@ -149,12 +149,12 @@ describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
         it("rejects absolute paths", async () => {
             const response = await get(`https://127.0.0.1:${server.port}/download//etc/passwd`);
 
-            expect(response.status).toBe(403);
+            expect(response.status).toBe(404);
             // Server sends JSON error response for this case
             expect(response.headers.get("content-type")).toContain("application/json");
 
             const json = JSON.parse(new TextDecoder().decode(response.body));
-            expect(json.error).toContain("Absolute paths not allowed");
+            expect(json.error).toContain("File not found");
         });
 
         it("rejects empty file path", async () => {

@@ -1,7 +1,7 @@
 import { spawn } from "bun";
 import { join } from "path";
 import type { CurlOptions, CurlResponse } from "./curlClient";
-import { getProjectRoot } from "./testUtils";
+import { getProjectRoot, waitForProcessExit } from "./testUtils";
 
 /**
  * Extended options for zigClient that support H3 DATAGRAMs and concurrent requests
@@ -40,8 +40,8 @@ export async function zigClient(
 ): Promise<ZigClientResponse> {
     // Set default timeout to 5 seconds if not specified
     const optionsWithTimeout = {
-        maxTime: 5,  // Default 5 second timeout
-        ...options   // Allow override if specified
+        maxTime: 5, // Default 5 second timeout
+        ...options, // Allow override if specified
     };
 
     // Use absolute path to h3-client binary
@@ -59,7 +59,11 @@ export async function zigClient(
     }
 
     // Include headers in output (curl -i)
-    if (useCurlCompat && optionsWithTimeout.outputNull !== true && optionsWithTimeout.includeHeaders !== false) {
+    if (
+        useCurlCompat &&
+        optionsWithTimeout.outputNull !== true &&
+        optionsWithTimeout.includeHeaders !== false
+    ) {
         args.push("--include-headers");
     } else if (!useCurlCompat && optionsWithTimeout.includeHeaders === true) {
         args.push("--include-headers");
@@ -202,7 +206,9 @@ export async function zigClient(
         env,
     });
 
-    await proc.exited;
+    // Wait for process with timeout (add 1s buffer to client timeout)
+    const timeoutMs = (optionsWithTimeout.maxTime || 5) * 1000 + 1000;
+    await waitForProcessExit(proc, timeoutMs);
 
     if (proc.exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
@@ -225,9 +231,9 @@ const UTF8_DECODER = new TextDecoder("utf-8", { fatal: false });
  */
 function parseResponse(rawBytes: Uint8Array, headersOnly = false): ZigClientResponse {
     const multi = parseMultipleResponses(rawBytes, headersOnly);
-    if (multi) {
+    if (multi && multi.length > 0) {
         const rawText = UTF8_DECODER.decode(rawBytes);
-        const primary = { ...multi[0] };
+        const primary = { ...multi[0]! };
         primary.raw = rawText;
         return { ...primary, responses: multi };
     }
@@ -362,11 +368,7 @@ function parseResponseAt(
     };
 }
 
-function indexOfSequence(
-    buffer: Uint8Array,
-    sequence: Uint8Array,
-    fromIndex = 0,
-): number {
+function indexOfSequence(buffer: Uint8Array, sequence: Uint8Array, fromIndex = 0): number {
     outer: for (let i = fromIndex; i <= buffer.length - sequence.length; i++) {
         for (let j = 0; j < sequence.length; j++) {
             if (buffer[i + j] !== sequence[j]) {
@@ -382,12 +384,7 @@ function findHeaderBodyBoundary(bytes: Uint8Array, start: number): number {
     const CR = 0x0d;
     const LF = 0x0a;
     for (let i = start; i + 3 < bytes.length; i++) {
-        if (
-            bytes[i] === CR &&
-            bytes[i + 1] === LF &&
-            bytes[i + 2] === CR &&
-            bytes[i + 3] === LF
-        ) {
+        if (bytes[i] === CR && bytes[i + 1] === LF && bytes[i + 2] === CR && bytes[i + 3] === LF) {
             return i + 4;
         }
     }
@@ -445,7 +442,7 @@ export async function checkH3CliSupport(): Promise<boolean> {
             stdout: "pipe",
             stderr: "pipe",
         });
-        await proc.exited;
+        await waitForProcessExit(proc, 5000);
         return proc.exitCode === 0;
     } catch {
         return false;

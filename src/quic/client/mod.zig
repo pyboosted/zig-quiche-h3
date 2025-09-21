@@ -1199,8 +1199,7 @@ pub const QuicClient = struct {
 
             // Use H3 sendBody to properly wrap data in HTTP/3 DATA frames
             const written = h3_conn.sendBody(conn, stream_id, chunk, fin) catch |err| switch (err) {
-                quiche.h3.Error.StreamBlocked,
-                quiche.h3.Error.Done => break,
+                quiche.h3.Error.StreamBlocked, quiche.h3.Error.Done => break,
                 else => return ClientError.H3Error,
             };
 
@@ -1705,17 +1704,14 @@ pub const QuicClient = struct {
             const read = h3_conn_ptr.recvBody(conn, stream_id, chunk[0..]) catch |err| switch (err) {
                 quiche.h3.Error.Done => {
                     // No more data available right now, but stream might not be finished
-                    std.debug.print("DEBUG: Stream {} recvBody returned Done\n", .{stream_id});
                     break;
                 },
                 else => {
-                    std.debug.print("DEBUG: Stream {} recvBody error: {}\n", .{ stream_id, err });
                     self.failFetch(stream_id, ClientError.H3Error);
                     return;
                 },
             };
             if (read == 0) {
-                std.debug.print("DEBUG: Stream {} recvBody returned 0 bytes\n", .{stream_id});
                 break;
             }
             total_received += read;
@@ -1733,16 +1729,9 @@ pub const QuicClient = struct {
             }
         }
 
-        // Debug: Log total received
-        if (self.config.enable_debug_logging and total_received > 0) {
-            std.debug.print("DEBUG: Stream {} received {} bytes total\n", .{ stream_id, total_received });
-        }
-
         // Check if we've received all expected data based on content-length
         if (state.content_length) |expected_len| {
-            std.debug.print("DEBUG: Stream {} has content-length={}, received={}\n", .{ stream_id, expected_len, state.bytes_received });
             if (state.bytes_received >= expected_len) {
-                std.debug.print("DEBUG: Stream {} completed via content-length check\n", .{stream_id});
                 if (!state.finished) {
                     // We've received all expected bytes, mark as finished
                     self.onH3Finished(stream_id);

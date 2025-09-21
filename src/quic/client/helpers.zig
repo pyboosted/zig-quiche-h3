@@ -40,7 +40,8 @@ pub fn buildRequestHeaders(
     // Build authority from host and optional port
     const authority = if (uri.port) |port| blk: {
         if ((std.mem.eql(u8, uri.scheme, "https") and port == 443) or
-            (std.mem.eql(u8, uri.scheme, "http") and port == 80)) {
+            (std.mem.eql(u8, uri.scheme, "http") and port == 80))
+        {
             // Don't include default ports
             break :blk try allocator.dupe(u8, uri.host.?);
         } else {

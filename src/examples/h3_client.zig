@@ -146,7 +146,7 @@ fn mainImpl() !void {
     var client_config = client.ClientConfig{};
     client_config.verify_peer = if (parsed.insecure) false else parsed.verify_peer;
     client_config.idle_timeout_ms = parsed.timeout_ms;
-    client_config.request_timeout_ms = parsed.timeout_ms;  // Use same timeout for requests
+    client_config.request_timeout_ms = parsed.timeout_ms; // Use same timeout for requests
     client_config.enable_webtransport = parsed.enable_webtransport;
     // Enable DATAGRAMs if any DATAGRAM-related option is provided
     if (parsed.dgram_count > 0 or parsed.dgram_payload.len > 0 or parsed.dgram_payload_file.len > 0) {
@@ -1056,7 +1056,23 @@ fn buildPath(allocator: std.mem.Allocator, uri: std.Uri) ![]const u8 {
     if (uri.path.isEmpty()) {
         try writer.writeByte('/');
     } else {
-        try std.fmt.format(&writer, "{f}", .{std.fmt.alt(uri.path, .formatEscaped)});
+        // First, format the escaped path to a temporary buffer
+        var path_buffer = std.ArrayListUnmanaged(u8){};
+        defer path_buffer.deinit(allocator);
+        var path_writer = path_buffer.writer(allocator);
+        try std.fmt.format(&path_writer, "{f}", .{std.fmt.alt(uri.path, .formatEscaped)});
+        const raw_path = path_buffer.items;
+
+        // Normalize the path to resolve . and .. segments (like curl does)
+        // Use resolvePosix to handle paths consistently across platforms
+        const normalized_path = try std.fs.path.resolvePosix(allocator, &.{raw_path});
+        defer allocator.free(normalized_path);
+
+        // Ensure the path starts with /
+        if (normalized_path.len == 0 or normalized_path[0] != '/') {
+            try writer.writeByte('/');
+        }
+        try writer.writeAll(normalized_path);
     }
 
     if (uri.query) |query_component| {

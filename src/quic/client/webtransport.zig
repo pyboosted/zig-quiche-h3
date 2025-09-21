@@ -31,15 +31,15 @@ pub const WebTransportSession = struct {
     datagram_queue: std.ArrayList([]u8),
 
     pub const State = enum {
-        connecting,  // CONNECT request sent, awaiting response
+        connecting, // CONNECT request sent, awaiting response
         established, // 200 response received
-        closed,      // Session terminated
+        closed, // Session terminated
     };
 
     /// Check if this session is affected by GOAWAY
     pub fn isGoingAway(self: *const WebTransportSession) bool {
         return self.client.goaway_received and
-               self.session_id > (self.client.goaway_stream_id orelse std.math.maxInt(u64));
+            self.session_id > (self.client.goaway_stream_id orelse std.math.maxInt(u64));
     }
 
     /// Send a datagram on this WebTransport session
@@ -67,7 +67,7 @@ pub const WebTransportSession = struct {
         }
 
         // Allocate buffer for prefixed datagram
-        var stack_buf: [2048]u8 = undefined;  // Hoist outside to maintain scope
+        var stack_buf: [2048]u8 = undefined; // Hoist outside to maintain scope
         var buf: []u8 = undefined;
         var use_heap = false;
 

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { spawn } from "bun";
+import { type Subprocess, spawn } from "bun";
 import { existsSync } from "fs";
 
 /**
@@ -199,7 +199,7 @@ export function hexToBytes(hex: string): Uint8Array {
 export async function waitFor(
     condition: () => boolean | Promise<boolean>,
     timeoutMs = 5000,
-    intervalMs = 100,
+    intervalMs = 50, // Reduced from 100ms for faster polling
 ): Promise<void> {
     const start = Date.now();
 
@@ -211,6 +211,31 @@ export async function waitFor(
     }
 
     throw new Error(`Condition not met within ${timeoutMs}ms`);
+}
+
+/**
+ * Wait for a process to exit with a timeout
+ * @param proc - The subprocess to wait for
+ * @param timeoutMs - Maximum time to wait in milliseconds
+ * @param killOnTimeout - Whether to kill the process on timeout (default: true)
+ * @returns Promise that resolves when process exits or rejects on timeout
+ */
+export async function waitForProcessExit(
+    proc: Subprocess,
+    timeoutMs: number,
+    killOnTimeout = true,
+): Promise<void> {
+    await Promise.race([
+        proc.exited,
+        new Promise<never>((_, reject) => {
+            setTimeout(() => {
+                if (killOnTimeout && !proc.killed) {
+                    proc.kill();
+                }
+                reject(new Error(`Process did not exit within ${timeoutMs}ms`));
+            }, timeoutMs);
+        }),
+    ]);
 }
 
 /**
@@ -319,7 +344,7 @@ export async function commandExists(command: string): Promise<boolean> {
             stdout: "pipe",
             stderr: "pipe",
         });
-        await proc.exited;
+        await waitForProcessExit(proc, 5000);
         return proc.exitCode === 0;
     } catch {
         return false;

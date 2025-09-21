@@ -1,4 +1,5 @@
 import { spawn } from "bun";
+import { waitForProcessExit } from "./testUtils";
 
 /**
  * Structured response from curl
@@ -99,7 +100,9 @@ export async function curl(url: string, options: CurlOptions = {}): Promise<Curl
         stderr: "pipe",
     });
 
-    await proc.exited;
+    // Wait for process with timeout (add 1s buffer to curl timeout)
+    const timeoutMs = (options.maxTime || 30) * 1000 + 1000;
+    await waitForProcessExit(proc, timeoutMs);
 
     if (proc.exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
@@ -243,7 +246,7 @@ export async function checkHttp3Support(): Promise<boolean> {
             stdout: "pipe",
             stderr: "pipe",
         });
-        await proc.exited;
+        await waitForProcessExit(proc, 5000);
 
         if (proc.exitCode !== 0) return false;
 

@@ -1,11 +1,11 @@
 import "../test-runner";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { describeBoth } from "@helpers/dualBinaryTest";
-import { spawnServer, type ServerInstance } from "@helpers/spawnServer";
+import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
+import type { ServerBinaryType } from "@helpers/testUtils";
 import { zigClient } from "@helpers/zigClient";
-import { mkfile, type ServerBinaryType } from "@helpers/testUtils";
 
-function extractStatuses(jsonLines: string): number[] {
+function _extractStatuses(jsonLines: string): number[] {
     const statuses: number[] = [];
     for (const line of jsonLines.split("\n")) {
         const t = line.trim();
@@ -53,11 +53,14 @@ describeBoth("Per-connection request cap", (binaryType: ServerBinaryType) => {
             const responses = response.responses ?? [response];
             expect(responses.length).toBe(3);
 
-            const statusCounts = responses.reduce((acc, res) => {
-                const key = res.status;
-                acc[key] = (acc[key] ?? 0) + 1;
-                return acc;
-            }, {} as Record<number, number>);
+            const statusCounts = responses.reduce(
+                (acc, res) => {
+                    const key = res.status;
+                    acc[key] = (acc[key] ?? 0) + 1;
+                    return acc;
+                },
+                {} as Record<number, number>,
+            );
 
             expect(statusCounts[200] ?? 0).toBe(2);
             expect(statusCounts[503] ?? 0).toBe(1);
@@ -65,10 +68,18 @@ describeBoth("Per-connection request cap", (binaryType: ServerBinaryType) => {
 
         it("manual test instructions", () => {
             console.log("\n=== Manual Test Procedure ===");
-            console.log("1. Start server: H3_MAX_REQS_PER_CONN=2 ./zig-out/bin/quic-server --port 15433");
-            console.log("2. In terminal 1: curl --http3-only https://127.0.0.1:15433/slow?delay=5000 &");
-            console.log("3. In terminal 2: curl --http3-only https://127.0.0.1:15433/slow?delay=5000 &");
-            console.log("4. In terminal 3: curl --http3-only https://127.0.0.1:15433/slow?delay=5000");
+            console.log(
+                "1. Start server: H3_MAX_REQS_PER_CONN=2 ./zig-out/bin/quic-server --port 15433",
+            );
+            console.log(
+                "2. In terminal 1: curl --http3-only https://127.0.0.1:15433/slow?delay=5000 &",
+            );
+            console.log(
+                "3. In terminal 2: curl --http3-only https://127.0.0.1:15433/slow?delay=5000 &",
+            );
+            console.log(
+                "4. In terminal 3: curl --http3-only https://127.0.0.1:15433/slow?delay=5000",
+            );
             console.log("   ^ This should return 503 Service Unavailable");
             console.log("==============================\n");
             expect(true).toBe(true);

@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, expect, it } from "bun:test";
-import { zigClient, get, head, post } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { expectJson, parseContentLength, type ServerBinaryType } from "@helpers/testUtils";
+import { get, head, post, zigClient } from "@helpers/zigClient";
 
 describeBoth("HTTP/3 Basic", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
@@ -90,16 +90,12 @@ describeBoth("HTTP/3 Basic", (binaryType: ServerBinaryType) => {
         const body = JSON.stringify(testData);
         const bodyBytes = new TextEncoder().encode(body);
 
-        const response = await post(
-            `https://127.0.0.1:${server.port}/api/echo`,
-            body,
-            {
-                headers: {
-                    "content-type": "application/json",
-                    "content-length": bodyBytes.length.toString(),
-                },
+        const response = await post(`https://127.0.0.1:${server.port}/api/echo`, body, {
+            headers: {
+                "content-type": "application/json",
+                "content-length": bodyBytes.length.toString(),
             },
-        );
+        });
 
         expect(response.status).toBe(200);
         expect(response.headers.get("content-type")).toContain("application/json");

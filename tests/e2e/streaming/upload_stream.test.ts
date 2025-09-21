@@ -1,10 +1,10 @@
 import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { post } from "@helpers/zigClient";
 import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, type ServerBinaryType, withTempDir } from "@helpers/testUtils";
+import { post } from "@helpers/zigClient";
 
 describeBoth("HTTP/3 Upload Streaming", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;

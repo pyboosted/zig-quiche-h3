@@ -195,7 +195,7 @@ pub fn downloadHandler(req: *http.Request, res: *http.Response) http.HandlerErro
         std.mem.startsWith(u8, req.path_decoded, "/download/") and
         req.path_decoded[10] == '/')
     {
-        res.jsonError(403, "Absolute paths not allowed") catch |err| switch (err) {
+        res.jsonError(404, "File not found") catch |err| switch (err) {
             error.StreamBlocked => return error.StreamBlocked,
             else => return error.InternalServerError,
         };
@@ -203,7 +203,7 @@ pub fn downloadHandler(req: *http.Request, res: *http.Response) http.HandlerErro
     }
 
     if (std.mem.indexOf(u8, file_path, "..") != null) {
-        res.jsonError(403, "Path traversal not allowed") catch |err| switch (err) {
+        res.jsonError(404, "File not found") catch |err| switch (err) {
             error.StreamBlocked => return error.StreamBlocked,
             else => return error.InternalServerError,
         };
@@ -211,7 +211,7 @@ pub fn downloadHandler(req: *http.Request, res: *http.Response) http.HandlerErro
     }
 
     if (std.fs.path.isAbsolute(file_path)) {
-        res.jsonError(403, "Absolute paths not allowed") catch |err| switch (err) {
+        res.jsonError(404, "File not found") catch |err| switch (err) {
             error.StreamBlocked => return error.StreamBlocked,
             else => return error.InternalServerError,
         };
