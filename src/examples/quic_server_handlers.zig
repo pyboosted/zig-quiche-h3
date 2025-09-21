@@ -2,6 +2,9 @@
 const std = @import("std");
 const http = @import("http");
 
+// Global configuration for handlers
+pub var g_files_dir: []const u8 = ".";
+
 pub fn indexHandler(_: *http.Request, res: *http.Response) http.HandlerError!void {
     const html =
         \\<!DOCTYPE html>
@@ -186,11 +189,6 @@ pub fn downloadHandler(req: *http.Request, res: *http.Response) http.HandlerErro
 
     // Build absolute path (safely, avoiding path traversal)
     const allocator = req.arena.allocator();
-    const cwd = std.fs.cwd().realpathAlloc(allocator, ".") catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InternalServerError,
-    };
-    defer allocator.free(cwd);
 
     // Enhanced safety checks
     if (req.path_decoded.len >= 11 and
@@ -228,14 +226,17 @@ pub fn downloadHandler(req: *http.Request, res: *http.Response) http.HandlerErro
         return;
     }
 
-    const full_path = if (std.mem.startsWith(u8, file_path, "tmp/"))
-        std.fs.path.join(allocator, &.{ cwd, "tests", file_path }) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-        }
-    else
-        std.fs.path.join(allocator, &.{ cwd, file_path }) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-        };
+    // Get absolute path of files directory
+    const files_dir_abs = std.fs.cwd().realpathAlloc(allocator, g_files_dir) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InternalServerError,
+    };
+    defer allocator.free(files_dir_abs);
+
+    // Join with the requested file path
+    const full_path = std.fs.path.join(allocator, &.{ files_dir_abs, file_path }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+    };
 
     const file = std.fs.openFileAbsolute(full_path, .{}) catch |open_err| {
         switch (open_err) {
@@ -416,16 +417,21 @@ pub fn streamTestHandler(req: *http.Request, res: *http.Response) http.HandlerEr
         byte.* = @truncate(i % 256);
     }
 
-    var checksum: u32 = 0;
-    for (data) |byte| {
-        checksum = checksum +% byte;
+    // Compute SHA-256 hash
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(data);
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+
+    // Format as hex string
+    var checksum_buf: [64]u8 = undefined;
+    for (&hash, 0..) |byte, i| {
+        _ = std.fmt.bufPrint(checksum_buf[i * 2 ..][0..2], "{x:0>2}", .{byte}) catch return error.InternalServerError;
     }
 
     res.header(http.Headers.ContentType, "application/octet-stream") catch return error.InternalServerError;
     res.header(http.Headers.ContentLength, "10485760") catch return error.InternalServerError;
-    var checksum_buf: [20]u8 = undefined;
-    const checksum_str = std.fmt.bufPrint(&checksum_buf, "{d}", .{checksum}) catch return error.InternalServerError;
-    res.header("X-Checksum", checksum_str) catch return error.InternalServerError;
+    res.header("X-Checksum", &checksum_buf) catch return error.InternalServerError;
 
     res.writeAll(data) catch |err| switch (err) {
         error.StreamBlocked => return error.StreamBlocked,

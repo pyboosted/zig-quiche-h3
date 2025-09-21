@@ -57,7 +57,7 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
     const keyPath = getCertPath("cert.key");
 
     // Build server arguments
-    const args = [serverPath, "--port", port.toString(), "--cert", certPath, "--key", keyPath];
+    const args = [serverPath, "--port", port.toString(), "--cert", certPath, "--key", keyPath, "--files-dir", "tests"];
 
     // QLOG configuration
     if (opts.qlog === false || (opts.qlog === undefined && !process.env.H3_QLOG)) {

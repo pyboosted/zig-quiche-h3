@@ -23,12 +23,14 @@ pub fn main() !void {
         cert: []const u8 = "third_party/quiche/quiche/examples/cert.crt",
         key: []const u8 = "third_party/quiche/quiche/examples/cert.key",
         no_qlog: bool = false,
+        files_dir: []const u8 = ".",
 
         pub const descriptions = .{
             .port = "Port to listen on for QUIC connections",
             .cert = "Path to TLS certificate file",
             .key = "Path to TLS private key file",
             .no_qlog = "Disable qlog output",
+            .files_dir = "Base directory for serving files via /download/*",
         };
     };
 
@@ -37,6 +39,9 @@ pub fn main() !void {
 
     const parser = args.Parser(ServerArgs);
     const parsed = try parser.parse(allocator, argv);
+
+    // Set the global files directory for handlers
+    handlers.g_files_dir = parsed.files_dir;
 
     const config = ServerConfig{
         .bind_port = parsed.port,
