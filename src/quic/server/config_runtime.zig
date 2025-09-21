@@ -84,14 +84,15 @@ pub fn applyRuntimeOverrides(
 
     if (std.process.getEnvVarOwned(allocator, "H3_MAX_DOWNLOADS_PER_CONN")) |dq| {
         defer allocator.free(dq);
+        std.debug.print("[DEBUG] H3_MAX_DOWNLOADS_PER_CONN env var = '{s}'\n", .{dq});
         const val = std.fmt.parseUnsigned(usize, dq, 10) catch 0;
         if (val > 0) {
             cfg_eff.max_active_downloads_per_conn = val;
-            if (cfg_eff.enable_debug_logging) {
-                std.debug.print("[INFO] H3: max_active_downloads_per_conn set to {} via H3_MAX_DOWNLOADS_PER_CONN\n", .{val});
-            }
+            std.debug.print("[INFO] H3: max_active_downloads_per_conn set to {} via H3_MAX_DOWNLOADS_PER_CONN\n", .{val});
         }
-    } else |_| {}
+    } else |_| {
+        std.debug.print("[DEBUG] H3_MAX_DOWNLOADS_PER_CONN env var not set\n", .{});
+    }
 
     const wt_env_owned = std.process.getEnvVarOwned(allocator, "H3_WEBTRANSPORT") catch null;
     const webtransport_enabled = blk: {

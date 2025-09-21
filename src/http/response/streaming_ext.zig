@@ -48,19 +48,21 @@ pub fn processPartialResponse(comptime Response: type, self: *Response) !void {
             self.limiter_checked = true;
             if (!ok) {
                 // Send 503 response and close stream
+                // First clean up the file-based partial response
+                partial.deinit();
+                self.partial_response = null;
+
+                // Now send 503 response
                 try self.status(@intFromEnum(Status.ServiceUnavailable));
                 try self.header(Headers.ContentLength, "0");
                 self.end(null) catch |err| {
-                    // Handle StreamBlocked by letting the partial response be processed
+                    // Handle StreamBlocked - end() will create its own partial response
                     if (err == error.StreamBlocked) {
-                        // The partial response was created by end(), don't override it
-                        partial.deinit();
+                        // Let the new partial response be processed
                         return;
                     }
                     return err;
                 };
-                partial.deinit();
-                self.partial_response = null;
                 return;
             }
         } else {

@@ -293,23 +293,31 @@ pub fn Impl(comptime S: type) type {
         // Streaming gate: invoked by Response before starting a file/generator partial.
         fn responseStreamingGate(ctx: *anyopaque, q_conn: *quiche.Connection, stream_id: u64, source_kind: u8) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
+            std.debug.print("[DEBUG] responseStreamingGate: stream_id={}, source_kind={}, max_downloads={}\n", .{ stream_id, source_kind, self.config.max_active_downloads_per_conn });
             if (self.config.max_active_downloads_per_conn == 0) return true;
 
-            const conn = findConnByQuichePtr(self, q_conn) orelse return true; // If unknown, allow
+            const conn = findConnByQuichePtr(self, q_conn) orelse {
+                std.debug.print("[DEBUG] responseStreamingGate: conn not found, allowing\n", .{});
+                return true; // If unknown, allow
+            };
 
             const current = conn.active_downloads;
+            std.debug.print("[DEBUG] responseStreamingGate: current_downloads={}, cap={}\n", .{ current, self.config.max_active_downloads_per_conn });
             if (current >= self.config.max_active_downloads_per_conn) {
                 server_logging.warnf(self, "503: per-conn download cap reached (cur={}, cap={})\n", .{ current, self.config.max_active_downloads_per_conn });
+                std.debug.print("[DEBUG] responseStreamingGate: REJECTING (limit reached)\n", .{});
                 return false; // reject new download stream
             }
 
             // Mark the state as a download if we can find it
             if (self.stream_states.get(.{ .conn = conn, .stream_id = stream_id })) |st| {
                 if ((source_kind == 1 or source_kind == 2) and !st.is_download) {
+                    std.debug.print("[DEBUG] responseStreamingGate: marking stream {} as download, incrementing count to {}\n", .{ stream_id, current + 1 });
                     st.is_download = true;
                     conn.active_downloads += 1;
                 }
             }
+            std.debug.print("[DEBUG] responseStreamingGate: ALLOWING stream\n", .{});
             return true;
         }
 

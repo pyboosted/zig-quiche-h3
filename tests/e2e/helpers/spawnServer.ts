@@ -91,6 +91,14 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
         env.SSLKEYLOGFILE = `./tmp/sslkeylog-${port}.txt`;
     }
 
+    // Log environment variables relevant to server config
+    if (opts.env?.H3_MAX_DOWNLOADS_PER_CONN) {
+        console.log(`[E2E] H3_MAX_DOWNLOADS_PER_CONN=${opts.env.H3_MAX_DOWNLOADS_PER_CONN}`);
+    }
+    if (opts.env?.H3_MAX_REQS_PER_CONN) {
+        console.log(`[E2E] H3_MAX_REQS_PER_CONN=${opts.env.H3_MAX_REQS_PER_CONN}`);
+    }
+
     console.log(`Spawning server on port ${port}...`);
     console.log(`[E2E] Server command: ${args.join(" ")}`);
     console.log(`[E2E] Working directory: ${getProjectRoot()}`);
