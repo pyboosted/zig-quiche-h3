@@ -342,8 +342,37 @@ function parseResponseAt(
 
     const bodyStart = headerBoundary;
     let bodyEnd = rawBytes.length;
+
     if (contentLength !== null) {
         bodyEnd = Math.min(bodyStart + contentLength, rawBytes.length);
+    } else {
+        // When Content-Length is missing, look for the next HTTP/3 response marker
+        // Search for "\nHTTP/3 " or "\r\nHTTP/3 " patterns (response directly follows body)
+        const searchStart = bodyStart;
+
+        // Look for LF followed by HTTP/3
+        for (let i = searchStart; i < rawBytes.length - 6; i++) {
+            if (rawBytes[i] === 0x0a && // LF
+                rawBytes[i + 1] === 0x48 && rawBytes[i + 2] === 0x54 &&
+                rawBytes[i + 3] === 0x54 && rawBytes[i + 4] === 0x50 &&
+                rawBytes[i + 5] === 0x2f && rawBytes[i + 6] === 0x33) { // "HTTP/3"
+                bodyEnd = i + 1; // Include the LF as part of the body
+                break;
+            }
+        }
+
+        // Also look for CRLF followed by HTTP/3
+        if (bodyEnd === rawBytes.length) {
+            for (let i = searchStart; i < rawBytes.length - 7; i++) {
+                if (rawBytes[i] === 0x0d && rawBytes[i + 1] === 0x0a && // CRLF
+                    rawBytes[i + 2] === 0x48 && rawBytes[i + 3] === 0x54 &&
+                    rawBytes[i + 4] === 0x54 && rawBytes[i + 5] === 0x50 &&
+                    rawBytes[i + 6] === 0x2f && rawBytes[i + 7] === 0x33) { // "HTTP/3"
+                    bodyEnd = i + 2; // Include the CRLF as part of the body
+                    break;
+                }
+            }
+        }
     }
 
     const body = headersOnly ? new Uint8Array(0) : rawBytes.slice(bodyStart, bodyEnd);

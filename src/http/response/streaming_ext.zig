@@ -47,17 +47,20 @@ pub fn processPartialResponse(comptime Response: type, self: *Response) !void {
             const ok = self.on_start_streaming.?(self.limiter_ctx.?, self.quic_conn, self.stream_id, source_kind);
             self.limiter_checked = true;
             if (!ok) {
-                var status_buf: [4]u8 = undefined;
-                const code: u16 = @intFromEnum(Status.ServiceUnavailable);
-                const status_str = try std.fmt.bufPrint(&status_buf, "{d}", .{code});
-                const headers = [_]quiche.h3.Header{
-                    .{ .name = ":status", .name_len = 7, .value = status_str.ptr, .value_len = status_str.len },
-                    .{ .name = Headers.ContentLength, .name_len = Headers.ContentLength.len, .value = "0", .value_len = 1 },
+                // Send 503 response and close stream
+                try self.status(@intFromEnum(Status.ServiceUnavailable));
+                try self.header(Headers.ContentLength, "0");
+                self.end(null) catch |err| {
+                    // Handle StreamBlocked by letting the partial response be processed
+                    if (err == error.StreamBlocked) {
+                        // The partial response was created by end(), don't override it
+                        partial.deinit();
+                        return;
+                    }
+                    return err;
                 };
-                self.h3_conn.sendResponse(self.quic_conn, self.stream_id, headers[0..], true) catch {};
                 partial.deinit();
                 self.partial_response = null;
-                self.ended = true;
                 return;
             }
         } else {
