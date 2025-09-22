@@ -6,6 +6,24 @@ This document tracks the migration from curl to our native `zig-quiche-h3` clien
 
 > **Goal**: Complete Week 3 of the client implementation plan by creating a production-ready HTTP/3 test client that enables comprehensive E2E testing.
 
+## Progress Checklist
+
+### Foundation
+- [x] Ship curl-compatible `h3-client` CLI with repeat/concurrency, DATAGRAM, and WebTransport toggles
+- [x] Replace curl helper with `zigClient()` wrapper across the E2E suite
+- [x] Stabilise server handlers (`/slow`, `/stream/test`) for timer-driven streaming
+
+### Suites & Coverage
+- [x] Run request/download cap suites through the Zig client with true parallelism
+- [x] Re-enable stress variants gated by `H3_STRESS`
+- [ ] Replace curl for HEAD + Range once upstream HTTP/3 bug is fixed or alternate probe is available
+- [ ] Add regression coverage for H3 DATAGRAM negative-path tests (unknown flow-id, varint boundaries)
+
+### Stretch Goals
+- [ ] Stand up compatibility matrix (nginx-quic, Caddy, h2o, ngtcp2)
+- [ ] Benchmark Zig client vs curl/quiche-client for handshake and throughput
+- [ ] Layered logging/metrics for long-running soak tests
+
 ## Current Testing Limitations
 
 ### Skipped Tests Analysis
@@ -38,165 +56,53 @@ export async function curl(url: string, options: CurlOptions): Promise<CurlRespo
 }
 ```
 
-## Implementation Plan
+## Implementation Plan & Tracking
 
-### Phase 1: Create curl-compatible CLI (`h3-client`)
+### Phase 1 – CLI Parity *(Complete)*
+- [x] Ship `h3-client` with curl-compatible flags and extended options (DATAGRAM, WebTransport, concurrency)
+- [x] Preserve detailed error propagation from `QuicClient.init` (CA bundle, libev, etc.)
 
-**File**: `src/examples/h3_client.zig`
+### Phase 2 – Test Harness Integration *(Complete)*
+- [x] Replace `curlClient.ts` with `zigClient.ts`
+- [x] Keep backwards-compatible helpers (`get`, `post`, etc.) that now delegate to Zig
 
-```zig
-const CliArgs = struct {
-    url: []const u8,
-    method: []const u8 = "GET",
-    headers: []const u8 = "",
-    data: []const u8 = "",
-    output: []const u8 = "-",  // stdout
-    insecure: bool = false,
-    include_headers: bool = false,
-    verbose: bool = false,
-    // Extended features
-    h3_dgram: bool = false,
-    webtransport: bool = false,
-    concurrent: u32 = 1,
-    pool_connections: bool = true,
-};
-```
+### Phase 3 – Unlock Skipped Suites *(In Progress)*
+- [x] Limits: concurrent request cap
+- [x] Limits: download cap (memory vs file streaming)
+- [ ] Streaming: HEAD + Range (blocked on curl HTTP/3 limitation – needs alternate probe)
+- [ ] H3 DATAGRAM negative paths (requires richer client harness)
 
-**Features**:
-- Drop-in curl replacement for basic HTTP/3
-- Extended capabilities for H3 DATAGRAMs and WebTransport
-- Connection pooling for true concurrent requests, preserving underlying `QuicClient.init` failures (CA bundle, libev, etc.) instead of misreporting pool exhaustion
-- Compatible output format for existing test parsers
+### Phase 4 – Multi-Server Compatibility *(Not Started)*
+- [ ] quiche-server (Cloudflare) smoke tests via Docker
+- [ ] nginx-quic compatibility run
+- [ ] Caddy / quic-go compatibility run
+- [ ] h2o / picoquic compatibility run
+- [ ] ngtcp2 + nghttp3 compatibility run
 
-### Phase 2: TypeScript Integration Layer
+### Phase 5 – Performance Benchmarks *(Not Started)*
+- [ ] Handshake latency comparison (curl vs zigClient, pooled vs non-pooled)
+- [ ] Request throughput (sequential vs pooled vs concurrent)
+- [ ] Streaming throughput (large downloads/uploads with caps)
 
-**File**: `tests/e2e/helpers/zigClient.ts`
+Test our client against various HTTP/3 implementations to ensure compatibility. The table doubles as a status board; update the checkboxes as runs complete.
 
-```typescript
-import { spawn } from "bun";
+| Server Stack | Coverage Target | Status | Notes |
+|--------------|-----------------|--------|-------|
+| `zig-quiche-h3` (local) | Full regression suite | ✅ Done | Runs in CI after recent concurrency fixes |
+| `cloudflare/quiche` | Smoke (GET/POST, DATAGRAM) | ☐ Planned | Launch via docker-compose target |
+| `nginx-quic` | Basic HTTP/3 GET/HEAD | ☐ Planned | Requires custom image with certs |
+| `Caddy` (quic-go) | Basic HTTP/3 GET/POST | ☐ Planned | Validate WebTransport once upstream support lands |
+| `h2o` (picoquic) | Basic HTTP/3 | ☐ Planned | Focus on response header parity |
+| `ngtcp2 + nghttp3` | Full | ☐ Planned | Ideal for priority/resumption experiments |
 
-export interface ZigClientOptions extends CurlOptions {
-    // Extended options
-    h3Dgram?: boolean;
-    webTransport?: boolean;
-    concurrent?: number;
-    poolConnections?: boolean;
-}
+### Phase 5: Performance Benchmarks (Storyboard)
 
-export async function zigClient(url: string, options: ZigClientOptions = {}): Promise<CurlResponse> {
-    const args = ["./zig-out/bin/h3-client"];
+Benchmark harnesses will live under `tests/e2e/benchmarks/`. Each scenario gets a checkbox once the script and baseline numbers exist.
 
-    // Build curl-compatible arguments
-    if (options.insecure) args.push("--insecure");
-    if (options.includeHeaders) args.push("-i");
-    if (options.method) args.push("-X", options.method);
-
-    // Extended features
-    if (options.h3Dgram) args.push("--h3-dgram");
-    if (options.concurrent) args.push("--concurrent", options.concurrent.toString());
-
-    args.push(url);
-
-    const proc = spawn({ cmd: args, stdout: "pipe", stderr: "pipe" });
-    // Parse response in curl-compatible format
-    return parseCurlResponse(await proc.stdout);
-}
-
-// Backward compatibility
-export const curl = zigClient;
-export const get = (url: string, opts?: ZigClientOptions) => zigClient(url, { ...opts, method: "GET" });
-export const post = (url: string, body: any, opts?: ZigClientOptions) => zigClient(url, { ...opts, method: "POST", body });
-```
-
-**Error handling**: Because `ConnectionPool.acquire` now returns a `ClientError || QuicClientInitError`, the CLI exits with precise causes (`error.LoadCABundleFailed`, `error.LibevInitFailed`, genuine exhaustion) that the harness can distinguish during setup. The new `tests/e2e/helpers/zigClient.ts` wraps these semantics and replaces the old curl shim for all HTTP/3/H3 DATAGRAM suites.
-
-### Phase 3: Enable Skipped Tests
-
-All formerly skipped **concurrent request** and **download cap** tests now execute through `zigClient`, and the `/slow` handler’s timer-based implementation keeps the event loop responsive. Remaining items in this phase are the curl-specific HEAD + Range case and the two TODO DATAGRAM scenarios above.
-
-### Phase 4: Multi-Server Compatibility Testing
-
-Test our client against various HTTP/3 implementations to ensure compatibility:
-
-#### Test Matrix
-
-| Server | Implementation | Test Coverage | Status |
-|--------|---------------|--------------|---------|
-| quiche-server | Cloudflare quiche | Full | ✅ Working |
-| zig-quiche-h3 | Our server | Full | ✅ Working |
-| nginx-quic | nginx + quiche | Basic HTTP/3 | 🔄 Planned |
-| Caddy | Go + quic-go | Basic HTTP/3 | 🔄 Planned |
-| h2o | picoquic | Basic HTTP/3 | 🔄 Planned |
-| ngtcp2 | ngtcp2 + nghttp3 | Full | 🔄 Planned |
-
-#### Implementation
-
-```typescript
-// tests/e2e/compatibility/multi_server.test.ts
-describe("Multi-Server Compatibility", () => {
-    const servers = [
-        { name: "quiche", image: "cloudflare/quiche:latest", port: 8443 },
-        { name: "nginx", image: "nginx:quic", port: 8444 },
-        { name: "caddy", image: "caddy:h3", port: 8445 },
-    ];
-
-    for (const server of servers) {
-        describe(`${server.name} compatibility`, () => {
-            beforeAll(async () => {
-                await startDockerServer(server);
-            });
-
-            test("basic GET request", async () => {
-                const response = await zigClient(`https://localhost:${server.port}/`);
-                expect(response.status).toBe(200);
-            });
-
-            test("POST with body", async () => {
-                const response = await post(`https://localhost:${server.port}/echo`, "test");
-                expect(response.body).toBe("test");
-            });
-        });
-    }
-});
-```
-
-### Phase 5: Performance Benchmarks
-
-Create comprehensive benchmarks comparing our client with curl and quiche-client:
-
-#### Benchmark Categories
-
-1. **Connection Establishment**
-   ```typescript
-   // tests/e2e/benchmarks/connection.bench.ts
-   bench("curl single connection", async () => {
-       await curl("https://localhost:4433/");
-   });
-
-   bench("zigClient single connection", async () => {
-       await zigClient("https://localhost:4433/");
-   });
-
-   bench("zigClient pooled connection", async () => {
-       await zigClient("https://localhost:4433/", { poolConnections: true });
-   });
-   ```
-
-2. **Request Throughput**
-   ```typescript
-   bench("curl 100 sequential requests", async () => {
-       for (let i = 0; i < 100; i++) {
-           await curl("https://localhost:4433/small");
-       }
-   });
-
-   bench("zigClient 100 pooled requests", async () => {
-       const pool = new ConnectionPool();
-       for (let i = 0; i < 100; i++) {
-           await zigClient("https://localhost:4433/small", { pool });
-       }
-   });
-   ```
+- [ ] Connection establishment (single vs pooled)
+- [ ] Parallel request throughput (10/100/1000 requests)
+- [ ] Streaming throughput (10 MB / 100 MB bodies with/without rate limits)
+- [ ] DATAGRAM round-trip latency under load
 
 3. **Large File Transfer**
    ```typescript
