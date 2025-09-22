@@ -3,8 +3,12 @@ import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { expectJson, parseContentLength, type ServerBinaryType } from "@helpers/testUtils";
 import { get, head, post, zigClient } from "@helpers/zigClient";
+import { initTestReporter } from "@helpers/testReporter";
 
 describeBoth("HTTP/3 Basic", (binaryType: ServerBinaryType) => {
+    // Initialize test reporter for this suite
+    initTestReporter("HTTP/3 Basic");
+
     let server: ServerInstance;
 
     beforeAll(async () => {

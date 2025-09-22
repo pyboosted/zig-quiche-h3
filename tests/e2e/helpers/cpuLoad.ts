@@ -89,7 +89,7 @@ export async function retryWithBackoff<T>(
 
             if (i < maxRetries - 1) {
                 const delay = initialDelayMs * 2 ** i;
-                console.log(`Retry ${i + 1}/${maxRetries} after ${delay}ms delay...`);
+                verboseLog(`Retry ${i + 1}/${maxRetries} after ${delay}ms delay...`);
                 await new Promise((resolve) => setTimeout(resolve, delay));
             }
         }

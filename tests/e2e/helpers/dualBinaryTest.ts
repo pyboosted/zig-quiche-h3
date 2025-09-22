@@ -1,5 +1,6 @@
 import { describe } from "bun:test";
 import { ServerBinaryType } from "./testUtils";
+import { verboseLog } from "@helpers/logCapture";
 
 /**
  * Run a test suite against both server binaries (static and dynamic)
@@ -37,7 +38,7 @@ export function skipForBinary(
     testFn: () => void,
 ): void {
     if (binaryType === skipBinary) {
-        console.log(`Skipping test for ${getBinaryTypeName(binaryType)} binary`);
+        verboseLog(`Skipping test for ${getBinaryTypeName(binaryType)} binary`);
         return;
     }
     testFn();

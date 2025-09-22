@@ -1,5 +1,6 @@
 import { spawn } from "bun";
 import { getQuicheDirectory, waitForProcessExit } from "./testUtils";
+import { verboseLog } from "@helpers/logCapture";
 
 /**
  * Response from quiche-client
@@ -272,7 +273,7 @@ export async function ensureQuicheBuilt(): Promise<void> {
         return; // Already built
     }
 
-    console.log("Building quiche apps...");
+    verboseLog("Building quiche apps...");
 
     const proc = spawn({
         cmd: ["cargo", "build", "--release", "--features", "ffi,qlog"],
@@ -291,5 +292,5 @@ export async function ensureQuicheBuilt(): Promise<void> {
         throw new Error(`Quiche build failed: ${stderr}`);
     }
 
-    console.log("Quiche built successfully");
+    verboseLog("Quiche built successfully");
 }

@@ -10,6 +10,8 @@ import {
     waitForProcessExit,
 } from "./testUtils";
 import { get } from "./zigClient";
+import { isVerboseMode, verboseLog } from "./logCapture";
+import { captureServerLogs } from "./failureCapture";
 
 /**
  * Server instance with cleanup capability
@@ -18,6 +20,7 @@ export interface ServerInstance {
     proc: Subprocess;
     port: number;
     cleanup: () => Promise<void>;
+    getLogs: () => string[];
 }
 
 /**
@@ -36,21 +39,21 @@ export interface SpawnServerOptions {
  * Spawn the zig-quiche-h3 server and wait for it to be ready
  */
 export async function spawnServer(opts: SpawnServerOptions = {}): Promise<ServerInstance> {
-    console.log(`[E2E] spawnServer() started at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] spawnServer() started at ${new Date().toISOString()}`);
     const port =
         opts.port ?? (process.env.H3_TEST_PORT ? Number(process.env.H3_TEST_PORT) : randPort());
-    console.log(`[E2E] Selected port: ${port}`);
+    verboseLog(`[E2E] Selected port: ${port}`);
 
     // Check dependencies first
-    console.log(`[E2E] Checking dependencies at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] Checking dependencies at ${new Date().toISOString()}`);
     await checkDependencies();
-    console.log(`[E2E] Dependencies checked at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] Dependencies checked at ${new Date().toISOString()}`);
 
     // Ensure server is built before attempting to spawn
     const binaryType = opts.binaryType || ServerBinaryType.Static;
-    console.log(`[E2E] Calling ensureServerBuilt(${binaryType}) at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] Calling ensureServerBuilt(${binaryType}) at ${new Date().toISOString()}`);
     await ensureServerBuilt(binaryType);
-    console.log(`[E2E] ensureServerBuilt() completed at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] ensureServerBuilt() completed at ${new Date().toISOString()}`);
 
     // Get paths using the new utilities - works from any directory
     const serverPath = getServerBinary(binaryType);
@@ -93,18 +96,21 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
 
     // Log environment variables relevant to server config
     if (opts.env?.H3_MAX_DOWNLOADS_PER_CONN) {
-        console.log(`[E2E] H3_MAX_DOWNLOADS_PER_CONN=${opts.env.H3_MAX_DOWNLOADS_PER_CONN}`);
+        verboseLog(`[E2E] H3_MAX_DOWNLOADS_PER_CONN=${opts.env.H3_MAX_DOWNLOADS_PER_CONN}`);
     }
     if (opts.env?.H3_MAX_REQS_PER_CONN) {
-        console.log(`[E2E] H3_MAX_REQS_PER_CONN=${opts.env.H3_MAX_REQS_PER_CONN}`);
+        verboseLog(`[E2E] H3_MAX_REQS_PER_CONN=${opts.env.H3_MAX_REQS_PER_CONN}`);
     }
 
-    console.log(`Spawning server on port ${port}...`);
-    console.log(`[E2E] Server command: ${args.join(" ")}`);
-    console.log(`[E2E] Working directory: ${getProjectRoot()}`);
+    verboseLog(`Spawning server on port ${port}...`);
+    verboseLog(`[E2E] Server command: ${args.join(" ")}`);
+    verboseLog(`[E2E] Working directory: ${getProjectRoot()}`);
+
+    // Buffer to store server logs
+    const serverLogs: string[] = [];
 
     // Spawn the server process
-    console.log(`[E2E] Calling spawn() at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] Calling spawn() at ${new Date().toISOString()}`);
     const proc = spawn({
         cmd: args,
         stdout: "pipe",
@@ -112,13 +118,39 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
         env,
         cwd: getProjectRoot(), // Run server from project root for consistent file resolution
     });
-    console.log(`[E2E] Process spawned with PID: ${proc.pid} at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] Process spawned with PID: ${proc.pid} at ${new Date().toISOString()}`);
+
+    // Only capture output if not in verbose mode to avoid complexity
+    if (!isVerboseMode()) {
+        // Simple non-blocking capture for non-verbose mode
+        if (proc.stdout) {
+            (async () => {
+                try {
+                    const text = await new Response(proc.stdout).text();
+                    if (text) serverLogs.push(`[stdout] ${text}`);
+                } catch {}
+            })();
+        }
+        if (proc.stderr) {
+            (async () => {
+                try {
+                    const text = await new Response(proc.stderr).text();
+                    if (text) serverLogs.push(`[stderr] ${text}`);
+                } catch {}
+            })();
+        }
+    }
 
     // Create cleanup function
     const cleanup = async (): Promise<void> => {
-        console.log(`Shutting down server on port ${port}...`);
+        verboseLog(`Shutting down server on port ${port}...`);
 
         try {
+            // Add server logs to failure capture before cleanup
+            if (serverLogs.length > 0) {
+                captureServerLogs(serverLogs);
+            }
+
             // Send SIGTERM for graceful shutdown
             proc.kill("SIGTERM");
 
@@ -134,7 +166,7 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
                 await waitForProcessExit(proc, 1000);
             }
         } catch (error) {
-            console.warn(`Error during cleanup: ${error}`);
+            verboseLog(`Error during cleanup: ${error}`);
         }
     };
 
@@ -143,22 +175,22 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
     const _deadline = Date.now() + timeoutMs;
 
     try {
-        console.log(`[E2E] Waiting for server readiness at ${new Date().toISOString()}`);
+        verboseLog(`[E2E] Waiting for server readiness at ${new Date().toISOString()}`);
         await waitFor(
             async () => {
                 try {
                     // Use GET / for readiness probe (not HEAD as per audit)
-                    console.log(
+                    verboseLog(
                         `[E2E] Probing https://127.0.0.1:${port}/ at ${new Date().toISOString()}`,
                     );
                     const response = await get(`https://127.0.0.1:${port}/`);
                     const ready = response.status === 200;
-                    console.log(
+                    verboseLog(
                         `[E2E] Probe result: ${ready ? "ready" : "not ready"} (status: ${response.status})`,
                     );
                     return ready;
                 } catch (err) {
-                    console.log(`[E2E] Probe failed: ${err}`);
+                    verboseLog(`[E2E] Probe failed: ${err}`);
                     return false;
                 }
             },
@@ -166,29 +198,25 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
             50, // Reduced from 150ms - server starts almost instantly
         );
 
-        console.log(`Server ready on port ${port}`);
+        verboseLog(`Server ready on port ${port}`);
 
         return {
             proc,
             port,
             cleanup,
+            getLogs: () => serverLogs,
         };
     } catch (error) {
         // Cleanup on startup failure
         await cleanup();
 
-        // Try to get server logs for debugging
-        let serverOutput = "";
-        try {
-            serverOutput = await new Response(proc.stderr).text();
-        } catch {
-            // Ignore
-        }
+        // Include captured logs in error message
+        const errorLogs = serverLogs.length > 0
+            ? `\n\nServer logs:\n${serverLogs.join("\n")}`
+            : "";
 
         throw new Error(
-            `Server failed to start within ${timeoutMs}ms. Error: ${error}${
-                serverOutput ? `\n\nServer stderr:\n${serverOutput}` : ""
-            }`,
+            `Server failed to start within ${timeoutMs}ms. Error: ${error}${errorLogs}`,
         );
     }
 }
@@ -214,22 +242,22 @@ export async function withServer<T>(
 export async function checkServerBinary(
     binaryType: ServerBinaryType = ServerBinaryType.Static,
 ): Promise<boolean> {
-    console.log(`[E2E] checkServerBinary(${binaryType}) started at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] checkServerBinary(${binaryType}) started at ${new Date().toISOString()}`);
     try {
         const serverPath = getServerBinary(binaryType);
-        console.log(`[E2E] Checking if server binary exists at: ${serverPath}`);
+        verboseLog(`[E2E] Checking if server binary exists at: ${serverPath}`);
 
         // Simply check if the file exists - don't try to run it with --help
         // as the server doesn't support --help and will hang
         const exists = await Bun.file(serverPath).exists();
-        console.log(`[E2E] Server binary (${binaryType}) exists: ${exists}`);
+        verboseLog(`[E2E] Server binary (${binaryType}) exists: ${exists}`);
         return exists;
     } catch (err) {
-        console.log(`[E2E] checkServerBinary() error: ${err}`);
+        verboseLog(`[E2E] checkServerBinary() error: ${err}`);
         // Binary doesn't exist or isn't accessible
         return false;
     } finally {
-        console.log(`[E2E] checkServerBinary() completed at ${new Date().toISOString()}`);
+        verboseLog(`[E2E] checkServerBinary() completed at ${new Date().toISOString()}`);
     }
 }
 
@@ -239,16 +267,16 @@ export async function checkServerBinary(
 export async function ensureServerBuilt(
     binaryType: ServerBinaryType = ServerBinaryType.Static,
 ): Promise<void> {
-    console.log(`[E2E] ensureServerBuilt(${binaryType}) started at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] ensureServerBuilt(${binaryType}) started at ${new Date().toISOString()}`);
 
-    console.log(`[E2E] Checking if server binary exists...`);
+    verboseLog(`[E2E] Checking if server binary exists...`);
     if (await checkServerBinary(binaryType)) {
-        console.log(`[E2E] Server binary (${binaryType}) already exists, skipping build`);
+        verboseLog(`[E2E] Server binary (${binaryType}) already exists, skipping build`);
         return; // Already built
     }
 
-    console.log("Building server...");
-    console.log(`[E2E] Server not found, starting build at ${new Date().toISOString()}`);
+    verboseLog("Building server...");
+    verboseLog(`[E2E] Server not found, starting build at ${new Date().toISOString()}`);
 
     const optimize = process.env.H3_OPTIMIZE ?? "ReleaseFast"; // ReleaseFast by default for perf tests
     const libevInclude =
@@ -265,8 +293,8 @@ export async function ensureServerBuilt(
     // Always run from project root
     const projectRoot = getProjectRoot();
 
-    console.log(`[E2E] Build command: ${args.join(" ")}`);
-    console.log(`[E2E] Build directory: ${projectRoot}`);
+    verboseLog(`[E2E] Build command: ${args.join(" ")}`);
+    verboseLog(`[E2E] Build directory: ${projectRoot}`);
 
     const proc = spawn({
         cmd: args,
@@ -274,17 +302,17 @@ export async function ensureServerBuilt(
         stderr: "pipe",
         cwd: projectRoot,
     });
-    console.log(`[E2E] Build process spawned, waiting for completion...`);
+    verboseLog(`[E2E] Build process spawned, waiting for completion...`);
 
     await waitForProcessExit(proc, 60000); // 60s for build process
-    console.log(`[E2E] Build process exited with code: ${proc.exitCode}`);
+    verboseLog(`[E2E] Build process exited with code: ${proc.exitCode}`);
 
     if (proc.exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
-        console.log(`[E2E] Build failed with stderr: ${stderr}`);
+        verboseLog(`[E2E] Build failed with stderr: ${stderr}`);
         throw new Error(`Server build failed: ${stderr}`);
     }
 
-    console.log("Server built successfully");
-    console.log(`[E2E] ensureServerBuilt() completed at ${new Date().toISOString()}`);
+    verboseLog("Server built successfully");
+    verboseLog(`[E2E] ensureServerBuilt() completed at ${new Date().toISOString()}`);
 }

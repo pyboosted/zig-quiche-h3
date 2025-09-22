@@ -5,6 +5,7 @@ import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, parseContentLength, type ServerBinaryType } from "@helpers/testUtils";
 import { get, zigClient } from "@helpers/zigClient";
+import { verboseLog } from "@helpers/logCapture";
 
 describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
@@ -79,7 +80,7 @@ describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
             const expectedSize = 1024 * 1024 * 1024; // 1GB
             expect(contentLength).toBe(expectedSize);
 
-            console.log(`1GB stream test passed (headers only)`);
+            verboseLog(`1GB stream test passed (headers only)`);
         });
 
         it.skipIf(!shouldRunStress)(
@@ -97,7 +98,7 @@ describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
                 const contentLength = parseContentLength(response.headers);
                 expect(contentLength).toBe(1024 * 1024 * 1024);
 
-                console.log("1GB rate-limited download completed successfully");
+                verboseLog("1GB rate-limited download completed successfully");
             },
         );
     });

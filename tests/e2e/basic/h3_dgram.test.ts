@@ -3,6 +3,7 @@ import { describeBoth } from "@helpers/dualBinaryTest";
 import { spawnServer } from "@helpers/spawnServer";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { get, zigClient } from "@helpers/zigClient";
+import { verboseLog } from "@helpers/logCapture";
 
 describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
     test("request-associated H3 dgram echo", async () => {
@@ -14,8 +15,8 @@ describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
 
             expect(response.status).toBe(200);
             const bodyText = new TextDecoder().decode(response.body);
-            console.log("[DEBUG] Response body:", bodyText);
-            console.log("[DEBUG] Response body length:", response.body.length);
+            verboseLog("[DEBUG] Response body:", bodyText);
+            verboseLog("[DEBUG] Response body length:", response.body.length);
             expect(bodyText).toContain("H3 DATAGRAM Echo Endpoint");
             expect(bodyText).toContain("flow_id for this request is the stream_id");
 

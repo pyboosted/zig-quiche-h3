@@ -4,6 +4,7 @@ import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { zigClient } from "@helpers/zigClient";
+import { verboseLog } from "@helpers/logCapture";
 
 function _extractStatuses(jsonLines: string): number[] {
     const statuses: number[] = [];
@@ -67,21 +68,21 @@ describeBoth("Per-connection request cap", (binaryType: ServerBinaryType) => {
         });
 
         it("manual test instructions", () => {
-            console.log("\n=== Manual Test Procedure ===");
-            console.log(
+            verboseLog("\n=== Manual Test Procedure ===");
+            verboseLog(
                 "1. Start server: H3_MAX_REQS_PER_CONN=2 ./zig-out/bin/quic-server --port 15433",
             );
-            console.log(
+            verboseLog(
                 "2. In terminal 1: curl --http3-only https://127.0.0.1:15433/slow?delay=5000 &",
             );
-            console.log(
+            verboseLog(
                 "3. In terminal 2: curl --http3-only https://127.0.0.1:15433/slow?delay=5000 &",
             );
-            console.log(
+            verboseLog(
                 "4. In terminal 3: curl --http3-only https://127.0.0.1:15433/slow?delay=5000",
             );
-            console.log("   ^ This should return 503 Service Unavailable");
-            console.log("==============================\n");
+            verboseLog("   ^ This should return 503 Service Unavailable");
+            verboseLog("==============================\n");
             expect(true).toBe(true);
         });
     });

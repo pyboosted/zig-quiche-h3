@@ -43,6 +43,7 @@ describeBoth("QUIC DATAGRAM echo", (_binaryType: ServerBinaryType) => {
                     dgramIntervalMs: 50,
                     dgramWaitMs: 200,
                     curlCompat: false,
+                    maxTime: 1, // Set 1 second timeout instead of default 5 seconds
                 });
 
                 const output = res.raw;

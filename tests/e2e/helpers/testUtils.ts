@@ -3,6 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { type Subprocess, spawn } from "bun";
 import { existsSync } from "fs";
+import { verboseLog } from "@helpers/logCapture";
 
 /**
  * Get the absolute path to the tests/tmp/e2e directory
@@ -89,39 +90,39 @@ export async function cleanupAll(): Promise<void> {
  * Clean up old test files (older than specified minutes)
  */
 export async function cleanupOldFiles(olderThanMinutes = 30): Promise<void> {
-    console.log(
+    verboseLog(
         `[E2E] cleanupOldFiles(${olderThanMinutes}) started at ${new Date().toISOString()}`,
     );
     const tmpDir = getTmpDir();
-    console.log(`[E2E] tmpDir: ${tmpDir}`);
+    verboseLog(`[E2E] tmpDir: ${tmpDir}`);
     const now = Date.now();
     const maxAge = olderThanMinutes * 60 * 1000;
 
     try {
-        console.log(`[E2E] Importing fs/promises at ${new Date().toISOString()}`);
+        verboseLog(`[E2E] Importing fs/promises at ${new Date().toISOString()}`);
         const { readdir, stat, unlink } = await import("node:fs/promises");
-        console.log(`[E2E] Reading directory at ${new Date().toISOString()}`);
+        verboseLog(`[E2E] Reading directory at ${new Date().toISOString()}`);
         const files = await readdir(tmpDir);
-        console.log(`[E2E] Found ${files.length} files in tmpDir at ${new Date().toISOString()}`);
+        verboseLog(`[E2E] Found ${files.length} files in tmpDir at ${new Date().toISOString()}`);
 
         for (const file of files) {
             const filePath = join(tmpDir, file);
             try {
                 const stats = await stat(filePath);
                 if (now - stats.mtimeMs > maxAge) {
-                    console.log(`[E2E] Deleting old file: ${file}`);
+                    verboseLog(`[E2E] Deleting old file: ${file}`);
                     await unlink(filePath);
                 }
             } catch (err) {
-                console.log(`[E2E] Error processing file ${file}: ${err}`);
+                verboseLog(`[E2E] Error processing file ${file}: ${err}`);
                 // Ignore individual file errors
             }
         }
     } catch (err) {
-        console.log(`[E2E] Error in cleanupOldFiles: ${err}`);
+        verboseLog(`[E2E] Error in cleanupOldFiles: ${err}`);
         // Ignore if directory doesn't exist
     }
-    console.log(
+    verboseLog(
         `[E2E] cleanupOldFiles(${olderThanMinutes}) completed at ${new Date().toISOString()}`,
     );
 }
@@ -291,7 +292,7 @@ export enum ServerBinaryType {
  * @param binaryType - The type of server binary to use (static or dynamic)
  */
 export function getServerBinary(binaryType: ServerBinaryType = ServerBinaryType.Static): string {
-    console.log(`[E2E] getServerBinary(${binaryType}) called at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] getServerBinary(${binaryType}) called at ${new Date().toISOString()}`);
 
     // Allow environment variable override
     const envBinary = process.env.H3_TEST_BINARY;
@@ -299,14 +300,14 @@ export function getServerBinary(binaryType: ServerBinaryType = ServerBinaryType.
 
     const zigOut = getZigOutDirectory();
     const binaryPath = join(zigOut, "bin", binaryName);
-    console.log(`[E2E] Looking for server binary (${binaryName}) at: ${binaryPath}`);
+    verboseLog(`[E2E] Looking for server binary (${binaryName}) at: ${binaryPath}`);
 
     if (!existsSync(binaryPath)) {
-        console.log(`[E2E] Server binary NOT found at ${binaryPath}`);
+        verboseLog(`[E2E] Server binary NOT found at ${binaryPath}`);
         throw new Error(`Server binary not found at ${binaryPath}. Run 'zig build' first.`);
     }
 
-    console.log(`[E2E] Server binary (${binaryName}) found at ${binaryPath}`);
+    verboseLog(`[E2E] Server binary (${binaryName}) found at ${binaryPath}`);
     return binaryPath;
 }
 
@@ -356,7 +357,7 @@ export async function commandExists(command: string): Promise<boolean> {
  * Throws an error with helpful message if any are missing
  */
 export async function checkDependencies(): Promise<void> {
-    console.log(`[E2E] checkDependencies() started at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] checkDependencies() started at ${new Date().toISOString()}`);
     const missing: string[] = [];
 
     // Check for required commands
@@ -366,12 +367,12 @@ export async function checkDependencies(): Promise<void> {
     ];
 
     for (const dep of dependencies) {
-        console.log(`[E2E] Checking for ${dep.cmd}...`);
+        verboseLog(`[E2E] Checking for ${dep.cmd}...`);
         if (!(await commandExists(dep.cmd))) {
-            console.log(`[E2E] Missing: ${dep.cmd}`);
+            verboseLog(`[E2E] Missing: ${dep.cmd}`);
             missing.push(`  - ${dep.name}: ${dep.install}`);
         } else {
-            console.log(`[E2E] Found: ${dep.cmd}`);
+            verboseLog(`[E2E] Found: ${dep.cmd}`);
         }
     }
 
@@ -381,5 +382,5 @@ export async function checkDependencies(): Promise<void> {
                 "Please install the missing dependencies and try again.",
         );
     }
-    console.log(`[E2E] checkDependencies() completed at ${new Date().toISOString()}`);
+    verboseLog(`[E2E] checkDependencies() completed at ${new Date().toISOString()}`);
 }

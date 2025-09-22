@@ -4,6 +4,7 @@
  */
 import { beforeAll } from "bun:test";
 import { cleanupOldFiles } from "./helpers/testUtils";
+import { verboseLog } from "@helpers/logCapture";
 
 // Global setup that runs once per test file
 let cleanupDone = false;
@@ -14,7 +15,7 @@ beforeAll(async () => {
         // This prevents infinite accumulation while preserving recent files for debugging
         await cleanupOldFiles(30);
         cleanupDone = true;
-        console.log("✓ Old tmp files cleaned (>30 min)");
+        verboseLog("✓ Old tmp files cleaned (>30 min)");
     }
 });
 

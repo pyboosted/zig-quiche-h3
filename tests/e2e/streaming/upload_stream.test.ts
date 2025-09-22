@@ -5,6 +5,7 @@ import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, type ServerBinaryType, withTempDir } from "@helpers/testUtils";
 import { post } from "@helpers/zigClient";
+import { verboseLog } from "@helpers/logCapture";
 
 describeBoth("HTTP/3 Upload Streaming", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
@@ -99,7 +100,7 @@ describeBoth("HTTP/3 Upload Streaming", (binaryType: ServerBinaryType) => {
                 expect(json.throughput_mbps).toBeGreaterThan(0);
                 expect(json.elapsed_ms).toBeGreaterThan(0);
 
-                console.log(
+                verboseLog(
                     `10MB upload: ${json.throughput_mbps.toFixed(2)} Mbps, ${json.elapsed_ms}ms`,
                 );
             });
@@ -129,7 +130,7 @@ describeBoth("HTTP/3 Upload Streaming", (binaryType: ServerBinaryType) => {
                     expect(json.bytes_received).toBe(testFile.size);
                     expect(json.sha256).toBe(testFile.sha256);
 
-                    console.log(
+                    verboseLog(
                         `100MB upload: ${json.throughput_mbps.toFixed(2)} Mbps, ${json.elapsed_ms}ms`,
                     );
                 });

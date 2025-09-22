@@ -3,31 +3,36 @@ import { describeBoth } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { expectJson, type ServerBinaryType } from "@helpers/testUtils";
 import { get, post } from "@helpers/zigClient";
+import { verboseLog } from "@helpers/logCapture";
+import { initTestReporter } from "@helpers/testReporter";
 
-console.log(`[E2E] routing.test.ts loaded at ${new Date().toISOString()}`);
+verboseLog(`[E2E] routing.test.ts loaded at ${new Date().toISOString()}`);
 
 describeBoth("HTTP/3 Routing", (binaryType: ServerBinaryType) => {
-    console.log(
+    // Initialize test reporter for this suite
+    initTestReporter(`HTTP/3 Routing [${binaryType}]`);
+
+    verboseLog(
         `[E2E] describe("HTTP/3 Routing [${binaryType}]") executed at ${new Date().toISOString()}`,
     );
     let server: ServerInstance;
 
     beforeAll(async () => {
-        console.log(
+        verboseLog(
             `[E2E] routing.test.ts beforeAll(${binaryType}) starting at ${new Date().toISOString()}`,
         );
         server = await spawnServer({ qlog: false, binaryType });
-        console.log(
+        verboseLog(
             `[E2E] routing.test.ts beforeAll(${binaryType}) completed at ${new Date().toISOString()}`,
         );
     });
 
     afterAll(async () => {
-        console.log(
+        verboseLog(
             `[E2E] routing.test.ts afterAll(${binaryType}) starting at ${new Date().toISOString()}`,
         );
         await server.cleanup();
-        console.log(
+        verboseLog(
             `[E2E] routing.test.ts afterAll(${binaryType}) completed at ${new Date().toISOString()}`,
         );
     });

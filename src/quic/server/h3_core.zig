@@ -30,15 +30,16 @@ pub fn Impl(comptime S: type) type {
                 switch (result.event_type) {
                     .Headers => {
                         // Phase 2: enforce per-connection active request cap (if configured)
-                        if (self.config.max_active_requests_per_conn > 0) {
-                            const cur = conn.active_requests;
-                            if (cur >= self.config.max_active_requests_per_conn) {
-                                server_logging.warnf(self, "503: per-conn request cap reached (cur={}, cap={})\n", .{ cur, self.config.max_active_requests_per_conn });
-                                // Respond 503 and do not create stream state
-                                try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 503);
-                                continue;
-                            }
+                        // Use atomic compare-and-swap to prevent race conditions
+                        if (!conn.tryAcquireRequest(self.config.max_active_requests_per_conn)) {
+                            server_logging.warnf(self, "503: per-conn request cap reached\n", .{});
+                            // Respond 503 and do not create stream state
+                            try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 503);
+                            continue;
                         }
+
+                        // Request slot acquired atomically - release on any error path
+                        errdefer conn.releaseRequest();
                         const state = try self.allocator.create(RequestState);
                         state.* = .{
                             .arena = std.heap.ArenaAllocator.init(self.allocator),
@@ -65,6 +66,8 @@ pub fn Impl(comptime S: type) type {
                             try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 431);
                             state.arena.deinit();
                             self.allocator.destroy(state);
+                            // Decrement counter since we're not storing state
+                            conn.releaseRequest();
                             continue;
                         }
 
@@ -102,6 +105,8 @@ pub fn Impl(comptime S: type) type {
                         if (validation_failed) {
                             state.arena.deinit();
                             self.allocator.destroy(state);
+                            // Decrement counter since we're not storing state
+                            conn.releaseRequest();
                             continue;
                         }
 
@@ -111,6 +116,8 @@ pub fn Impl(comptime S: type) type {
                             try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 400);
                             state.arena.deinit();
                             self.allocator.destroy(state);
+                            // Decrement counter since we're not storing state
+                            conn.releaseRequest();
                             continue;
                         }
 
@@ -122,6 +129,8 @@ pub fn Impl(comptime S: type) type {
                             try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 405);
                             state.arena.deinit();
                             self.allocator.destroy(state);
+                            // Decrement counter since we're not storing state
+                            conn.releaseRequest();
                             continue;
                         };
 
@@ -176,6 +185,8 @@ pub fn Impl(comptime S: type) type {
                                         try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 500);
                                         state.arena.deinit();
                                         self.allocator.destroy(state);
+                                        // Decrement counter since we're not storing state
+                                        conn.releaseRequest();
                                         continue;
                                     }
                                 },
@@ -186,6 +197,8 @@ pub fn Impl(comptime S: type) type {
                                     try sendErrorResponseWithAllow(self, h3_conn, &conn.conn, result.stream_id, 405, allow_heap);
                                     state.arena.deinit();
                                     self.allocator.destroy(state);
+                                    // Decrement counter since we're not storing state
+                                    conn.releaseRequest();
                                     continue;
                                 },
                                 .NotFound => {
@@ -206,7 +219,8 @@ pub fn Impl(comptime S: type) type {
                                 state.response.setStreamingLimiter(self, responseStreamingGate);
 
                                 try self.stream_states.put(.{ .conn = conn, .stream_id = result.stream_id }, state);
-                                conn.active_requests += 1;
+                                // Request counter already incremented after cap check to prevent race condition
+                                // State successfully stored, cleanupStreamState will handle counter decrement
                                 if (state.on_h3_dgram != null) {
                                     const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(result.stream_id);
                                     try self.h3.dgram_flows.put(.{ .conn = conn, .flow_id = flow_id }, state);
@@ -238,6 +252,8 @@ pub fn Impl(comptime S: type) type {
                         try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 404);
                         state.arena.deinit();
                         self.allocator.destroy(state);
+                        // Decrement counter since we're not storing state
+                        conn.releaseRequest();
                         continue;
                     },
                     .Data => {
@@ -294,6 +310,13 @@ pub fn Impl(comptime S: type) type {
         fn responseStreamingGate(ctx: *anyopaque, q_conn: *quiche.Connection, stream_id: u64, source_kind: u8) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
             std.debug.print("[DEBUG] responseStreamingGate: stream_id={}, source_kind={}, max_downloads={}\n", .{ stream_id, source_kind, self.config.max_active_downloads_per_conn });
+
+            // Memory streams (source_kind=0) bypass download cap checks entirely
+            if (source_kind == 0) {
+                std.debug.print("[DEBUG] responseStreamingGate: memory stream (source_kind=0), bypassing download cap\n", .{});
+                return true;
+            }
+
             if (self.config.max_active_downloads_per_conn == 0) return true;
 
             const conn = findConnByQuichePtr(self, q_conn) orelse {
@@ -301,21 +324,25 @@ pub fn Impl(comptime S: type) type {
                 return true; // If unknown, allow
             };
 
-            const current = conn.active_downloads;
-            std.debug.print("[DEBUG] responseStreamingGate: current_downloads={}, cap={}\n", .{ current, self.config.max_active_downloads_per_conn });
-            if (current >= self.config.max_active_downloads_per_conn) {
+            // Try to acquire download slot atomically
+            if (!conn.tryAcquireDownload(self.config.max_active_downloads_per_conn)) {
+                const current = conn.active_downloads.load(.acquire);
                 server_logging.warnf(self, "503: per-conn download cap reached (cur={}, cap={})\n", .{ current, self.config.max_active_downloads_per_conn });
                 std.debug.print("[DEBUG] responseStreamingGate: REJECTING (limit reached)\n", .{});
                 return false; // reject new download stream
             }
 
-            // Mark the state as a download if we can find it
+            // Mark the state as a download if we can find it (only for file/generator, not memory)
             if (self.stream_states.get(.{ .conn = conn, .stream_id = stream_id })) |st| {
                 if ((source_kind == 1 or source_kind == 2) and !st.is_download) {
-                    std.debug.print("[DEBUG] responseStreamingGate: marking stream {} as download, incrementing count to {}\n", .{ stream_id, current + 1 });
+                    const current = conn.active_downloads.load(.acquire);
+                    std.debug.print("[DEBUG] responseStreamingGate: marking stream {} as download, count is now {}\n", .{ stream_id, current });
                     st.is_download = true;
-                    conn.active_downloads += 1;
+                    // Download counter already incremented atomically by tryAcquireDownload
                 }
+            } else {
+                // If we can't find the state, release the download slot we just acquired
+                conn.releaseDownload();
             }
             std.debug.print("[DEBUG] responseStreamingGate: ALLOWING stream\n", .{});
             return true;
@@ -382,8 +409,8 @@ pub fn Impl(comptime S: type) type {
                             if (state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
                                 state.datagram_detached = true;
                                 state.retain_for_datagram = false;
-                                if (conn.active_requests > 0) conn.active_requests -= 1;
-                                if (state.is_download and conn.active_downloads > 0) conn.active_downloads -= 1;
+                                conn.releaseRequest();
+                                if (state.is_download) conn.releaseDownload();
                                 _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                             } else {
                                 if (state.on_h3_dgram != null) {
@@ -401,8 +428,8 @@ pub fn Impl(comptime S: type) type {
                             if (state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
                                 state.datagram_detached = true;
                                 state.retain_for_datagram = false;
-                                if (conn.active_requests > 0) conn.active_requests -= 1;
-                                if (state.is_download and conn.active_downloads > 0) conn.active_downloads -= 1;
+                                conn.releaseRequest();
+                                if (state.is_download) conn.releaseDownload();
                                 _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                             } else {
                                 if (state.on_h3_dgram != null) {
@@ -452,16 +479,16 @@ pub fn Impl(comptime S: type) type {
             if (state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
                 state.datagram_detached = true;
                 state.retain_for_datagram = false;
-                if (conn.active_requests > 0) conn.active_requests -= 1;
-                if (state.is_download and conn.active_downloads > 0) conn.active_downloads -= 1;
+                conn.releaseRequest();
+                if (state.is_download) conn.releaseDownload();
                 return;
             }
             if (state.on_h3_dgram != null) {
                 const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
                 _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
             }
-            if (conn.active_requests > 0) conn.active_requests -= 1;
-            if (state.is_download and conn.active_downloads > 0) conn.active_downloads -= 1;
+            conn.releaseRequest();
+            if (state.is_download) conn.releaseDownload();
             state.response.deinit();
             state.arena.deinit();
             self.allocator.destroy(state);

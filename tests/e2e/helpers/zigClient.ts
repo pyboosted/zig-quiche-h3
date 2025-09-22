@@ -2,6 +2,7 @@ import { spawn } from "bun";
 import { join } from "path";
 import type { CurlOptions, CurlResponse } from "./curlClient";
 import { getProjectRoot, waitForProcessExit } from "./testUtils";
+import { verboseLog } from "./logCapture";
 
 /**
  * Extended options for zigClient that support H3 DATAGRAMs and concurrent requests
@@ -197,6 +198,9 @@ export async function zigClient(
         ...process.env,
         RUST_LOG: "error",
     };
+
+    // Log the command for debugging
+    verboseLog(`[zigClient] Running command: ${args.join(" ")}`);
 
     // Execute h3-client
     const proc = spawn({

@@ -52,9 +52,9 @@ pub const Connection = struct {
     // HTTP/3 connection (lazy-initialized)
     http3: ?*anyopaque = null, // Will be *h3.H3Connection, using anyopaque to avoid circular deps
 
-    // Per-connection accounting
-    active_requests: usize = 0,
-    active_downloads: usize = 0,
+    // Per-connection accounting (atomic for thread-safe access)
+    active_requests: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    active_downloads: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
     // Reusable buffer for QUIC/H3 DATAGRAMs
     datagram_buf: [2048]u8 = undefined,
@@ -91,6 +91,62 @@ pub const Connection = struct {
             .dcid_len = 16,
             .family = @as(*const std.posix.sockaddr, @ptrCast(&self.peer_addr)).family,
         };
+    }
+
+    // Atomic request cap management using compare-and-swap
+    pub fn tryAcquireRequest(self: *Connection, cap: usize) bool {
+        if (cap == 0) return true; // No limit
+
+        var observed = self.active_requests.load(.acquire);
+        while (true) {
+            if (observed >= cap) {
+                std.debug.print("[DEBUG] tryAcquireRequest: cap exceeded (observed={}, cap={})\n", .{ observed, cap });
+                return false; // Cap exceeded
+            }
+
+            // Try to atomically increment from observed to observed+1
+            if (self.active_requests.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire)) |new_val| {
+                // CAS failed, retry with new value
+                observed = new_val;
+            } else {
+                // CAS succeeded
+                std.debug.print("[DEBUG] tryAcquireRequest: acquired slot (new count={})\n", .{observed + 1});
+                return true;
+            }
+        }
+    }
+
+    pub fn releaseRequest(self: *Connection) void {
+        const prev = self.active_requests.fetchSub(1, .acq_rel);
+        std.debug.print("[DEBUG] releaseRequest: released slot (prev={}, new={})\n", .{ prev, prev - 1 });
+    }
+
+    // Atomic download cap management
+    pub fn tryAcquireDownload(self: *Connection, cap: usize) bool {
+        if (cap == 0) return true; // No limit
+
+        var observed = self.active_downloads.load(.acquire);
+        while (true) {
+            if (observed >= cap) {
+                std.debug.print("[DEBUG] tryAcquireDownload: cap exceeded (observed={}, cap={})\n", .{ observed, cap });
+                return false; // Cap exceeded
+            }
+
+            // Try to atomically increment from observed to observed+1
+            if (self.active_downloads.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire)) |new_val| {
+                // CAS failed, retry with new value
+                observed = new_val;
+            } else {
+                // CAS succeeded
+                std.debug.print("[DEBUG] tryAcquireDownload: acquired slot (new count={})\n", .{observed + 1});
+                return true;
+            }
+        }
+    }
+
+    pub fn releaseDownload(self: *Connection) void {
+        const prev = self.active_downloads.fetchSub(1, .acq_rel);
+        std.debug.print("[DEBUG] releaseDownload: released slot (prev={}, new={})\n", .{ prev, prev - 1 });
     }
 };
 
