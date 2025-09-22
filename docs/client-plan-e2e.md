@@ -72,14 +72,21 @@ export async function curl(url: string, options: CurlOptions): Promise<CurlRespo
 - [ ] Streaming: HEAD + Range (blocked on curl HTTP/3 limitation – needs alternate probe)
 - [ ] H3 DATAGRAM negative paths (requires richer client harness)
 
-### Phase 4 – Multi-Server Compatibility *(Not Started)*
+### Phase 4 – WebTransport End-to-End Coverage *(Planned)*
+- [ ] Replace the stub `wt-client` with a real client built on `QuicClient.openWebTransport()`
+- [ ] Expose WebTransport session/datagram helpers through `zigClient`
+- [ ] Add fixtures that exercise session establishment, uni/bidi streams, and datagram echo
+- [ ] Update `/wt/echo` handler to stream genuine WT responses for test assertions
+- [ ] Extend the E2E suite with failure-path checks (WT disabled, GOAWAY, datagram backpressure)
+
+### Phase 5 – Multi-Server Compatibility *(Planned)*
 - [ ] quiche-server (Cloudflare) smoke tests via Docker
 - [ ] nginx-quic compatibility run
 - [ ] Caddy / quic-go compatibility run
 - [ ] h2o / picoquic compatibility run
 - [ ] ngtcp2 + nghttp3 compatibility run
 
-### Phase 5 – Performance Benchmarks *(Not Started)*
+### Phase 6 – Performance Benchmarks *(Planned)*
 - [ ] Handshake latency comparison (curl vs zigClient, pooled vs non-pooled)
 - [ ] Request throughput (sequential vs pooled vs concurrent)
 - [ ] Streaming throughput (large downloads/uploads with caps)
@@ -89,9 +96,9 @@ Test our client against various HTTP/3 implementations to ensure compatibility. 
 | Server Stack | Coverage Target | Status | Notes |
 |--------------|-----------------|--------|-------|
 | `zig-quiche-h3` (local) | Full regression suite | ✅ Done | Runs in CI after recent concurrency fixes |
-| `cloudflare/quiche` | Smoke (GET/POST, DATAGRAM) | ☐ Planned | Launch via docker-compose target |
+| `cloudflare/quiche` | Smoke (GET/POST, DATAGRAM, WT) | ☐ Planned | Launch via docker-compose target |
 | `nginx-quic` | Basic HTTP/3 GET/HEAD | ☐ Planned | Requires custom image with certs |
-| `Caddy` (quic-go) | Basic HTTP/3 GET/POST | ☐ Planned | Validate WebTransport once upstream support lands |
+| `Caddy` (quic-go) | Basic HTTP/3 + WT handshake | ☐ Planned | Validate WebTransport once upstream support lands |
 | `h2o` (picoquic) | Basic HTTP/3 | ☐ Planned | Focus on response header parity |
 | `ngtcp2 + nghttp3` | Full | ☐ Planned | Ideal for priority/resumption experiments |
 
