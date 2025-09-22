@@ -291,6 +291,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     quic_handlers_mod.addImport("http", http_mod_app);
+    quic_handlers_mod.addImport("event_loop", event_loop_mod);
 
     // Server module for example, bound to http_mod_app
     const server_mod_app = b.createModule(.{
@@ -314,6 +315,7 @@ pub fn build(b: *std.Build) void {
     });
     routing_mod_app.addImport("http", http_mod_app);
     server_mod_app.addImport("routing", routing_mod_app);
+    quic_handlers_mod.addImport("server", server_mod_app);
     const routing_gen_mod_app = b.createModule(.{
         .root_source_file = b.path("src/routing/generator.zig"),
         .target = target,

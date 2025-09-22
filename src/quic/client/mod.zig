@@ -228,11 +228,21 @@ pub const FetchHandle = struct {
         const start_time = std.time.milliTimestamp();
         const timeout_ms = client.config.request_timeout_ms;
 
+        const debug_enabled = client.config.enable_debug_logging;
+
         while (!state.finished and state.err == null) {
+            if (debug_enabled) {
+                if (state.err) |e| {
+                    std.debug.print("[await] state err={s}\n", .{@errorName(e)});
+                }
+            }
             // Check timeout
             const elapsed = std.time.milliTimestamp() - start_time;
             if (elapsed > timeout_ms) {
-                client.failFetch(self.stream_id, ClientError.RequestTimeout);
+                if (debug_enabled) {
+                    std.debug.print("[await] timeout hit (elapsed={d}ms, timeout={d}ms)\n", .{ elapsed, timeout_ms });
+                }
+                client.cancelFetch(self.stream_id, ClientError.RequestTimeout);
                 return ClientError.RequestTimeout;
             }
 
@@ -241,9 +251,27 @@ pub const FetchHandle = struct {
 
             // Run event loop once with a short internal timeout to check conditions
             client.event_loop.runOnce();
+
+            if (debug_enabled) {
+                std.debug.print(
+                    "[await] loop stream={d} finished={s} have_headers={s} err={s} bytes={d}\n",
+                    .{
+                        self.stream_id,
+                        if (state.finished) "true" else "false",
+                        if (state.have_headers) "true" else "false",
+                        if (state.err) |e| @errorName(e) else "null",
+                        state.bytes_received,
+                    },
+                );
+            }
         }
 
         return client.finalizeFetch(self.stream_id);
+    }
+
+    pub fn finalizeReady(self: FetchHandle) ClientError!FetchResponse {
+        if (!self.isFinished()) return ClientError.ResponseIncomplete;
+        return self.client.finalizeFetch(self.stream_id);
     }
 };
 
@@ -1382,6 +1410,10 @@ pub const QuicClient = struct {
 
             if (n == 0) break;
 
+            if (self.config.enable_debug_logging) {
+                std.debug.print("[client] recvfrom bytes={d}\n", .{n});
+            }
+
             var recv_info = quiche.c.quiche_recv_info{
                 .from = @ptrCast(&peer_addr),
                 .from_len = peer_len,
@@ -1394,6 +1426,10 @@ pub const QuicClient = struct {
                 QuicheError.Done => break,
                 else => return ClientError.QuicRecvFailed,
             };
+
+            if (self.config.enable_debug_logging) {
+                std.debug.print("[client] quiche.recv consumed={d}\n", .{n});
+            }
         }
 
         try self.flushSend();
@@ -1502,6 +1538,13 @@ pub const QuicClient = struct {
             if (result == null) break;
             var poll = result.?;
             defer poll.deinit();
+
+            if (self.config.enable_debug_logging) {
+                std.debug.print(
+                    "[client] poll event={s} stream={d}\n",
+                    .{ @tagName(poll.event_type), poll.stream_id },
+                );
+            }
 
             switch (poll.event_type) {
                 .Headers => self.onH3Headers(poll.stream_id, poll.raw_event),
@@ -1643,6 +1686,12 @@ pub const QuicClient = struct {
         defer state.allocator.free(headers);
 
         const is_trailer = state.have_headers;
+        if (self.config.enable_debug_logging) {
+            std.debug.print(
+                "[client] headers stream={d} trailer={s} count={d}\n",
+                .{ stream_id, if (is_trailer) "true" else "false", headers.len },
+            );
+        }
         var dest = if (is_trailer) &state.trailers else &state.headers;
         for (headers) |header| {
             if (!is_trailer and std.mem.eql(u8, header.name, ":status")) {
@@ -1651,6 +1700,10 @@ pub const QuicClient = struct {
                     return;
                 };
                 state.status = parsed;
+
+                if (self.config.enable_debug_logging) {
+                    std.debug.print("[client] status stream={d} value={d}\n", .{ stream_id, parsed });
+                }
 
                 // Handle WebTransport CONNECT response
                 if (state.is_webtransport and state.wt_session != null) {
@@ -1683,8 +1736,23 @@ pub const QuicClient = struct {
 
         if (!is_trailer) {
             state.have_headers = true;
+            if (self.config.enable_debug_logging) {
+                std.debug.print("[client] emit headers stream={d} total={d}\n", .{ stream_id, state.headers.items.len });
+            }
             _ = self.emitEvent(state, ResponseEvent{ .headers = state.headers.items });
+            if (!quiche.h3.eventHeadersHasMoreFrames(event)) {
+                if (self.conn) |*conn_ref| {
+                    if (conn_ref.streamFinished(stream_id)) {
+                        if (!state.finished) {
+                            self.onH3Finished(stream_id);
+                        }
+                    }
+                }
+            }
         } else {
+            if (self.config.enable_debug_logging) {
+                std.debug.print("[client] emit trailers stream={d} total={d}\n", .{ stream_id, state.trailers.items.len });
+            }
             _ = self.emitEvent(state, ResponseEvent{ .trailers = state.trailers.items });
         }
     }
@@ -1716,6 +1784,13 @@ pub const QuicClient = struct {
             }
             total_received += read;
             state.bytes_received += read;
+
+            if (self.config.enable_debug_logging) {
+                std.debug.print(
+                    "[client] data stream={d} read={d} total={d}\n",
+                    .{ stream_id, read, state.bytes_received },
+                );
+            }
             const slice = chunk[0..read];
             if (state.collect_body) {
                 state.body_chunks.appendSlice(slice) catch {
@@ -1757,6 +1832,9 @@ pub const QuicClient = struct {
     fn onH3Finished(self: *QuicClient, stream_id: u64) void {
         const state = self.requests.get(stream_id) orelse return;
         state.finished = true;
+        if (self.config.enable_debug_logging) {
+            std.debug.print("[client] finished stream={d}\n", .{stream_id});
+        }
         _ = self.emitEvent(state, ResponseEvent.finished);
         if (state.awaiting) self.event_loop.stop();
 
@@ -1864,6 +1942,10 @@ pub const QuicClient = struct {
         }
     }
 
+    pub fn cancelFetch(self: *QuicClient, stream_id: u64, err: ClientError) void {
+        self.failFetch(stream_id, err);
+    }
+
     fn failAll(self: *QuicClient, err: ClientError) void {
         var it = self.requests.iterator();
         while (it.next()) |entry| {
@@ -1894,6 +1976,9 @@ fn onUdpReadable(fd: posix.socket_t, _revents: u32, user_data: *anyopaque) void 
     _ = _revents;
     const self: *QuicClient = @ptrCast(@alignCast(user_data));
     if (self.state == .closed) return;
+    if (self.config.enable_debug_logging) {
+        std.debug.print("[client] readable fd={d} state={s}\n", .{ fd, @tagName(self.state) });
+    }
     self.handleReadable(fd) catch |err| self.recordFailure(err);
 }
 

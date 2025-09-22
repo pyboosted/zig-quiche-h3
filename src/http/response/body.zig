@@ -81,6 +81,8 @@ pub fn writeAll(comptime Response: type, self: *Response, data: []const u8) !voi
 pub fn end(comptime Response: type, self: *Response, data: ?[]const u8) !void {
     if (self.ended) return error.ResponseEnded;
 
+    self.enableAutoEnd();
+
     if (!self.headers_sent) {
         try self.sendHeaders(self.is_head_request or data == null or data.?.len == 0);
     }

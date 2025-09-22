@@ -55,14 +55,13 @@ fn mainImpl() !void {
                 error.ConflictingDatagramPayloadSources => std.debug.print("Error: specify either --dgram-payload or --dgram-payload-file, not both\n", .{}),
                 error.DatagramRequiresStream => std.debug.print("Error: --dgram options require --stream\n", .{}),
                 error.InvalidRepeat => std.debug.print("Error: --repeat must be at least 1\n", .{}),
-                error.RepeatRequiresBuffered => std.debug.print("Error: --repeat>1 cannot be combined with --stream\n", .{}),
                 error.DatagramRepeatUnsupported => std.debug.print("Error: --repeat>1 with DATAGRAMs is not supported yet\n", .{}),
                 else => {},
             }
         }
 
         switch (err) {
-            error.MissingUrl, error.LimitRateRequiresStream, error.StreamRequiresFile, error.ConflictingDatagramPayloadSources, error.DatagramRequiresStream, error.InvalidRepeat, error.RepeatRequiresBuffered, error.DatagramRepeatUnsupported => std.process.exit(2),
+            error.MissingUrl, error.LimitRateRequiresStream, error.StreamRequiresFile, error.ConflictingDatagramPayloadSources, error.DatagramRequiresStream, error.InvalidRepeat, error.DatagramRepeatUnsupported => std.process.exit(2),
             else => return err,
         }
     };
@@ -154,6 +153,14 @@ fn mainImpl() !void {
         client_config.dgram_recv_queue_len = 64;
         client_config.dgram_send_queue_len = 64;
     }
+
+    // Allow ad-hoc debug logging via environment flag without new CLI switches.
+    if (std.process.getEnvVarOwned(allocator, "H3_CLIENT_DEBUG")) |flag| {
+        defer allocator.free(flag);
+        if (flag.len == 0 or !std.mem.eql(u8, flag, "0")) {
+            client_config.enable_debug_logging = true;
+        }
+    } else |_| {}
 
     var quic_client = try client.QuicClient.init(allocator, client_config);
     defer quic_client.deinit();
@@ -341,7 +348,6 @@ const CliArgs = struct {
         if (self.dgram_payload.len > 0 and self.dgram_payload_file.len > 0) return error.ConflictingDatagramPayloadSources;
         if (self.dgram_count > 0 and !self.stream) return error.DatagramRequiresStream;
         if (self.repeat == 0) return error.InvalidRepeat;
-        if (self.repeat > 1 and self.stream) return error.RepeatRequiresBuffered;
         if (self.repeat > 1 and self.dgram_count > 0) return error.DatagramRepeatUnsupported;
     }
 };
@@ -920,7 +926,6 @@ fn runRepeatedRequests(
     for (handles, 0..) |*slot, idx| {
         const started_ns = std.time.nanoTimestamp();
         slot.* = quic_client.startRequest(allocator, options) catch |err| {
-            // drain already-started requests to keep client state clean
             for (handles[0..idx]) |started| {
                 var cleanup = started.await() catch continue;
                 cleanup.deinit(allocator);
@@ -956,8 +961,6 @@ fn runRepeatedRequests(
             return err;
         };
         defer response.deinit(allocator);
-
-        stats[idx].completed_ns = std.time.nanoTimestamp();
 
         if (parsed.json) {
             if (!first) stdout_writer.writeAll(",\n") catch return client.ClientError.H3Error;

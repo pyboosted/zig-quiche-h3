@@ -117,8 +117,22 @@ pub const Connection = struct {
     }
 
     pub fn releaseRequest(self: *Connection) void {
-        const prev = self.active_requests.fetchSub(1, .acq_rel);
-        std.debug.print("[DEBUG] releaseRequest: released slot (prev={}, new={})\n", .{ prev, prev - 1 });
+        var observed = self.active_requests.load(.acquire);
+        while (true) {
+            const prev = observed;
+            if (prev == 0) {
+                std.debug.print("[WARN] releaseRequest: underflow detected\n", .{});
+                return;
+            }
+
+            const desired = prev - 1;
+            if (self.active_requests.cmpxchgWeak(prev, desired, .acq_rel, .acquire)) |new_val| {
+                observed = new_val;
+            } else {
+                std.debug.print("[DEBUG] releaseRequest: released slot (prev={}, new={})\n", .{ prev, desired });
+                return;
+            }
+        }
     }
 
     // Atomic download cap management
@@ -145,8 +159,22 @@ pub const Connection = struct {
     }
 
     pub fn releaseDownload(self: *Connection) void {
-        const prev = self.active_downloads.fetchSub(1, .acq_rel);
-        std.debug.print("[DEBUG] releaseDownload: released slot (prev={}, new={})\n", .{ prev, prev - 1 });
+        var observed = self.active_downloads.load(.acquire);
+        while (true) {
+            const prev = observed;
+            if (prev == 0) {
+                std.debug.print("[WARN] releaseDownload: underflow detected\n", .{});
+                return;
+            }
+
+            const desired = prev - 1;
+            if (self.active_downloads.cmpxchgWeak(prev, desired, .acq_rel, .acquire)) |new_val| {
+                observed = new_val;
+            } else {
+                std.debug.print("[DEBUG] releaseDownload: released slot (prev={}, new={})\n", .{ prev, desired });
+                return;
+            }
+        }
     }
 };
 

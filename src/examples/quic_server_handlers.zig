@@ -1,6 +1,8 @@
 // Shared handlers for the QUIC server examples (static and dynamic)
 const std = @import("std");
 const http = @import("http");
+const event_loop = @import("event_loop");
+const QuicServer = @import("server").QuicServer;
 
 // Global configuration for handlers
 pub var g_files_dir: []const u8 = ".";
@@ -155,31 +157,127 @@ pub fn h3dgramEchoCallback(_: *http.Request, res: *http.Response, payload: []con
     };
 }
 
+pub fn registerEventLoop(loop: *event_loop.EventLoop) void {
+    g_event_loop = loop;
+}
+
+var g_event_loop: ?*event_loop.EventLoop = null;
+var g_quic_server: ?*QuicServer = null;
+
+pub fn registerServer(server: *QuicServer) void {
+    g_quic_server = server;
+}
+
+const SlowTimerContext = struct {
+    loop: *event_loop.EventLoop,
+    allocator: std.mem.Allocator,
+    timer: event_loop.TimerHandle,
+    response: *http.Response,
+    cancelled: bool = false,
+};
+
+const slow_body = "Slow response completed\n";
+
+fn slowTimerCancel(ctx_ptr: ?*anyopaque) void {
+    if (ctx_ptr == null) return;
+    const ctx = @as(*SlowTimerContext, @ptrCast(@alignCast(ctx_ptr.?)));
+    ctx.cancelled = true;
+    ctx.loop.stopTimer(ctx.timer);
+    ctx.loop.destroyTimer(ctx.timer);
+    std.debug.print("[slowTimer] cancel for stream {d}\n", .{ctx.response.stream_id});
+    ctx.allocator.destroy(ctx);
+}
+
+fn slowTimerFire(ctx_ptr: ?*anyopaque) void {
+    if (ctx_ptr == null) return;
+    const ctx = @as(*SlowTimerContext, @ptrCast(@alignCast(ctx_ptr.?)));
+    defer ctx.allocator.destroy(ctx);
+
+    if (ctx.cancelled) {
+        ctx.loop.destroyTimer(ctx.timer);
+        return;
+    }
+
+    ctx.loop.destroyTimer(ctx.timer);
+
+    const res = ctx.response;
+    res.clearCleanup();
+
+    res.enableAutoEnd();
+
+    std.debug.print("[slowTimer] firing for stream {d}\n", .{res.stream_id});
+
+    const body_copy = res.allocator.dupe(u8, slow_body) catch {
+        std.debug.print("[slowTimer] stream {d} failed to dup body\n", .{res.stream_id});
+        return;
+    };
+
+    res.partial_response = http.streaming.PartialResponse.initMemory(res.allocator, body_copy, true) catch {
+        res.allocator.free(body_copy);
+        std.debug.print("[slowTimer] stream {d} failed to init partial response\n", .{res.stream_id});
+        return;
+    };
+
+    res.processPartialResponse() catch |err| switch (err) {
+        error.StreamBlocked => {
+            std.debug.print("[slowTimer] stream {d} initial process blocked\n", .{res.stream_id});
+        },
+        else => {
+            std.debug.print("[slowTimer] stream {d} process error {s}\n", .{ res.stream_id, @errorName(err) });
+            return;
+        },
+    };
+
+    if (g_quic_server) |server| {
+        server.requestFlush();
+    }
+}
+
 // === Slow response handler (for testing concurrency) ===
-pub fn slowHandler(req: *http.Request, res: *http.Response) http.HandlerError!void {
-    // Extract delay from query param or use default
+pub fn slowStreamOnHeaders(req: *http.Request, res: *http.Response) http.StreamingError!void {
+    // Reuse logic from blocking handler but without blocking the event loop when available
     const delay_ms = if (req.query.get("delay")) |d|
         std.fmt.parseUnsigned(u64, d, 10) catch 1000
     else
         1000;
 
-    // Send headers immediately
     try res.status(200);
     try res.header("content-type", "text/plain");
 
-    // Sleep for the specified duration (simulating slow processing)
+    if (g_event_loop) |loop| {
+        const ctx = loop.allocator.create(SlowTimerContext) catch return error.OutOfMemory;
+        ctx.* = .{
+            .loop = loop,
+            .allocator = loop.allocator,
+            .timer = undefined,
+            .response = res,
+            .cancelled = false,
+        };
+
+        const timer = loop.createTimer(slowTimerFire, ctx) catch {
+            loop.allocator.destroy(ctx);
+            return error.InvalidState;
+        };
+        ctx.timer = timer;
+        res.onCleanup(ctx, slowTimerCancel);
+        const after_s = @as(f64, @floatFromInt(delay_ms)) / 1000.0;
+        loop.startTimer(timer, after_s, 0);
+        res.deferEnd();
+        std.debug.print("[slowHandler] scheduled timer stream {d} delay_ms={d}\n", .{ res.stream_id, delay_ms });
+        return;
+    }
+
     std.Thread.sleep(delay_ms * std.time.ns_per_ms);
 
-    // Then send body
-    _ = res.write("Slow response completed\n") catch |err| switch (err) {
+    res.writeAll(slow_body) catch |err| switch (err) {
         error.StreamBlocked => return error.StreamBlocked,
         error.ResponseEnded => return error.ResponseEnded,
-        else => return error.InternalServerError,
+        else => return error.InvalidState,
     };
     res.end(null) catch |err| switch (err) {
         error.StreamBlocked => return error.StreamBlocked,
         error.ResponseEnded => return error.ResponseEnded,
-        else => return error.InternalServerError,
+        else => return error.InvalidState,
     };
 }
 
@@ -433,8 +531,8 @@ pub fn streamTestHandler(req: *http.Request, res: *http.Response) http.HandlerEr
     res.header(http.Headers.ContentLength, "10485760") catch return error.InternalServerError;
     res.header("X-Checksum", &checksum_buf) catch return error.InternalServerError;
 
-    // Send data with FIN flag in a single operation to ensure proper stream completion
-    res.end(data) catch |err| switch (err) {
+    res.partial_response = http.streaming.PartialResponse.initMemory(allocator, data, true) catch return error.InternalServerError;
+    res.processPartialResponse() catch |err| switch (err) {
         error.StreamBlocked => return error.StreamBlocked,
         else => return error.InternalServerError,
     };

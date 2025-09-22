@@ -392,7 +392,7 @@ pub fn Impl(comptime S: type) type {
                 return err;
             };
 
-            if (!state.response.isEnded() and state.response.partial_response == null) {
+            if (!state.response.isEnded() and state.response.partial_response == null and state.response.shouldAutoEnd()) {
                 try state.response.end(null);
             }
         }

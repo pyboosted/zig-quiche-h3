@@ -27,6 +27,11 @@ pub const Response = struct {
     on_start_streaming: ?*const fn (ctx: *anyopaque, quic_conn: *quiche.Connection, stream_id: u64, source_kind: u8) bool = null,
     limiter_checked: bool = false,
 
+    cleanup_ctx: ?*anyopaque = null,
+    cleanup_cb: ?*const fn (ctx: ?*anyopaque) void = null,
+
+    auto_end_enabled: bool = true,
+
     pub fn init(
         allocator: std.mem.Allocator,
         h3_conn: *h3.H3Connection,
@@ -49,10 +54,14 @@ pub const Response = struct {
             .limiter_ctx = null,
             .on_start_streaming = null,
             .limiter_checked = false,
+            .cleanup_ctx = null,
+            .cleanup_cb = null,
+            .auto_end_enabled = true,
         };
     }
 
     pub fn deinit(self: *Response) void {
+        self.runCleanup();
         for (self.header_buffer.items) |hdr| {
             self.allocator.free(hdr.name[0..hdr.name_len]);
             self.allocator.free(hdr.value[0..hdr.value_len]);
@@ -62,6 +71,36 @@ pub const Response = struct {
         if (self.partial_response) |partial| {
             partial.deinit();
             self.partial_response = null;
+        }
+    }
+
+    pub fn onCleanup(self: *Response, ctx: ?*anyopaque, cb: *const fn (ctx: ?*anyopaque) void) void {
+        self.cleanup_ctx = ctx;
+        self.cleanup_cb = cb;
+    }
+
+    pub fn clearCleanup(self: *Response) void {
+        self.cleanup_ctx = null;
+        self.cleanup_cb = null;
+    }
+
+    pub fn deferEnd(self: *Response) void {
+        self.auto_end_enabled = false;
+    }
+
+    pub fn enableAutoEnd(self: *Response) void {
+        self.auto_end_enabled = true;
+    }
+
+    pub fn shouldAutoEnd(self: Response) bool {
+        return self.auto_end_enabled;
+    }
+
+    fn runCleanup(self: *Response) void {
+        if (self.cleanup_cb) |cb| {
+            cb(self.cleanup_ctx);
+            self.cleanup_ctx = null;
+            self.cleanup_cb = null;
         }
     }
 

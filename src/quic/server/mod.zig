@@ -71,6 +71,8 @@ pub const QuicServer = struct {
     timeout_timer: ?TimerHandle = null,
     timeout_dirty: bool = false,
     next_timeout_deadline_ms: ?i64 = null,
+    flush_timer: ?TimerHandle = null,
+    flush_pending: bool = false,
 
     // HTTP/3 configuration
     h3_config: ?h3.H3Config = null,
@@ -270,6 +272,23 @@ pub const QuicServer = struct {
         return server;
     }
 
+    pub fn eventLoop(self: *QuicServer) *EventLoop {
+        return self.event_loop;
+    }
+
+    pub fn requestFlush(self: *QuicServer) void {
+        if (self.flush_pending) return;
+
+        if (self.flush_timer == null) {
+            self.flush_timer = self.event_loop.createTimer(flushTimerCb, self) catch {
+                return;
+            };
+        }
+
+        self.flush_pending = true;
+        self.event_loop.startTimer(self.flush_timer.?, 0.0, 0.0);
+    }
+
     // Callback used by WebTransport sessions to report successful DATAGRAM sends
     fn wtOnDatagramSent(ctx: *anyopaque, _bytes: usize) void {
         _ = _bytes; // currently unused; future: track bytes sent
@@ -283,6 +302,10 @@ pub const QuicServer = struct {
         if (self.timeout_timer) |handle| {
             self.event_loop.destroyTimer(handle);
             self.timeout_timer = null;
+        }
+        if (self.flush_timer) |handle| {
+            self.event_loop.destroyTimer(handle);
+            self.flush_timer = null;
         }
 
         // Clean up connections (including their H3 connections)
@@ -1036,6 +1059,60 @@ pub const QuicServer = struct {
         if (conn.conn.isClosed()) {
             self.closeConnection(conn);
         }
+    }
+
+    fn flushTimerCb(user_data: *anyopaque) void {
+        const self: *QuicServer = @ptrCast(@alignCast(user_data));
+        self.flushPendingWork();
+    }
+
+    fn flushPendingWork(self: *QuicServer) void {
+        self.flush_pending = false;
+
+        var conns = std.ArrayListUnmanaged(*connection.Connection){};
+        defer conns.deinit(self.allocator);
+
+        var iter = self.connections.map.iterator();
+        while (iter.next()) |entry| {
+            conns.append(self.allocator, entry.value_ptr.*) catch {
+                std.debug.print("requestFlush: failed to queue connection for flush\n", .{});
+                break;
+            };
+        }
+
+        for (conns.items) |conn| {
+            if (conn.http3 != null) {
+                H3.processWritableStreams(self, conn) catch |err| {
+                    if (err != quiche.h3.Error.StreamBlocked) {
+                        std.debug.print("requestFlush: writable processing error {}\n", .{err});
+                    }
+                };
+            }
+
+            D.processDatagrams(self, conn) catch |err| {
+                std.debug.print("requestFlush: datagram processing error {}\n", .{err});
+            };
+
+            if (self.wt.enable_streams and self.wt.sessions.count() > 0) {
+                WT.processWritableWtStreams(self, conn) catch |err| {
+                    std.debug.print("requestFlush: WT writable processing error {}\n", .{err});
+                };
+            }
+
+            self.drainEgress(conn) catch |err| {
+                std.debug.print("requestFlush: drain egress error {}\n", .{err});
+            };
+
+            const timeout_ms = conn.conn.timeoutAsMillis();
+            self.updateTimer(conn, timeout_ms);
+            if (conn.conn.isClosed()) {
+                self.closeConnection(conn);
+            }
+        }
+
+        self.flushTimeoutReschedule() catch |err| {
+            std.debug.print("requestFlush: timeout reschedule error {}\n", .{err});
+        };
     }
 
     fn closeConnection(self: *QuicServer, conn: *connection.Connection) void {
