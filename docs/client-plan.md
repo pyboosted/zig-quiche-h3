@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-**Updated 2025-01-19 (latest)**: The HTTP/3 client implementation in `zig-quiche-h3` is now **95% complete** with all core features implemented. The client includes full HTTP/3 support, WebTransport, connection pooling, retry logic, helper utilities, and comprehensive bug fixes. Only E2E testing enhancements and performance optimizations remain. See `docs/client-plan-e2e.md` for the testing roadmap.
+**Updated 2025-09-22 (latest)**: The HTTP/3 client implementation in `zig-quiche-h3` now exposes reliable **concurrent streaming** behaviour and integrates tightly with the server’s non-blocking handlers. True parallel requests, download/request caps, and timer-driven responses have all been validated via the E2E suites. The remaining work is focused on broader interoperability and test harness polish—see `docs/client-plan-e2e.md` for the current roadmap.
 
 ## Current Implementation Status
 
@@ -32,9 +32,14 @@
 - Basic test coverage for happy paths
 
 ### Broken Features ❌
-- None currently - all basic features including WebTransport are working
+- None currently – all shipping features, including WebTransport and concurrent streaming, are passing the end-to-end suites
 
-### Recently Fixed Features ✅ (as of 2025-01-19)
+### Recently Fixed Features ✅ (as of 2025-09-22)
+- **Concurrent Streaming Stability**: `h3-client --repeat` now performs real parallel fetches, the request state machine gates auto-ending correctly, and counters no longer underflow during cleanup
+- **Server Flush Scheduler**: Timer-driven handlers call back into a new `QuicServer.requestFlush()` helper that pumps writable streams and drains egress without blocking the event loop
+- **Slow Handler Rework**: `/slow` is powered by libev timers instead of sleeps, and timer contexts use the event-loop allocator for deterministic cleanup
+- **`/stream/test` Streaming**: Large responses are delivered through `PartialResponse` so download caps and concurrent clients behave predictably
+- **Debug Logging Gating**: All newly-added debug prints (client + streaming) honour the existing `enable_debug_logging` configuration, keeping production output quiet by default
 - **FFI Layer Extensions**: Added `loadVerifyLocationsFromFile`, `loadVerifyLocationsFromDirectory`, and `enableDebugLogging` wrappers
 - **TLS/CA Configuration**: Fully implemented custom CA bundle loading from file or directory
 - **Debug Logging**: Complete logging module with throttling support via atomic counters
@@ -65,7 +70,7 @@
 ### Missing Features ⚠️
 - **0-RTT Support**: No session resumption capability
 - **Happy Eyeballs**: No dual-stack connection racing
-- **Metrics/Observability**: Basic metrics exist, no advanced hooks
+- **Advanced Observability**: Basic per-connection counters exist; richer metrics/log levels still outstanding
 - **PRIORITY_UPDATE**: No support for stream prioritization
 
 ## Important Implementation Notes

@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This document outlines the plan to replace curl with our native zig-quiche-h3 client in the E2E test suite, enabling full protocol coverage and unlocking currently skipped tests. Our QuicClient implementation now has feature parity with curl's HTTP/3 support and exceeds it in critical areas like H3 DATAGRAMs, WebTransport, and concurrent connections.
+This document tracks the migration from curl to our native `zig-quiche-h3` client in the E2E suite. With the latest client/server updates (2025-09-22), the HTTP/3 request-cap and download-cap suites now run entirely on the Zig client with real concurrency, and `/slow`/`/stream/test` handlers behave deterministically under load. Remaining skips are limited to protocol edge cases blocked by upstream tooling.
 
 > **Goal**: Complete Week 3 of the client implementation plan by creating a production-ready HTTP/3 test client that enables comprehensive E2E testing.
 
@@ -10,27 +10,14 @@ This document outlines the plan to replace curl with our native zig-quiche-h3 cl
 
 ### Skipped Tests Analysis
 
-Our E2E test suite currently has **12+ skipped tests** due to curl and quiche-client limitations:
+Our E2E test suite currently has **a handful of skipped tests**—primarily curl-specific limitations and TODO placeholders awaiting richer datagram tooling:
 
-#### H3 DATAGRAM Tests (5 skipped)
-- `tests/e2e/basic/dgram.test.ts`
-  - "echoes datagrams when enabled"
-  - "does not echo datagrams when disabled"
+#### H3 DATAGRAM TODOs (2 skipped)
 - `tests/e2e/basic/h3_dgram.test.ts`
-  - "request-associated H3 dgram echo"
-  - "H3 dgram disabled when QUIC datagrams disabled"
-  - "H3 dgram endpoint provides correct information"
   - "unknown flow_id handling"
   - "varint encoding/decoding boundary cases"
 
-#### Concurrent Request Tests (4 skipped)
-- `tests/e2e/limits/requests_cap.test.ts`
-  - "third concurrent request gets 503 when cap=2"
-- `tests/e2e/limits/downloads_cap.test.ts`
-  - "rejects second concurrent file download with 503 when cap=1"
-  - "does not count memory streaming as downloads"
-
-#### Protocol Edge Cases (3 skipped)
+#### Protocol Edge Cases (1 skipped + stress-gated cases)
 - `tests/e2e/streaming/ranges.test.ts`
   - "returns correct headers for HEAD with range" (curl HTTP/3 bug - exit code 18)
 - Stress tests that need `H3_STRESS=1` environment variable
@@ -125,41 +112,7 @@ export const post = (url: string, body: any, opts?: ZigClientOptions) => zigClie
 
 ### Phase 3: Enable Skipped Tests
 
-#### H3 DATAGRAM Tests
-```typescript
-// Before (skipped)
-test.skip("request-associated H3 dgram echo", async () => {
-    // Cannot test - curl doesn't support H3 DATAGRAMs
-});
-
-// After (enabled)
-test("request-associated H3 dgram echo", async () => {
-    const response = await zigClient(`https://127.0.0.1:${port}/h3dgram/echo`, {
-        h3Dgram: true,
-        dgramPayload: "test-data"
-    });
-    expect(response.h3Datagrams).toContain("test-data");
-});
-```
-
-#### Concurrent Request Tests
-```typescript
-// Before (skipped)
-it.skip("third concurrent request gets 503 when cap=2", async () => {
-    // Cannot test - curl doesn't support true concurrent requests
-});
-
-// After (enabled)
-it("third concurrent request gets 503 when cap=2", async () => {
-    const responses = await zigClient(`https://127.0.0.1:${port}/slow`, {
-        concurrent: 3,
-        poolConnections: true
-    });
-    expect(responses[0].status).toBe(200);
-    expect(responses[1].status).toBe(200);
-    expect(responses[2].status).toBe(503); // Rejected due to cap
-});
-```
+All formerly skipped **concurrent request** and **download cap** tests now execute through `zigClient`, and the `/slow` handler’s timer-based implementation keeps the event loop responsive. Remaining items in this phase are the curl-specific HEAD + Range case and the two TODO DATAGRAM scenarios above.
 
 ### Phase 4: Multi-Server Compatibility Testing
 
