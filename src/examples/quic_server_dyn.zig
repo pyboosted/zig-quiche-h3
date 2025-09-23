@@ -85,7 +85,7 @@ pub fn main() !void {
     defer server.deinit();
 
     handlers.registerEventLoop(server.eventLoop());
-    handlers.registerServer(&server);
+    handlers.registerServer(server);
     server.onDatagram(datagramEcho, null);
 
     try server.bind();
