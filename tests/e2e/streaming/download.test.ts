@@ -193,6 +193,8 @@ describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
             await expect(
                 zigClient(`https://127.0.0.1:${server.port}/stream/test`, {
                     maxTime: 0.1,
+                    limitRate: "50K",
+                    outputNull: true,
                 }),
             ).rejects.toThrow();
 
