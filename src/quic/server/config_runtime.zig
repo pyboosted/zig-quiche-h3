@@ -4,10 +4,16 @@ const server_logging = @import("logging.zig");
 const build_options = @import("build_options");
 const http = @import("http");
 
+/// Runtime configuration overrides for the server
+/// WebTransport features require BOTH compile-time flag (-Dwith-webtransport=true)
+/// AND runtime environment variables to be enabled
 pub const RuntimeOverrides = struct {
     config: config_mod.ServerConfig,
+    /// WebTransport sessions enabled (H3_WEBTRANSPORT=1 + build flag)
     webtransport_enabled: bool,
+    /// WebTransport unidirectional/bidirectional streams enabled (H3_WT_STREAMS=1)
     wt_streams: bool,
+    /// WebTransport bidirectional streams specifically (H3_WT_BIDI=1)
     wt_bidi: bool,
 };
 
@@ -107,6 +113,7 @@ pub fn applyRuntimeOverrides(
                 }
             }
         }
+        // MILESTONE-1: WebTransport code paths should check this flag and bail early if false
         break :blk false;
     };
 

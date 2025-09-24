@@ -44,6 +44,7 @@ pub fn WTState(
         dgrams_received: usize = 0,
         dgrams_sent: usize = 0,
         dgrams_would_block: usize = 0,
+        enabled: bool = false,  // WebTransport enabled at runtime
         enable_streams: bool = false,
         enable_bidi: bool = false,
         streams: std.hash_map.HashMap(StreamKey, StreamStatePtr, StreamKeyContext, 80),

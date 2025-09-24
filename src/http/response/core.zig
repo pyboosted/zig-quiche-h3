@@ -32,6 +32,11 @@ pub const Response = struct {
 
     auto_end_enabled: bool = true,
 
+    // MILESTONE-1: Buffer for pending capsule data
+    capsule_buffer: ?[]u8 = null,
+    capsule_buffer_len: usize = 0,
+    capsule_buffer_sent: usize = 0,
+
     pub fn init(
         allocator: std.mem.Allocator,
         h3_conn: *h3.H3Connection,
@@ -71,6 +76,12 @@ pub const Response = struct {
         if (self.partial_response) |partial| {
             partial.deinit();
             self.partial_response = null;
+        }
+
+        // Free capsule buffer if allocated
+        if (self.capsule_buffer) |buf| {
+            self.allocator.free(buf);
+            self.capsule_buffer = null;
         }
     }
 
@@ -213,6 +224,134 @@ pub const Response = struct {
         return self.ended;
     }
 
+    /// MILESTONE-1: Send 200 OK for WebTransport CONNECT without closing the stream
+    /// This enables the CONNECT stream to stay open for capsule exchange
+    pub fn finishConnect(self: *Response, flow_id: ?u64) !void {
+        if (self.headers_sent) return error.HeadersAlreadySent;
+
+        // Set 200 OK status
+        try self.status(200);
+
+        // Add WebTransport-specific headers
+        // sec-webtransport-http3-draft: draft02 (per WebTransport over HTTP/3 spec)
+        try self.header("sec-webtransport-http3-draft", "draft02");
+
+        // Add datagram-flow-id if provided (otherwise client assumes stream ID)
+        if (flow_id) |id| {
+            var buf: [32]u8 = undefined;
+            const flow_str = try std.fmt.bufPrint(&buf, "{d}", .{id});
+            try self.header("datagram-flow-id", flow_str);
+        }
+
+        // Send headers with fin=false to keep stream open
+        try self.sendHeaders(false);
+
+        // MILESTONE-1: Send minimal SESSION_ACCEPT capsule for spec compliance
+        // Capsule format: type (varint) + length (varint) + data
+        // SESSION_ACCEPT = 0x3c per WebTransport spec
+        try self.sendSessionAcceptCapsule();
+
+        // Mark that we should not auto-end this response
+        self.deferEnd();
+    }
+
+    /// Send a minimal SESSION_ACCEPT capsule after 200 OK
+    fn sendSessionAcceptCapsule(self: *Response) !void {
+
+        // SESSION_ACCEPT capsule type = 0x3c
+        const capsule_type: u64 = 0x3c;
+
+        // Empty payload for minimal implementation
+        // Future: can add settings here
+        const payload_len: u64 = 0;
+
+        // Encode capsule: type (varint) + length (varint) + payload
+        var buf: [16]u8 = undefined;
+        var offset: usize = 0;
+
+        // Encode type as QUIC varint (correct bit patterns)
+        offset += try encodeQuicVarint(buf[offset..], capsule_type);
+        offset += try encodeQuicVarint(buf[offset..], payload_len);
+
+        // Try to send the capsule
+        const sent = self.quic_conn.streamSend(self.stream_id, buf[0..offset], false) catch |err| {
+            if (err == quiche.QuicheError.Done or err == quiche.QuicheError.FlowControl) {
+                // Stream is blocked - buffer the entire capsule for retry
+                try self.bufferCapsuleData(buf[0..offset]);
+                // Register stream as writable so we get notified when it's ready
+                _ = self.quic_conn.streamWritable(self.stream_id, offset) catch {};
+                return;
+            }
+            return err;
+        };
+
+        if (sent < offset) {
+            // Partial write - buffer the remainder
+            try self.bufferCapsuleData(buf[sent..offset]);
+            // Register stream as writable for the remaining bytes
+            _ = self.quic_conn.streamWritable(self.stream_id, offset - sent) catch {};
+        }
+    }
+
+    /// Buffer capsule data for retry when stream becomes writable
+    fn bufferCapsuleData(self: *Response, data: []const u8) !void {
+        if (data.len == 0) return;
+
+        // Allocate buffer if not already allocated
+        if (self.capsule_buffer == null) {
+            self.capsule_buffer = try self.allocator.alloc(u8, 256); // Start with reasonable size
+            self.capsule_buffer_len = 0;
+            self.capsule_buffer_sent = 0;
+        }
+
+        // Ensure buffer has enough space
+        const needed = self.capsule_buffer_len + data.len;
+        if (needed > self.capsule_buffer.?.len) {
+            // Grow buffer
+            const new_size = @max(needed, self.capsule_buffer.?.len * 2);
+            const new_buffer = try self.allocator.alloc(u8, new_size);
+            @memcpy(new_buffer[0..self.capsule_buffer_len], self.capsule_buffer.?[0..self.capsule_buffer_len]);
+            self.allocator.free(self.capsule_buffer.?);
+            self.capsule_buffer = new_buffer;
+        }
+
+        // Copy data to buffer
+        @memcpy(self.capsule_buffer.?[self.capsule_buffer_len..][0..data.len], data);
+        self.capsule_buffer_len += data.len;
+    }
+
+    /// Try to flush buffered capsule data when stream becomes writable
+    pub fn flushCapsuleBuffer(self: *Response) !void {
+        if (self.capsule_buffer == null or self.capsule_buffer_sent >= self.capsule_buffer_len) {
+            return; // Nothing to flush
+        }
+
+        const remaining = self.capsule_buffer_len - self.capsule_buffer_sent;
+        const to_send = self.capsule_buffer.?[self.capsule_buffer_sent..self.capsule_buffer_len];
+
+        const sent = self.quic_conn.streamSend(self.stream_id, to_send, false) catch |err| {
+            if (err == quiche.QuicheError.Done or err == quiche.QuicheError.FlowControl) {
+                // Still blocked, will retry later
+                _ = self.quic_conn.streamWritable(self.stream_id, remaining) catch {};
+                return;
+            }
+            return err;
+        };
+
+        self.capsule_buffer_sent += sent;
+
+        // If all data sent, we can clear the buffer
+        if (self.capsule_buffer_sent >= self.capsule_buffer_len) {
+            self.allocator.free(self.capsule_buffer.?);
+            self.capsule_buffer = null;
+            self.capsule_buffer_len = 0;
+            self.capsule_buffer_sent = 0;
+        } else {
+            // Still have data to send, register for writable again
+            _ = self.quic_conn.streamWritable(self.stream_id, remaining - sent) catch {};
+        }
+    }
+
     pub fn sendHeaders(self: *Response, fin: bool) !void {
         if (self.headers_sent) return;
 
@@ -312,3 +451,36 @@ pub const Response = struct {
         return @import("datagram.zig").sendH3Datagram(Response, self, payload);
     }
 };
+
+/// Encode a value as a QUIC variable-length integer
+/// Follows RFC 9000 Section 16: Variable-Length Integer Encoding
+fn encodeQuicVarint(buf: []u8, value: u64) !usize {
+    if (value < 64) { // 6-bit value (2^6)
+        if (buf.len < 1) return error.BufferTooSmall;
+        buf[0] = @intCast(value);
+        return 1;
+    } else if (value < 16384) { // 14-bit value (2^14)
+        if (buf.len < 2) return error.BufferTooSmall;
+        buf[0] = @intCast(0x40 | (value >> 8));
+        buf[1] = @intCast(value & 0xff);
+        return 2;
+    } else if (value < 1073741824) { // 30-bit value (2^30)
+        if (buf.len < 4) return error.BufferTooSmall;
+        buf[0] = @intCast(0x80 | (value >> 24));
+        buf[1] = @intCast((value >> 16) & 0xff);
+        buf[2] = @intCast((value >> 8) & 0xff);
+        buf[3] = @intCast(value & 0xff);
+        return 4;
+    } else { // 62-bit value
+        if (buf.len < 8) return error.BufferTooSmall;
+        buf[0] = @intCast(0xc0 | (value >> 56));
+        buf[1] = @intCast((value >> 48) & 0xff);
+        buf[2] = @intCast((value >> 40) & 0xff);
+        buf[3] = @intCast((value >> 32) & 0xff);
+        buf[4] = @intCast((value >> 24) & 0xff);
+        buf[5] = @intCast((value >> 16) & 0xff);
+        buf[6] = @intCast((value >> 8) & 0xff);
+        buf[7] = @intCast(value & 0xff);
+        return 8;
+    }
+}

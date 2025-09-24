@@ -19,19 +19,19 @@
 
 ## Milestones
 
-### Milestone 1 – Server Handshake & Session Tracking
+### Milestone 1 – Server Handshake & Session Tracking ✅
 **Goal**: Recognise WT CONNECT requests, create sessions, and expose them to routing callbacks.
 
-**Checklist**
-- [ ] Detect `:method = CONNECT` + `:protocol = webtransport` in `processH3` and flag the request state.
-- [ ] Instantiate `h3.WebTransportSession` and `WebTransportSessionState` and store them in `self.wt.sessions` / `self.wt.dgram_map`.
-- [ ] Extend routing API to surface `OnWebTransportSession`, invoking it after sending 200 OK.
-- [ ] Ensure cleanup on stream FIN, GOAWAY, connection close, and idle timeout (reuse `expireIdleWtSessions`).
-- [ ] Emit structured logs/metrics for session lifecycle; increment `sessions_created`/`sessions_closed`.
+**Completed Work (2025-09-24)**
+- ✅ Runtime gate enforced: `processH3` only accepts WT CONNECT when `H3_WEBTRANSPORT=1` and the build flag enables WT.
+- ✅ Request state detects WT CONNECT, records negotiated flow ID, and logs the handshake path.
+- ✅ Handshake allocates `WebTransportSession`/`WebTransportSessionState`, stores them in `sessions` and `dgram_map`, and passes the live session into route callbacks after sending the 200/SESSION_ACCEPT capsule via `Response.finishConnect`.
+- ✅ Added buffered capsule writer with retry on stream writable notifications to keep the CONNECT stream alive per spec.
+- ✅ Centralised teardown (`destroyWtSessionState`) invoked on FIN, GOAWAY/reset, idle expiry, and connection close, releasing header copies and session arenas while bumping metrics.
 
-**Exit Criteria**
-- Server can accept a WT CONNECT and hand a live session object to a handler.
-- Session teardown frees allocator resources with no leaks (verified via existing arena checks).
+**Exit Criteria Status**
+- Server now accepts WT CONNECT and delivers an active session to handlers (verified in `zig build test`).
+- Session teardown frees all allocations (arena + header copies) and updates lifecycle counters on every exit path.
 
 ### Milestone 2 – Server Datagrams & Stream IO
 **Goal**: Make WT sessions useful by delivering datagrams/streams to application callbacks.

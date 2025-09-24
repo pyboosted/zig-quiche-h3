@@ -50,6 +50,10 @@ pub const RequestState = struct {
 
     // WebTransport session flag
     is_webtransport: bool = false,
+    // MILESTONE-1: WebTransport session state pointer (set during CONNECT processing)
+    wt_session: ?*h3.WebTransportSessionState = null,
+    // MILESTONE-1: Datagram flow ID for WebTransport (negotiated or defaults to stream ID)
+    wt_flow_id: ?u64 = null,
 };
 
 // WT uni-stream preface accumulator lives in the WT facade now
@@ -261,6 +265,8 @@ pub const QuicServer = struct {
         }
         errdefer if (server.h3_config) |*h| h.deinit();
 
+        // Track if WebTransport is actually enabled at runtime
+        server.wt.enabled = WithWT and overrides.webtransport_enabled;
         server.wt.enable_streams = overrides.wt_streams and WithWT;
         server.wt.enable_bidi = overrides.wt_bidi and WithWT;
 
@@ -287,6 +293,28 @@ pub const QuicServer = struct {
 
         self.flush_pending = true;
         self.event_loop.startTimer(self.flush_timer.?, 0.0, 0.0);
+    }
+
+    fn destroyWtSessionState(
+        self: *QuicServer,
+        conn: *connection.Connection,
+        session_id: u64,
+        wt_state: *h3.WebTransportSessionState,
+    ) void {
+        const flow_id = wt_state.flow_id;
+
+        _ = self.wt.sessions.remove(.{ .conn = conn, .session_id = session_id });
+        _ = self.wt.dgram_map.remove(.{ .conn = conn, .flow_id = flow_id });
+
+        for (wt_state.request_headers) |hdr| {
+            self.allocator.free(hdr.name[0..hdr.name_len]);
+            self.allocator.free(hdr.value[0..hdr.value_len]);
+        }
+        self.allocator.free(wt_state.request_headers);
+
+        wt_state.deinit(self.allocator);
+        self.wt.sessions_closed += 1;
+        server_logging.infof(self, "WebTransport session closed: id={d}\n", .{session_id});
     }
 
     // Callback used by WebTransport sessions to report successful DATAGRAM sends
@@ -1171,11 +1199,7 @@ pub const QuicServer = struct {
             }
             for (wt_keys_to_remove.items) |sk| {
                 if (self.wt.sessions.fetchRemove(sk)) |kv| {
-                    // Remove from datagram map
-                    _ = self.wt.dgram_map.remove(.{ .conn = conn, .flow_id = sk.session_id });
-                    // Clean up session state
-                    kv.value.deinit(self.allocator);
-                    self.wt.sessions_closed += 1;
+                    self.destroyWtSessionState(conn, sk.session_id, kv.value);
                 }
             }
         }

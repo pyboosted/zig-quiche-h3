@@ -134,6 +134,41 @@ pub fn Impl(comptime S: type) type {
                             continue;
                         };
 
+                        // MILESTONE-1: Detect WebTransport CONNECT requests
+                        if (Self.WithWT and method == .CONNECT) {
+                            // Check for :protocol = webtransport header
+                            var is_webtransport = false;
+                            var datagram_flow_id: ?u64 = null;
+
+                            for (headers) |h| {
+                                if (std.mem.eql(u8, h.name, ":protocol") and
+                                    std.mem.eql(u8, h.value, "webtransport")) {
+                                    is_webtransport = true;
+                                }
+                                if (std.mem.eql(u8, h.name, "datagram-flow-id")) {
+                                    // Parse the flow ID if present
+                                    datagram_flow_id = std.fmt.parseInt(u64, h.value, 10) catch null;
+                                }
+                            }
+
+                            if (is_webtransport) {
+                                // Check if WebTransport is enabled at runtime
+                                // Must check the actual runtime flag, not just build flag
+                                if (!self.wt.enabled) {
+                                    server_logging.warnf(self, "WebTransport CONNECT received but WT disabled at runtime (H3_WEBTRANSPORT not set)\n", .{});
+                                    try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 501);
+                                    state.arena.deinit();
+                                    self.allocator.destroy(state);
+                                    conn.releaseRequest();
+                                    continue;
+                                }
+
+                                state.is_webtransport = true;
+                                state.wt_flow_id = datagram_flow_id orelse result.stream_id;
+                                server_logging.infof(self, "→ WebTransport CONNECT: path={s}, flow_id={d}\n", .{ path_raw, state.wt_flow_id.? });
+                            }
+                        }
+
                         const req_headers = try arena_allocator.alloc(http.Header, headers.len);
                         for (headers, 0..) |h, i| {
                             req_headers[i] = .{ .name = h.name, .value = h.value };
@@ -218,10 +253,96 @@ pub fn Impl(comptime S: type) type {
                                 // Install streaming limiter callback to enforce download caps
                                 state.response.setStreamingLimiter(self, responseStreamingGate);
 
+                                // MILESTONE-1: Store WebTransport callback if route supports it
+                                // Note: We store the callback temporarily in user_data since handler has a different signature
+                                if (mr == .Found) {
+                                    const route = mr.Found.route;
+                                    if (route.on_wt_session != null and state.is_webtransport) {
+                                        // Store the callback pointer in user_data for later invocation
+                                        state.user_data = @constCast(@ptrCast(route.on_wt_session));
+                                    }
+                                }
+
                                 try self.stream_states.put(.{ .conn = conn, .stream_id = result.stream_id }, state);
                                 // Request counter already incremented after cap check to prevent race condition
                                 // State successfully stored, cleanupStreamState will handle counter decrement
-                                if (state.on_h3_dgram != null) {
+
+                                // MILESTONE-1: Create WebTransportSession if this is a WT CONNECT
+                                if (state.is_webtransport and Self.WithWT) {
+                                    // Create WebTransportSession
+                                    const wt_session = try h3.WebTransportSession.init(
+                                        self.allocator,
+                                        result.stream_id, // session_id is the CONNECT stream ID
+                                        &conn.conn,
+                                        h3_conn,
+                                        state.request.path_decoded,
+                                    );
+                                    errdefer wt_session.deinit();
+
+                                    // Create WebTransportSessionState wrapper
+                                    // Convert headers to quiche.h3.Header format
+                                    // IMPORTANT: Don't free wt_headers - WebTransportSessionState owns them
+                                    // The session will manage this memory through its arena
+                                    const wt_headers = try self.allocator.alloc(quiche.h3.Header, headers.len);
+                                    errdefer self.allocator.free(wt_headers);
+
+                                    // Deep copy header data so it survives beyond the request arena
+                                    for (headers, 0..) |h, i| {
+                                        // Duplicate the header strings into persistent memory
+                                        const name_copy = try self.allocator.dupe(u8, h.name);
+                                        errdefer self.allocator.free(name_copy);
+                                        const value_copy = try self.allocator.dupe(u8, h.value);
+                                        errdefer self.allocator.free(value_copy);
+
+                                        wt_headers[i] = .{
+                                            .name = name_copy.ptr,
+                                            .name_len = name_copy.len,
+                                            .value = value_copy.ptr,
+                                            .value_len = value_copy.len,
+                                        };
+                                    }
+
+                                    const wt_state = try h3.WebTransportSessionState.init(
+                                        self.allocator,
+                                        wt_session,
+                                        wt_headers,
+                                        null, // on_datagram callback will be set by route handler if needed
+                                    );
+                                    errdefer wt_state.deinit(self.allocator);
+
+                                    // Store session in server maps
+                                    try self.wt.sessions.put(.{ .conn = conn, .session_id = result.stream_id }, wt_state);
+                                    const flow_id = state.wt_flow_id orelse result.stream_id;
+                                    try self.wt.dgram_map.put(.{ .conn = conn, .flow_id = flow_id }, wt_state);
+
+                                    // Link session to request state
+                                    state.wt_session = wt_state;
+                                    wt_state.flow_id = flow_id;
+
+                                    // Update metrics
+                                    self.wt.sessions_created += 1;
+                                    wt_state.last_activity_ms = std.time.milliTimestamp();
+
+                                    server_logging.infof(self, "WebTransport session created: id={d}, path={s}\n", .{ result.stream_id, state.request.path_decoded });
+
+                                    // MILESTONE-1: Send 200 OK and invoke route callback
+                                    try state.response.finishConnect(state.wt_flow_id);
+
+                                    // Invoke the on_wt_session callback if provided by the route
+                                    if (state.user_data) |callback_ptr| {
+                                        // Cast user_data back to WebTransport session callback type
+                                        const wt_handler = @as(http.handler.OnWebTransportSession, @ptrCast(@alignCast(callback_ptr)));
+                                        wt_handler(&state.request, wt_state) catch |err| {
+                                            server_logging.warnf(self, "WebTransport session handler error: {s}\n", .{@errorName(err)});
+                                            // Close the session on error
+                                            // TODO: Send proper error capsule
+                                            _ = conn.conn.streamShutdown(result.stream_id, .write, 0) catch {};
+                                        };
+                                    }
+
+                                    // WebTransport session is now active; skip normal request processing
+                                    continue;
+                                } else if (state.on_h3_dgram != null) {
                                     const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(result.stream_id);
                                     try self.h3.dgram_flows.put(.{ .conn = conn, .flow_id = flow_id }, state);
                                 }
@@ -400,6 +521,17 @@ pub fn Impl(comptime S: type) type {
         pub fn processWritableStreams(self: *Self, conn: *connection.Connection) !void {
             while (conn.conn.streamWritableNext()) |stream_id| {
                 if (self.stream_states.get(.{ .conn = conn, .stream_id = stream_id })) |state| {
+                    // First try to flush any buffered capsule data (for WebTransport)
+                    if (state.response.capsule_buffer != null) {
+                        state.response.flushCapsuleBuffer() catch |err| {
+                            if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
+                                // Stream still blocked, will retry later
+                            } else {
+                                std.debug.print("Error flushing capsule buffer for stream {}: {}\n", .{ stream_id, err });
+                            }
+                        };
+                    }
+
                     if (state.response.partial_response != null) {
                         state.response.processPartialResponse() catch |err| {
                             if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {
@@ -476,6 +608,24 @@ pub fn Impl(comptime S: type) type {
 
         pub fn cleanupStreamState(self: *Self, conn: *connection.Connection, stream_id: u64, state: *RequestState) void {
             _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
+
+            // MILESTONE-1: Handle WebTransport session cleanup
+            if (state.is_webtransport and Self.WithWT) {
+                if (state.wt_session) |wt_state| {
+                    self.destroyWtSessionState(conn, stream_id, wt_state);
+                    state.wt_session = null;
+                }
+
+                // Don't destroy the response until WT session is fully closed
+                // The CONNECT stream stays open for the session lifetime
+                conn.releaseRequest();
+                if (state.is_download) conn.releaseDownload();
+                state.response.deinit();
+                state.arena.deinit();
+                self.allocator.destroy(state);
+                return;
+            }
+
             if (state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
                 state.datagram_detached = true;
                 state.retain_for_datagram = false;

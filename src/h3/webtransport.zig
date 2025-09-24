@@ -196,6 +196,7 @@ pub const WebTransportSessionState = struct {
     /// Arena allocator for session lifetime
     arena: std.heap.ArenaAllocator,
     last_activity_ms: i64 = 0,
+    flow_id: u64 = 0,
 
     /// Initialize session state
     pub fn init(
@@ -214,6 +215,7 @@ pub const WebTransportSessionState = struct {
             .on_stream_data = null,
             .on_stream_closed = null,
             .arena = std.heap.ArenaAllocator.init(allocator),
+            .flow_id = 0,
         };
         return state;
     }
