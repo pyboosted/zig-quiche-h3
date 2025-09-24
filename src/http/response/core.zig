@@ -4,6 +4,7 @@ const h3 = @import("h3");
 const Status = @import("../handler.zig").Status;
 const Headers = @import("../handler.zig").Headers;
 const streaming = @import("../streaming.zig");
+const wt_capsules = @import("../webtransport_capsules.zig");
 
 pub const Response = struct {
     pub const Trailer = struct {
@@ -36,6 +37,11 @@ pub const Response = struct {
     capsule_buffer: ?[]u8 = null,
     capsule_buffer_len: usize = 0,
     capsule_buffer_sent: usize = 0,
+
+    pub const WebTransportAcceptOptions = struct {
+        send_legacy_accept: bool = true,
+        extra_capsules: []const wt_capsules.Capsule = &[_]wt_capsules.Capsule{},
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -227,69 +233,89 @@ pub const Response = struct {
     /// MILESTONE-1: Send 200 OK for WebTransport CONNECT without closing the stream
     /// This enables the CONNECT stream to stay open for capsule exchange
     pub fn finishConnect(self: *Response, flow_id: ?u64) !void {
+        try self.finishWebTransportConnect(flow_id, .{});
+    }
+
+    pub fn finishWebTransportConnect(
+        self: *Response,
+        flow_id: ?u64,
+        options: WebTransportAcceptOptions,
+    ) !void {
         if (self.headers_sent) return error.HeadersAlreadySent;
 
-        // Set 200 OK status
         try self.status(200);
-
-        // Add WebTransport-specific headers
-        // sec-webtransport-http3-draft: draft02 (per WebTransport over HTTP/3 spec)
         try self.header("sec-webtransport-http3-draft", "draft02");
 
-        // Add datagram-flow-id if provided (otherwise client assumes stream ID)
         if (flow_id) |id| {
             var buf: [32]u8 = undefined;
             const flow_str = try std.fmt.bufPrint(&buf, "{d}", .{id});
             try self.header("datagram-flow-id", flow_str);
         }
 
-        // Send headers with fin=false to keep stream open
         try self.sendHeaders(false);
 
-        // MILESTONE-1: Send minimal SESSION_ACCEPT capsule for spec compliance
-        // Capsule format: type (varint) + length (varint) + data
-        // SESSION_ACCEPT = 0x3c per WebTransport spec
-        try self.sendSessionAcceptCapsule();
+        if (options.send_legacy_accept) {
+            try self.sendLegacySessionAcceptCapsule();
+        }
 
-        // Mark that we should not auto-end this response
+        for (options.extra_capsules) |capsule| {
+            try self.sendWebTransportCapsule(capsule);
+        }
+
         self.deferEnd();
     }
 
-    /// Send a minimal SESSION_ACCEPT capsule after 200 OK
-    fn sendSessionAcceptCapsule(self: *Response) !void {
-
-        // SESSION_ACCEPT capsule type = 0x3c
-        const capsule_type: u64 = 0x3c;
-
-        // Empty payload for minimal implementation
-        // Future: can add settings here
-        const payload_len: u64 = 0;
-
-        // Encode capsule: type (varint) + length (varint) + payload
+    /// Send a minimal legacy SESSION_ACCEPT capsule after 200 OK
+    fn sendLegacySessionAcceptCapsule(self: *Response) !void {
         var buf: [16]u8 = undefined;
         var offset: usize = 0;
+        offset += try encodeQuicVarint(buf[offset..], 0x3c);
+        offset += try encodeQuicVarint(buf[offset..], 0);
+        try self.writeCapsuleBytes(buf[0..offset]);
+    }
 
-        // Encode type as QUIC varint (correct bit patterns)
-        offset += try encodeQuicVarint(buf[offset..], capsule_type);
-        offset += try encodeQuicVarint(buf[offset..], payload_len);
+    pub fn sendWebTransportCapsule(self: *Response, capsule: wt_capsules.Capsule) !void {
+        var stack: [64]u8 = undefined;
+        const needed = capsule.maxEncodedLen();
+        const buf = if (needed <= stack.len)
+            stack[0..needed]
+        else
+            try self.allocator.alloc(u8, needed);
+        defer if (needed > stack.len) self.allocator.free(buf);
 
-        // Try to send the capsule
-        const sent = self.quic_conn.streamSend(self.stream_id, buf[0..offset], false) catch |err| {
+        const written = try capsule.encode(buf);
+        try self.writeCapsuleBytes(buf[0..written]);
+    }
+
+    pub fn sendWebTransportClose(self: *Response, code: u32, reason: []const u8) !void {
+        const capsule = wt_capsules.Capsule{
+            .close_session = .{ .application_error_code = code, .reason = reason },
+        };
+        try self.sendWebTransportCapsule(capsule);
+    }
+
+    pub fn rejectConnect(self: *Response, status_code: u16) !void {
+        if (self.headers_sent) return error.HeadersAlreadySent;
+        try self.status(status_code);
+        try self.sendHeaders(true);
+        self.ended = true;
+    }
+
+    fn writeCapsuleBytes(self: *Response, data: []const u8) !void {
+        if (data.len == 0) return;
+
+        const sent = self.quic_conn.streamSend(self.stream_id, data, false) catch |err| {
             if (err == quiche.QuicheError.Done or err == quiche.QuicheError.FlowControl) {
-                // Stream is blocked - buffer the entire capsule for retry
-                try self.bufferCapsuleData(buf[0..offset]);
-                // Register stream as writable so we get notified when it's ready
-                _ = self.quic_conn.streamWritable(self.stream_id, offset) catch {};
+                try self.bufferCapsuleData(data);
+                _ = self.quic_conn.streamWritable(self.stream_id, data.len) catch {};
                 return;
             }
             return err;
         };
 
-        if (sent < offset) {
-            // Partial write - buffer the remainder
-            try self.bufferCapsuleData(buf[sent..offset]);
-            // Register stream as writable for the remaining bytes
-            _ = self.quic_conn.streamWritable(self.stream_id, offset - sent) catch {};
+        if (sent < data.len) {
+            try self.bufferCapsuleData(data[sent..]);
+            _ = self.quic_conn.streamWritable(self.stream_id, data.len - sent) catch {};
         }
     }
 
@@ -299,7 +325,8 @@ pub const Response = struct {
 
         // Allocate buffer if not already allocated
         if (self.capsule_buffer == null) {
-            self.capsule_buffer = try self.allocator.alloc(u8, 256); // Start with reasonable size
+            const initial = if (data.len > 256) data.len else 256;
+            self.capsule_buffer = try self.allocator.alloc(u8, initial);
             self.capsule_buffer_len = 0;
             self.capsule_buffer_sent = 0;
         }

@@ -17,6 +17,17 @@ pub const DatagramStats = struct {
     dropped_send: usize = 0,
 };
 
+pub const CapsuleCounters = struct {
+    close_session: usize = 0,
+    drain_session: usize = 0,
+    wt_max_streams_bidi: usize = 0,
+    wt_max_streams_uni: usize = 0,
+    wt_streams_blocked_bidi: usize = 0,
+    wt_streams_blocked_uni: usize = 0,
+    wt_max_data: usize = 0,
+    wt_data_blocked: usize = 0,
+};
+
 pub fn H3State(comptime RequestStatePtr: type) type {
     return struct {
         dgram_flows: std.hash_map.HashMap(FlowKey, RequestStatePtr, FlowKeyContext, 80),
@@ -44,7 +55,13 @@ pub fn WTState(
         dgrams_received: usize = 0,
         dgrams_sent: usize = 0,
         dgrams_would_block: usize = 0,
-        enabled: bool = false,  // WebTransport enabled at runtime
+        capsules_sent_total: usize = 0,
+        capsules_received_total: usize = 0,
+        capsules_sent: CapsuleCounters = .{},
+        capsules_received: CapsuleCounters = .{},
+        legacy_session_accept_sent: usize = 0,
+        legacy_session_accept_received: usize = 0,
+        enabled: bool = false, // WebTransport enabled at runtime
         enable_streams: bool = false,
         enable_bidi: bool = false,
         streams: std.hash_map.HashMap(StreamKey, StreamStatePtr, StreamKeyContext, 80),

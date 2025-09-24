@@ -142,7 +142,8 @@ pub fn Impl(comptime S: type) type {
 
                             for (headers) |h| {
                                 if (std.mem.eql(u8, h.name, ":protocol") and
-                                    std.mem.eql(u8, h.value, "webtransport")) {
+                                    std.mem.eql(u8, h.value, "webtransport"))
+                                {
                                     is_webtransport = true;
                                 }
                                 if (std.mem.eql(u8, h.name, "datagram-flow-id")) {
@@ -259,7 +260,7 @@ pub fn Impl(comptime S: type) type {
                                     const route = mr.Found.route;
                                     if (route.on_wt_session != null and state.is_webtransport) {
                                         // Store the callback pointer in user_data for later invocation
-                                        state.user_data = @constCast(@ptrCast(route.on_wt_session));
+                                        state.user_data = @ptrCast(@constCast(route.on_wt_session));
                                     }
                                 }
 
@@ -318,7 +319,7 @@ pub fn Impl(comptime S: type) type {
                                     // Link session to request state
                                     state.wt_session = wt_state;
                                     wt_state.flow_id = flow_id;
-                                    const session_wrapper = try Self.WTApi.createSession(self, conn, wt_state);
+                                    const session_wrapper = try Self.WTApi.createSession(self, conn, state, wt_state);
 
                                     // Update metrics
                                     self.wt.sessions_created += 1;
@@ -326,8 +327,7 @@ pub fn Impl(comptime S: type) type {
 
                                     server_logging.infof(self, "WebTransport session created: id={d}, path={s}\n", .{ result.stream_id, state.request.path_decoded });
 
-                                    // MILESTONE-1: Send 200 OK and invoke route callback
-                                    try state.response.finishConnect(state.wt_flow_id);
+                                    state.wt_handshake_state = .pending;
 
                                     // Invoke the on_wt_session callback if provided by the route
                                     if (state.user_data) |callback_ptr| {
@@ -335,10 +335,26 @@ pub fn Impl(comptime S: type) type {
                                         const wt_handler = @as(http.handler.OnWebTransportSession, @ptrCast(@alignCast(callback_ptr)));
                                         wt_handler(&state.request, session_wrapper.asAnyOpaque()) catch |err| {
                                             server_logging.warnf(self, "WebTransport session handler error: {s}\n", .{@errorName(err)});
+                                            state.wt_handshake_state = .rejected;
                                             // Close the session on error
                                             // TODO: Send proper error capsule
-                                            _ = conn.conn.streamShutdown(result.stream_id, .write, 0) catch {};
+                                            const app_err = h3.webtransport.APP_ERR_INVALID_STREAM;
+                                            _ = conn.conn.streamShutdown(result.stream_id, .write, app_err) catch {};
                                         };
+                                    }
+
+                                    if (state.wt_handshake_state == .pending) {
+                                        state.response.finishWebTransportConnect(state.wt_flow_id, .{}) catch |err| {
+                                            server_logging.errorf(self, "Failed to auto-accept WebTransport session: {s}\n", .{@errorName(err)});
+                                            state.wt_handshake_state = .rejected;
+                                            // Attempt to reject stream to avoid hanging
+                                            const app_err = h3.webtransport.APP_ERR_INVALID_STREAM;
+                                            _ = conn.conn.streamShutdown(result.stream_id, .write, app_err) catch {};
+                                        };
+                                        if (state.wt_handshake_state == .pending) {
+                                            state.wt_handshake_state = .accepted;
+                                            self.recordLegacySessionAccept();
+                                        }
                                     }
 
                                     // WebTransport session is now active; skip normal request processing

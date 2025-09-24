@@ -301,12 +301,18 @@ pub fn Impl(comptime S: type) type {
             const session_id = v2.value;
 
             if (countWtStreamsForSession(self, conn, session_id, .bidi) >= self.config.wt_max_streams_bidi) {
-                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.read, self.config.wt_app_err_stream_limit) catch {};
-                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.write, self.config.wt_app_err_stream_limit) catch {};
+                const code = h3.webtransport.APP_ERR_STREAM_LIMIT;
+                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.read, code) catch {};
+                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.write, code) catch {};
                 return;
             }
             const sess_key = Self.SessionKey{ .conn = conn, .session_id = session_id };
-            const sess_state = self.wt.sessions.get(sess_key) orelse return;
+            const sess_state = self.wt.sessions.get(sess_key) orelse {
+                const code = h3.webtransport.APP_ERR_INVALID_STREAM;
+                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.read, code) catch {};
+                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.write, code) catch {};
+                return;
+            };
 
             const wt_stream = try self.allocator.create(h3.WebTransportSession.WebTransportStream);
             wt_stream.* = .{
@@ -375,10 +381,16 @@ pub fn Impl(comptime S: type) type {
             const sess_key = Self.SessionKey{ .conn = conn, .session_id = parsed.session_id };
             const sess_state = self.wt.sessions.get(sess_key) orelse {
                 std.debug.print("WT uni stream {} references unknown session {}\n", .{ stream_id, parsed.session_id });
+                const code = h3.webtransport.APP_ERR_INVALID_STREAM;
+                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.read, code) catch {};
+                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.write, code) catch {};
                 return;
             };
             if (countWtStreamsForSession(self, conn, parsed.session_id, .uni) >= self.config.wt_max_streams_uni) {
                 std.debug.print("WT uni stream limit reached for session {}\n", .{parsed.session_id});
+                const code = h3.webtransport.APP_ERR_STREAM_LIMIT;
+                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.read, code) catch {};
+                conn.conn.streamShutdown(stream_id, quiche.Connection.Shutdown.write, code) catch {};
                 return;
             }
 

@@ -57,10 +57,15 @@
 **Goal**: Align with the WT capsule protocol for acceptance, parameters, and closure.
 
 **Checklist**
-- [ ] Implement capsule encode/decode helpers (SESSION_ACCEPT, SESSION_CLOSE, possibly STREAM_DATA_BLOCKED) on CONNECT stream.
-- [ ] Allow handlers to accept/reject sessions with capsule payloads before sending 200/4xx as appropriate.
-- [ ] Propagate WT-specific application error codes on stream shutdown (use constants in `h3/webtransport.zig`).
-- [ ] Update metrics/logging to record capsule exchanges and error paths.
+- [x] Implement capsule encode/decode helpers (SESSION_ACCEPT, SESSION_CLOSE, possibly STREAM_DATA_BLOCKED) on CONNECT stream.
+- [x] Allow handlers to accept/reject sessions with capsule payloads before sending 200/4xx as appropriate.
+- [x] Propagate WT-specific application error codes on stream shutdown (use constants in `h3/webtransport.zig`).
+- [x] Update metrics/logging to record capsule exchanges and error paths.
+
+**Progress (2025-09-24)**
+- Added `http/webtransport_capsules.zig` with encode/decode utilities and unit tests, plus response helpers for sending capsules.
+- Server session API exposes `accept`, `reject`, `sendCapsule`, and `close` with handshake state tracking and default auto-accept fallback.
+- QuicServer now records capsule metrics/logging and sends WebTransport-specific error codes on forced stream shutdowns.
 
 **Exit Criteria**
 - Session negotiation communicates limits (e.g., max datagram size) via capsules.

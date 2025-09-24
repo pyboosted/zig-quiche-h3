@@ -15,11 +15,14 @@ const server_logging = @import("logging.zig");
 const runtime_config = @import("config_runtime.zig");
 const conn_state = @import("connection_state.zig");
 const wt_api = @import("webtransport_api.zig");
+const wt_capsules = http.webtransport_capsules;
 
 const c = quiche.c;
 const posix = std.posix;
 
 // Debug helpers are provided by server/logging.zig
+
+pub const WtHandshakeState = enum { none, pending, accepted, rejected };
 
 // Request state for streaming bodies
 pub const RequestState = struct {
@@ -55,6 +58,7 @@ pub const RequestState = struct {
     wt_session: ?*h3.WebTransportSessionState = null,
     // MILESTONE-1: Datagram flow ID for WebTransport (negotiated or defaults to stream ID)
     wt_flow_id: ?u64 = null,
+    wt_handshake_state: WtHandshakeState = .none,
 };
 
 // WT uni-stream preface accumulator lives in the WT facade now
@@ -118,6 +122,7 @@ pub const QuicServer = struct {
     pub const SessionKeyContext = conn_state.SessionKeyContext;
     pub const FlowKey = conn_state.FlowKey;
     pub const FlowKeyContext = conn_state.FlowKeyContext;
+    pub const WebTransportHandshakeState = WtHandshakeState;
 
     const H3State = conn_state.H3State(*RequestState);
     const WTState = conn_state.WTState(
@@ -351,6 +356,83 @@ pub const QuicServer = struct {
         _ = _bytes; // currently unused; future: track bytes sent
         const self: *QuicServer = @ptrCast(@alignCast(ctx));
         self.wt.dgrams_sent += 1;
+    }
+
+    fn dirName(dir: h3.WebTransportSession.StreamDir) []const u8 {
+        return switch (dir) {
+            .bidi => "bidi",
+            .uni => "uni",
+        };
+    }
+
+    fn recordLegacySessionAccept(self: *QuicServer) void {
+        self.wt.capsules_sent_total += 1;
+        self.wt.legacy_session_accept_sent += 1;
+        server_logging.infof(self, "WT capsule sent: SESSION_ACCEPT (legacy)\n", .{});
+    }
+
+    fn recordCapsuleSent(self: *QuicServer, capsule: wt_capsules.Capsule) void {
+        self.wt.capsules_sent_total += 1;
+        switch (capsule) {
+            .close_session => |close_capsule| {
+                self.wt.capsules_sent.close_session += 1;
+                server_logging.infof(
+                    self,
+                    "WT capsule sent: CLOSE_WEBTRANSPORT_SESSION code={d} reason_len={d}\n",
+                    .{ close_capsule.application_error_code, close_capsule.reason.len },
+                );
+            },
+            .drain_session => {
+                self.wt.capsules_sent.drain_session += 1;
+                server_logging.infof(self, "WT capsule sent: DRAIN_WEBTRANSPORT_SESSION\n", .{});
+            },
+            .max_streams => |m| {
+                if (m.dir == .bidi) {
+                    self.wt.capsules_sent.wt_max_streams_bidi += 1;
+                } else {
+                    self.wt.capsules_sent.wt_max_streams_uni += 1;
+                }
+                server_logging.infof(
+                    self,
+                    "WT capsule sent: WT_MAX_STREAMS dir={s} max={d}\n",
+                    .{ dirName(m.dir), m.maximum },
+                );
+            },
+            .streams_blocked => |m| {
+                if (m.dir == .bidi) {
+                    self.wt.capsules_sent.wt_streams_blocked_bidi += 1;
+                } else {
+                    self.wt.capsules_sent.wt_streams_blocked_uni += 1;
+                }
+                server_logging.infof(
+                    self,
+                    "WT capsule sent: WT_STREAMS_BLOCKED dir={s} max={d}\n",
+                    .{ dirName(m.dir), m.maximum },
+                );
+            },
+            .max_data => |m| {
+                self.wt.capsules_sent.wt_max_data += 1;
+                server_logging.infof(self, "WT capsule sent: WT_MAX_DATA max={d}\n", .{m.maximum});
+            },
+            .data_blocked => |m| {
+                self.wt.capsules_sent.wt_data_blocked += 1;
+                server_logging.infof(self, "WT capsule sent: WT_DATA_BLOCKED at={d}\n", .{m.maximum});
+            },
+        }
+    }
+
+    fn recordCapsuleReceived(self: *QuicServer, capsule: wt_capsules.CapsuleType) void {
+        self.wt.capsules_received_total += 1;
+        switch (capsule) {
+            .close_session => self.wt.capsules_received.close_session += 1,
+            .drain_session => self.wt.capsules_received.drain_session += 1,
+            .wt_max_streams_bidi => self.wt.capsules_received.wt_max_streams_bidi += 1,
+            .wt_max_streams_uni => self.wt.capsules_received.wt_max_streams_uni += 1,
+            .wt_streams_blocked_bidi => self.wt.capsules_received.wt_streams_blocked_bidi += 1,
+            .wt_streams_blocked_uni => self.wt.capsules_received.wt_streams_blocked_uni += 1,
+            .wt_max_data => self.wt.capsules_received.wt_max_data += 1,
+            .wt_data_blocked => self.wt.capsules_received.wt_data_blocked += 1,
+        }
     }
 
     pub fn deinit(self: *QuicServer) void {
