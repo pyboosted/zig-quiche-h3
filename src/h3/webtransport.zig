@@ -51,6 +51,7 @@ pub const WebTransportSession = struct {
         allocator: std.mem.Allocator,
         pending: std.ArrayListUnmanaged(u8) = .{},
         fin_on_flush: bool = false,
+        user_data: ?*anyopaque = null,
 
         pub fn isServerInitiated(self: *const WebTransportStream) bool {
             // QUIC stream id bit 0 == 1 => server-initiated
@@ -192,6 +193,7 @@ pub const WebTransportSessionState = struct {
     on_bidi_open: ?*const fn (sess: *anyopaque, stream: *anyopaque) errors.WebTransportStreamError!void = null,
     on_stream_data: ?*const fn (stream: *anyopaque, data: []const u8, fin: bool) errors.WebTransportStreamError!void = null,
     on_stream_closed: ?*const fn (stream: *anyopaque) void = null,
+    session_ctx: ?*anyopaque = null,
 
     /// Arena allocator for session lifetime
     arena: std.heap.ArenaAllocator,

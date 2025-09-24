@@ -484,3 +484,26 @@ fn encodeQuicVarint(buf: []u8, value: u64) !usize {
         return 8;
     }
 }
+
+test "encodeQuicVarint encodes canonical lengths" {
+    var buf: [8]u8 = undefined;
+    var out = try encodeQuicVarint(buf[0..], 0x1f);
+    try std.testing.expectEqual(@as(usize, 1), out);
+    try std.testing.expectEqual(@as(u8, 0x1f), buf[0]);
+
+    out = try encodeQuicVarint(buf[0..], 0x1234);
+    try std.testing.expectEqual(@as(usize, 2), out);
+    try std.testing.expectEqual(@as(u8, 0x52), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x34), buf[1]);
+
+    out = try encodeQuicVarint(buf[0..], 0x1234abcd);
+    try std.testing.expectEqual(@as(usize, 4), out);
+    try std.testing.expectEqual(@as(u8, 0x92), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x34), buf[1]);
+    try std.testing.expectEqual(@as(u8, 0xab), buf[2]);
+    try std.testing.expectEqual(@as(u8, 0xcd), buf[3]);
+
+    out = try encodeQuicVarint(buf[0..], 0x1234abcd1234abcd);
+    try std.testing.expectEqual(@as(usize, 8), out);
+    try std.testing.expectEqual(@as(u8, 0xd2), buf[0]);
+}

@@ -318,6 +318,7 @@ pub fn Impl(comptime S: type) type {
                                     // Link session to request state
                                     state.wt_session = wt_state;
                                     wt_state.flow_id = flow_id;
+                                    const session_wrapper = try Self.WTApi.createSession(self, conn, wt_state);
 
                                     // Update metrics
                                     self.wt.sessions_created += 1;
@@ -332,7 +333,7 @@ pub fn Impl(comptime S: type) type {
                                     if (state.user_data) |callback_ptr| {
                                         // Cast user_data back to WebTransport session callback type
                                         const wt_handler = @as(http.handler.OnWebTransportSession, @ptrCast(@alignCast(callback_ptr)));
-                                        wt_handler(&state.request, wt_state) catch |err| {
+                                        wt_handler(&state.request, session_wrapper.asAnyOpaque()) catch |err| {
                                             server_logging.warnf(self, "WebTransport session handler error: {s}\n", .{@errorName(err)});
                                             // Close the session on error
                                             // TODO: Send proper error capsule

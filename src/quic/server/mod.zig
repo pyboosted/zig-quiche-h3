@@ -14,6 +14,7 @@ const errors = @import("errors");
 const server_logging = @import("logging.zig");
 const runtime_config = @import("config_runtime.zig");
 const conn_state = @import("connection_state.zig");
+const wt_api = @import("webtransport_api.zig");
 
 const c = quiche.c;
 const posix = std.posix;
@@ -109,6 +110,7 @@ pub const QuicServer = struct {
     const H3 = H3Core.Impl(@This());
     const WTCore = @import("webtransport.zig");
     const WT = WTCore.Impl(@This());
+    const WTApi = wt_api.Api(@This());
 
     pub const StreamKey = conn_state.StreamKey;
     pub const StreamKeyContext = conn_state.StreamKeyContext;
@@ -123,6 +125,9 @@ pub const QuicServer = struct {
         *h3.WebTransportSession.WebTransportStream,
         WT.UniPreface,
     );
+
+    pub const WebTransportSession = WTApi.Session;
+    pub const WebTransportStream = WTApi.Stream;
 
     /// Build-time feature toggle for WebTransport
     pub const WithWT: bool = @import("build_options").with_webtransport;
@@ -306,6 +311,30 @@ pub const QuicServer = struct {
         _ = self.wt.sessions.remove(.{ .conn = conn, .session_id = session_id });
         _ = self.wt.dgram_map.remove(.{ .conn = conn, .flow_id = flow_id });
 
+        var stream_keys = std.ArrayList(StreamKey).init(self.allocator);
+        defer stream_keys.deinit();
+
+        var stream_it = self.wt.streams.iterator();
+        while (stream_it.next()) |entry| {
+            if (entry.key_ptr.conn == conn and entry.value_ptr.*.session_id == session_id) {
+                stream_keys.append(entry.key_ptr.*) catch {};
+            }
+        }
+
+        for (stream_keys.items) |sk| {
+            if (self.wt.streams.fetchRemove(sk)) |kv| {
+                WTApi.destroyStreamWrapper(self, kv.value);
+                kv.value.allocator.destroy(kv.value);
+            }
+        }
+
+        if (wt_state.session_ctx) |ctx| {
+            const session_wrapper = WTApi.sessionFromOpaque(ctx);
+            self.allocator.destroy(session_wrapper);
+            wt_state.session_ctx = null;
+        }
+        wt_state.session.user_data = null;
+
         for (wt_state.request_headers) |hdr| {
             self.allocator.free(hdr.name[0..hdr.name_len]);
             self.allocator.free(hdr.value[0..hdr.value_len]);
@@ -373,6 +402,7 @@ pub const QuicServer = struct {
         var it_ws = self.wt.streams.iterator();
         while (it_ws.next()) |entry| {
             const s = entry.value_ptr.*;
+            WTApi.destroyStreamWrapper(self, s);
             s.allocator.destroy(s);
         }
         self.wt.streams.deinit();

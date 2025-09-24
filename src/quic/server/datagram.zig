@@ -139,7 +139,8 @@ pub fn Impl(comptime S: type) type {
                 self.wt.dgrams_received += 1;
                 if (session_state.on_datagram) |callback| {
                     server_logging.debugPrint(self, "[DEBUG] WT DGRAM recv session={d} len={d}, invoking callback\n", .{ flow_id, h3_payload.len });
-                    callback(session_state.session, h3_payload) catch |err| {
+                    const sess_arg: *anyopaque = if (session_state.session.user_data) |ptr| ptr else if (session_state.session_ctx) |ctx| ctx else @ptrCast(session_state.session);
+                    callback(sess_arg, h3_payload) catch |err| {
                         if (err == error.WouldBlock) {
                             self.wt.dgrams_would_block += 1;
                             server_logging.debugPrint(self, "[DEBUG] WebTransport DATAGRAM callback returned WouldBlock\n", .{});

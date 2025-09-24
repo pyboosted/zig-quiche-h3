@@ -37,14 +37,20 @@
 **Goal**: Make WT sessions useful by delivering datagrams/streams to application callbacks.
 
 **Checklist**
-- [ ] Implement `WebTransportSession.sendDatagram` wrapper on server side and expose it through handler APIs.
-- [ ] Route incoming H3 DATAGRAMs with session flow IDs to session `on_datagram` callbacks.
-- [ ] Wire uni/bidi stream open/data/close callbacks (`OnWebTransportUniOpen`, `OnWebTransportBidiOpen`, etc.) once `self.wt.enable_streams` is true.
-- [ ] Handle backpressure for outgoing streams using existing pending queues; surface `error.WouldBlock` consistently.
-- [ ] Add targeted unit tests for datagram parsing and uni-stream preface binding.
+- [x] Implement `WebTransportSession.sendDatagram` wrapper on server side and expose it through handler APIs.
+- [x] Route incoming H3 DATAGRAMs with session flow IDs to session `on_datagram` callbacks.
+- [x] Wire uni/bidi stream open/data/close callbacks (`OnWebTransportUniOpen`, `OnWebTransportBidiOpen`, etc.) once `self.wt.enable_streams` is true.
+- [x] Handle backpressure for outgoing streams using existing pending queues; surface `error.WouldBlock` consistently.
+- [x] Add targeted unit tests for datagram parsing and uni-stream preface binding.
+
+**Progress (2025-09-24)**
+- Session wrapper now hands apps an opaque `WebTransportSession`/`WebTransportStream` with helpers to set datagram/stream callbacks, send datagrams, and open outbound streams while respecting runtime toggles.
+- Incoming datagrams and stream events route through the wrapper, updating WT metrics and using buffered backpressure paths.
+- Capsule writer gains buffering logic; stream/dgram cleanup centralised via `destroyWtSessionState` and stream wrapper teardown.
+- Added `encodeQuicVarint` regression test plus new WT API unit coverage for handler registration/stream wrappers; existing `parseUniPreface` test still validates uni preface parsing.
 
 **Exit Criteria**
-- A handler can echo WT datagrams and observe client-initiated uni streams.
+- A handler can echo WT datagrams and observe client-initiated uni streams. (pending verification in example tests)
 - Streams/datagrams survive short backpressure and are accounted for in metrics.
 
 ### Milestone 3 – Capsule & Error Semantics

@@ -318,7 +318,16 @@ pub fn Impl(comptime S: type) type {
             };
             try self.wt.streams.put(sk, wt_stream);
             if (sess_state.on_bidi_open) |cb| {
-                cb(sess_state.session, wt_stream) catch |err| {
+                const sess_ptr: *anyopaque = if (sess_state.session_ctx) |ctx| ctx else @ptrCast(sess_state.session);
+                const stream_ptr: *anyopaque = if (sess_state.session_ctx) |ctx| stream_blk: {
+                    const session_wrapper = Self.WTApi.sessionFromOpaque(ctx);
+                    const wrapper = session_wrapper.ensureStreamWrapper(wt_stream) catch |err| {
+                        std.debug.print("WT bidi ensure wrapper error: {}\\n", .{err});
+                        break :stream_blk @ptrCast(wt_stream);
+                    };
+                    break :stream_blk wrapper.asAnyOpaque();
+                } else @ptrCast(wt_stream);
+                cb(sess_ptr, stream_ptr) catch |err| {
                     std.debug.print("WT bidi open cb error: {}\\n", .{err});
                 };
             }
@@ -384,7 +393,16 @@ pub fn Impl(comptime S: type) type {
             try self.wt.streams.put(sk, wt_stream);
 
             if (sess_state.on_uni_open) |cb| {
-                cb(sess_state.session, wt_stream) catch |err| {
+                const sess_ptr: *anyopaque = if (sess_state.session_ctx) |ctx| ctx else @ptrCast(sess_state.session);
+                const stream_ptr: *anyopaque = if (sess_state.session_ctx) |ctx| stream_blk: {
+                    const session_wrapper = Self.WTApi.sessionFromOpaque(ctx);
+                    const wrapper = session_wrapper.ensureStreamWrapper(wt_stream) catch |err| {
+                        std.debug.print("WT uni ensure wrapper error: {}\n", .{err});
+                        break :stream_blk @ptrCast(wt_stream);
+                    };
+                    break :stream_blk wrapper.asAnyOpaque();
+                } else @ptrCast(wt_stream);
+                cb(sess_ptr, stream_ptr) catch |err| {
                     std.debug.print("WT uni open callback error: {}\n", .{err});
                 };
             }
@@ -416,7 +434,18 @@ pub fn Impl(comptime S: type) type {
             if (!Self.WithWT) return error.FeatureDisabled;
             if (self.wt.sessions.get(.{ .conn = conn, .session_id = stream.session_id })) |st| {
                 st.last_activity_ms = std.time.milliTimestamp();
-                if (st.on_stream_data) |cb| cb(stream, data, fin) catch |err| return err;
+                if (st.on_stream_data) |cb| {
+                    var stream_ptr: *anyopaque = if (stream.user_data) |ptr| ptr else @ptrCast(stream);
+                    if (stream.user_data == null and st.session_ctx) |ctx| {
+                        const session_wrapper = Self.WTApi.sessionFromOpaque(ctx);
+                        const wrapper = session_wrapper.ensureStreamWrapper(stream) catch |err| {
+                            std.debug.print("WT ensure wrapper during data error: {}\\n", .{err});
+                            return err;
+                        };
+                        stream_ptr = wrapper.asAnyOpaque();
+                    }
+                    cb(stream_ptr, data, fin) catch |err| return err;
+                }
             }
         }
 
@@ -425,11 +454,13 @@ pub fn Impl(comptime S: type) type {
             var it = self.wt.sessions.iterator();
             while (it.next()) |entry| {
                 if (entry.key_ptr.conn == conn and entry.key_ptr.session_id == stream.session_id) {
-                    if (entry.value_ptr.*.on_stream_closed) |cb| cb(stream);
+                    const stream_ptr: *anyopaque = if (stream.user_data) |ptr| ptr else @ptrCast(stream);
+                    if (entry.value_ptr.*.on_stream_closed) |cb| cb(stream_ptr);
                     break;
                 }
             }
             _ = self.wt.streams.remove(.{ .conn = conn, .stream_id = stream.stream_id });
+            Self.WTApi.destroyStreamWrapper(self, stream);
             stream.allocator.destroy(stream);
         }
 
