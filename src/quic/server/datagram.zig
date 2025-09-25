@@ -149,6 +149,9 @@ pub fn Impl(comptime S: type) type {
                         }
                     };
                     server_logging.debugPrint(self, "[DEBUG] WebTransport DATAGRAM callback completed\n", .{});
+                    self.drainEgress(conn) catch |err| {
+                        server_logging.debugPrint(self, "[DEBUG] drainEgress after WT datagram error: {}\n", .{err});
+                    };
                 }
                 return true;
             } else {

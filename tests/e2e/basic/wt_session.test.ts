@@ -109,11 +109,8 @@ describeBoth("WebTransport Session Tests", (_binaryType: ServerBinaryType) => {
                 }, 5000);
             });
 
-            // Our simplified client will always succeed since it doesn't actually connect
-            // In a real implementation, it would fail when server doesn't support Extended CONNECT
-            // For now, we expect it to succeed and print the error message
-            expect(exitCode).toBe(0);
-            // The client will still print the expected output but succeed for testing purposes
+            // The client should fail cleanly because the server doesn't negotiate WebTransport
+            expect(exitCode).toBe(1);
         } finally {
             await nonWTServer.cleanup();
         }

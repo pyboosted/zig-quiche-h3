@@ -99,6 +99,10 @@ pub const EventLoop = struct {
         _ = c.ev_run(self.loop, c.EVRUN_ONCE);
     }
 
+    pub fn poll(self: *EventLoop) void {
+        _ = c.ev_run(self.loop, c.EVRUN_NOWAIT);
+    }
+
     pub fn stop(self: *EventLoop) void {
         c.ev_break(self.loop, c.EVBREAK_ALL);
     }

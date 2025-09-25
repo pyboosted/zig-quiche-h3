@@ -1341,11 +1341,7 @@ pub const QuicClient = struct {
             // Clean up WebTransport session if this was a WT CONNECT request
             if (state.is_webtransport) {
                 if (self.wt_sessions.get(stream_id)) |session| {
-                    if (session.state == .established) {
-                        // For established sessions, remove from tracking but don't destroy
-                        // The user now owns this session and must call close() on it
-                        _ = self.wt_sessions.remove(stream_id);
-                    } else {
+                    if (session.state != .established) {
                         // Failed sessions get cleaned up immediately
                         self.cleanupWebTransportSession(stream_id);
                     }

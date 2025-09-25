@@ -121,7 +121,7 @@ fn pumpClient(qc: *QuicClient, duration_ms: u32) void {
     if (duration_ms == 0) return;
     const deadline = std.time.milliTimestamp() + @as(i64, duration_ms);
     while (std.time.milliTimestamp() < deadline) {
-        qc.event_loop.runOnce();
+        qc.event_loop.poll();
         qc.afterQuicProgress();
     }
 }
