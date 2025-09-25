@@ -521,8 +521,13 @@ pub const QuicClient = struct {
             for (session.datagram_queue.items) |dgram| {
                 self.allocator.free(dgram);
             }
-            // Deinit the queue itself
             session.datagram_queue.deinit(self.allocator);
+            for (session.pending_datagrams.items) |buf| {
+                self.allocator.free(buf);
+            }
+            session.pending_datagrams.deinit(self.allocator);
+            session.capsule_buffer.deinit(self.allocator);
+            session.streams.deinit();
             // Free the allocated path before destroying the session
             self.allocator.free(session.path);
             self.allocator.destroy(session);
@@ -923,9 +928,9 @@ pub const QuicClient = struct {
         if (self.server_authority == null) return ClientError.NoAuthority;
         if (path.len == 0) return ClientError.InvalidRequest;
 
-        // Check if connection was negotiated with Extended CONNECT support
+        // Ensure the peer has advertised DATAGRAM support (required for WebTransport)
+        try self.ensureH3DatagramNegotiated();
         const conn = try self.requireConn();
-        try self.ensureH3();
         const h3_conn = &self.h3_conn.?;
 
         // Check if peer supports Extended CONNECT
@@ -964,12 +969,24 @@ pub const QuicClient = struct {
             .client = self,
             .state = .connecting,
             .path = path_copy,
-            .datagram_queue = std.ArrayList([]u8).init(self.allocator),
+            .datagram_queue = std.ArrayListUnmanaged([]u8){},
+            .pending_datagrams = std.ArrayListUnmanaged([]u8){},
+            .capsule_buffer = std.ArrayListUnmanaged(u8){},
+            .streams = AutoHashMap(u64, *webtransport.WebTransportSession.Stream).init(self.allocator),
         };
 
         // Track session
         self.wt_sessions.put(stream_id, session) catch {
+            for (session.datagram_queue.items) |buf| {
+                self.allocator.free(buf);
+            }
             session.datagram_queue.deinit(self.allocator);
+            for (session.pending_datagrams.items) |buf| {
+                self.allocator.free(buf);
+            }
+            session.pending_datagrams.deinit(self.allocator);
+            session.capsule_buffer.deinit(self.allocator);
+            session.streams.deinit();
             self.allocator.free(path_copy);
             self.allocator.destroy(session);
             return ClientError.H3Error;
@@ -978,7 +995,16 @@ pub const QuicClient = struct {
         // Also track in requests for proper lifecycle management
         var state = FetchState.init(self.allocator) catch {
             _ = self.wt_sessions.remove(stream_id);
+            for (session.datagram_queue.items) |buf| {
+                self.allocator.free(buf);
+            }
             session.datagram_queue.deinit(self.allocator);
+            for (session.pending_datagrams.items) |buf| {
+                self.allocator.free(buf);
+            }
+            session.pending_datagrams.deinit(self.allocator);
+            session.capsule_buffer.deinit(self.allocator);
+            session.streams.deinit();
             self.allocator.free(path_copy);
             self.allocator.destroy(session);
             return ClientError.H3Error;
@@ -992,7 +1018,16 @@ pub const QuicClient = struct {
         self.requests.put(stream_id, state) catch {
             state.destroy();
             _ = self.wt_sessions.remove(stream_id);
+            for (session.datagram_queue.items) |buf| {
+                self.allocator.free(buf);
+            }
             session.datagram_queue.deinit(self.allocator);
+            for (session.pending_datagrams.items) |buf| {
+                self.allocator.free(buf);
+            }
+            session.pending_datagrams.deinit(self.allocator);
+            session.capsule_buffer.deinit(self.allocator);
+            session.streams.deinit();
             self.allocator.free(path_copy);
             self.allocator.destroy(session);
             return ClientError.H3Error;
@@ -1002,7 +1037,16 @@ pub const QuicClient = struct {
             _ = self.requests.remove(stream_id);
             state.destroy();
             _ = self.wt_sessions.remove(stream_id);
+            for (session.datagram_queue.items) |buf| {
+                self.allocator.free(buf);
+            }
             session.datagram_queue.deinit(self.allocator);
+            for (session.pending_datagrams.items) |buf| {
+                self.allocator.free(buf);
+            }
+            session.pending_datagrams.deinit(self.allocator);
+            session.capsule_buffer.deinit(self.allocator);
+            session.streams.deinit();
             self.allocator.free(path_copy);
             self.allocator.destroy(session);
             return err;
@@ -1440,7 +1484,7 @@ pub const QuicClient = struct {
         try self.flushSend();
     }
 
-    fn flushSend(self: *QuicClient) ClientError!void {
+    pub fn flushSend(self: *QuicClient) ClientError!void {
         const conn = try self.requireConn();
         const sock = self.socket orelse return ClientError.NoSocket;
 
@@ -1475,7 +1519,7 @@ pub const QuicClient = struct {
         self.afterQuicProgress();
     }
 
-    fn afterQuicProgress(self: *QuicClient) void {
+    pub fn afterQuicProgress(self: *QuicClient) void {
         self.updateTimeout();
         self.sendPendingBodies();
         self.checkHandshakeState();
@@ -1613,11 +1657,9 @@ pub const QuicClient = struct {
             var handled_as_h3 = false;
 
             // Try H3 format first if H3 is enabled
-            if (self.h3_conn) |*h3_conn_ptr| {
-                if (h3_conn_ptr.dgramEnabledByPeer(conn)) {
-                    // Try to parse as H3 datagram with flow-id
-                    handled_as_h3 = self.processH3Datagram(payload) catch false;
-                }
+            if (self.h3_conn) |_| {
+                // Speculatively attempt to parse as H3/WebTransport; parser will return false if unsupported.
+                handled_as_h3 = self.processH3Datagram(payload) catch false;
             }
 
             // Fall back to plain QUIC datagram if not handled as H3
@@ -1905,9 +1947,13 @@ pub const QuicClient = struct {
             for (session.datagram_queue.items) |dgram| {
                 self.allocator.free(dgram);
             }
-            // Deinit the queue itself
             session.datagram_queue.deinit(self.allocator);
-            // Free the path string
+            for (session.pending_datagrams.items) |buf| {
+                self.allocator.free(buf);
+            }
+            session.pending_datagrams.deinit(self.allocator);
+            session.capsule_buffer.deinit(self.allocator);
+            session.streams.deinit();
             self.allocator.free(session.path);
             // Remove from map
             _ = self.wt_sessions.remove(stream_id);
@@ -1964,7 +2010,7 @@ pub const QuicClient = struct {
         self.failAll(err);
     }
 
-    fn requireConn(self: *QuicClient) ClientError!*quiche.Connection {
+    pub fn requireConn(self: *QuicClient) ClientError!*quiche.Connection {
         if (self.conn) |*conn_ref| {
             return conn_ref;
         }
