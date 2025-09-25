@@ -112,9 +112,9 @@
 - Added an in-process `WebTransport in-process handshake and datagram echo` test that drives both server and client event loops and asserts session/datagram success.
 
 **Exit Criteria**
-- `zig build wt-client` talks to `zig build quic-server` over real WT, covering datagrams + streams. (Exercise satisfied by Bun E2E run.)
-- `zig build test` and `bun test tests/e2e` include WT scenarios and pass in CI. (`bun test` already covers WT; Zig coverage still pending.)
-- Docs clearly describe enabling WT and known limitations. (Requires aligning README and quickstart content with current CLI capabilities.)
+- `zig build wt-client` talks to `zig build quic-server` over real WT, covering datagrams + streams. (Satisfied via the Bun E2E run.)
+- `zig build test` and `bun test tests/e2e` include WT scenarios and pass in CI. (The in-process Zig test and Bun suite both exercise WT.)
+- Docs clearly describe enabling WT, collecting qlogs, and current limitations. (README and `docs/webtransport_client.md` now cover these details.)
 
 ## Technical Notes & Risks
 - quiche's C API still lacks callbacks for peer-initiated WT streams on the client; document the gap and consider upstream workarounds.
