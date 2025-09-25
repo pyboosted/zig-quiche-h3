@@ -449,7 +449,7 @@ pub const ConnectionPool = struct {
 ### Phase 2 Complete
 - [x] WebTransport sessions can be established
 - [x] WT datagrams can be sent/received
-- [ ] Client-initiated streams work in WT sessions
+- [x] Client-initiated streams work in WT sessions
 
 ### Phase 3 Complete
 - [x] GOAWAY properly handled ✅ COMPLETED
