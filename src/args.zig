@@ -120,6 +120,14 @@ pub fn Parser(comptime Args: type) type {
                 ptr.* = try std.fmt.parseFloat(f32, value);
             } else if (T == f64) {
                 ptr.* = try std.fmt.parseFloat(f64, value);
+            } else if (T == bool) {
+                if (std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "true")) {
+                    ptr.* = true;
+                } else if (std.mem.eql(u8, value, "0") or std.mem.eql(u8, value, "false")) {
+                    ptr.* = false;
+                } else {
+                    return error.InvalidValue;
+                }
             } else {
                 @compileError("Unsupported argument type: " ++ @typeName(T));
             }

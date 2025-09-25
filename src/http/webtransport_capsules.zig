@@ -74,9 +74,11 @@ pub const Capsule = union(enum) {
         switch (self) {
             .close_session => |c| {
                 if (c.reason.len > MAX_CLOSE_REASON_BYTES) return error.ReasonTooLong;
-                std.mem.writeInt(u32, out[written .. written + 4], c.application_error_code, .big);
+                var code_buf: [4]u8 = undefined;
+                std.mem.writeInt(u32, &code_buf, c.application_error_code, .big);
+                std.mem.copyForwards(u8, out[written .. written + 4], &code_buf);
                 written += 4;
-                std.mem.copy(u8, out[written .. written + c.reason.len], c.reason);
+                std.mem.copyForwards(u8, out[written .. written + c.reason.len], c.reason);
                 written += c.reason.len;
             },
             .drain_session => {},

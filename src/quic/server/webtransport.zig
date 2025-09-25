@@ -448,8 +448,8 @@ pub fn Impl(comptime S: type) type {
                 st.last_activity_ms = std.time.milliTimestamp();
                 if (st.on_stream_data) |cb| {
                     var stream_ptr: *anyopaque = if (stream.user_data) |ptr| ptr else @ptrCast(stream);
-                    if (stream.user_data == null and st.session_ctx) |ctx| {
-                        const session_wrapper = Self.WTApi.sessionFromOpaque(ctx);
+                    if (stream.user_data == null and st.session_ctx != null) {
+                        const session_wrapper = Self.WTApi.sessionFromOpaque(st.session_ctx.?);
                         const wrapper = session_wrapper.ensureStreamWrapper(stream) catch |err| {
                             std.debug.print("WT ensure wrapper during data error: {}\\n", .{err});
                             return err;

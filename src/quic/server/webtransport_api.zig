@@ -28,7 +28,7 @@ pub fn Api(comptime Server: type) type {
             server: *Self,
             conn: *connection.Connection,
             state: *h3.WebTransportSessionState,
-            request_state: ?*Self.RequestState,
+            request_state: ?*Self.RequestStateType,
 
             pub fn fromOpaque(ptr: *anyopaque) *Session {
                 return @ptrCast(@alignCast(ptr));
@@ -82,7 +82,7 @@ pub fn Api(comptime Server: type) type {
 
             pub fn openUniStream(self: *Session) errors.WebTransportStreamError!*Stream {
                 if (!self.server.wt.enable_streams) return error.InvalidState;
-                const wt_stream = self.server.WT.openWtUniStream(self.conn, self.state) catch |err| {
+                const wt_stream = Self.WT.openWtUniStream(self.server, self.conn, self.state) catch |err| {
                     return mapStreamError(err);
                 };
                 return self.ensureStreamWrapper(wt_stream);
@@ -91,7 +91,7 @@ pub fn Api(comptime Server: type) type {
             pub fn openBidiStream(self: *Session) errors.WebTransportStreamError!*Stream {
                 if (!self.server.wt.enable_streams) return error.InvalidState;
                 if (!self.server.wt.enable_bidi) return error.InvalidState;
-                const wt_stream = self.server.WT.openWtBidiStream(self.conn, self.state) catch |err| {
+                const wt_stream = Self.WT.openWtBidiStream(self.server, self.conn, self.state) catch |err| {
                     return mapStreamError(err);
                 };
                 return self.ensureStreamWrapper(wt_stream);
@@ -183,13 +183,13 @@ pub fn Api(comptime Server: type) type {
             }
 
             pub fn send(self: *Stream, data: []const u8, fin: bool) errors.WebTransportStreamError!usize {
-                return self.server.WT.sendWtStream(self.conn, self.stream, data, fin) catch |err| {
+                return Self.WT.sendWtStream(self.server, self.conn, self.stream, data, fin) catch |err| {
                     return mapStreamError(err);
                 };
             }
 
             pub fn sendAll(self: *Stream, data: []const u8, fin: bool) errors.WebTransportStreamError!void {
-                self.server.WT.sendWtStreamAll(self.conn, self.stream, data, fin) catch |err| {
+                Self.WT.sendWtStreamAll(self.server, self.conn, self.stream, data, fin) catch |err| {
                     return mapStreamError(err);
                 };
             }
@@ -202,7 +202,7 @@ pub fn Api(comptime Server: type) type {
         pub fn createSession(
             server: *Self,
             conn: *connection.Connection,
-            req_state: ?*Self.RequestState,
+            req_state: ?*Self.RequestStateType,
             state: *h3.WebTransportSessionState,
         ) !*Session {
             if (state.session_ctx) |ptr| {

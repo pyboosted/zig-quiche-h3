@@ -95,7 +95,11 @@ pub const Connection = struct {
 
     // Atomic request cap management using compare-and-swap
     pub fn tryAcquireRequest(self: *Connection, cap: usize) bool {
-        if (cap == 0) return true; // No limit
+        if (cap == 0) {
+            _ = self.active_requests.fetchAdd(1, .acq_rel);
+            std.debug.print("[DEBUG] tryAcquireRequest: acquired slot (unbounded, new count={})\n", .{self.active_requests.load(.acquire)});
+            return true; // No limit, but track for balanced release
+        }
 
         var observed = self.active_requests.load(.acquire);
         while (true) {
@@ -137,7 +141,11 @@ pub const Connection = struct {
 
     // Atomic download cap management
     pub fn tryAcquireDownload(self: *Connection, cap: usize) bool {
-        if (cap == 0) return true; // No limit
+        if (cap == 0) {
+            _ = self.active_downloads.fetchAdd(1, .acq_rel);
+            std.debug.print("[DEBUG] tryAcquireDownload: acquired slot (unbounded, new count={})\n", .{self.active_downloads.load(.acquire)});
+            return true; // No limit, but track for balanced release
+        }
 
         var observed = self.active_downloads.load(.acquire);
         while (true) {

@@ -11,6 +11,8 @@ pub const RouteDef = struct {
     on_headers: ?http.handler.OnHeaders = null,
     on_body_chunk: ?http.handler.OnBodyChunk = null,
     on_body_complete: ?http.handler.OnBodyComplete = null,
+    on_wt_session: ?http.handler.OnWebTransportSession = null,
+    on_wt_datagram: ?http.handler.OnWebTransportDatagram = null,
 };
 
 const LiteralEntry = core.LiteralEntry;
@@ -49,8 +51,8 @@ pub fn compileRoutes(comptime routes: []const RouteDef) type {
                         .on_headers = r.on_headers,
                         .on_body_chunk = r.on_body_chunk,
                         .on_body_complete = r.on_body_complete,
-                        .on_wt_session = null,
-                        .on_wt_datagram = null,
+                        .on_wt_session = r.on_wt_session,
+                        .on_wt_datagram = r.on_wt_datagram,
                     } };
                     i += 1;
                 }
@@ -75,8 +77,8 @@ pub fn compileRoutes(comptime routes: []const RouteDef) type {
                             .on_headers = r.on_headers,
                             .on_body_chunk = r.on_body_chunk,
                             .on_body_complete = r.on_body_complete,
-                            .on_wt_session = null,
-                            .on_wt_datagram = null,
+                            .on_wt_session = r.on_wt_session,
+                            .on_wt_datagram = r.on_wt_datagram,
                         },
                     };
                     off += segs_len;
@@ -150,6 +152,8 @@ pub const StreamOpts = struct {
     on_body_chunk: ?http.handler.OnBodyChunk = null,
     on_body_complete: ?http.handler.OnBodyComplete = null,
     on_h3_dgram: ?http.handler.OnH3Datagram = null,
+    on_wt_session: ?http.handler.OnWebTransportSession = null,
+    on_wt_datagram: ?http.handler.OnWebTransportDatagram = null,
 };
 
 pub fn route(method: http.Method, pattern: []const u8, handler: http.Handler) RouteDef {
@@ -199,6 +203,8 @@ pub fn ROUTE_OPTS(comptime method: http.Method, comptime pattern: []const u8, ha
         .on_body_chunk = opts.on_body_chunk,
         .on_body_complete = opts.on_body_complete,
         .on_h3_dgram = opts.on_h3_dgram,
+        .on_wt_session = opts.on_wt_session,
+        .on_wt_datagram = opts.on_wt_datagram,
     };
 }
 

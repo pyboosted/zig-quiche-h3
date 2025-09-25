@@ -113,8 +113,9 @@ pub const QuicServer = struct {
     const H3Core = @import("h3_core.zig");
     const H3 = H3Core.Impl(@This());
     const WTCore = @import("webtransport.zig");
-    const WT = WTCore.Impl(@This());
-    const WTApi = wt_api.Api(@This());
+    pub const WT = WTCore.Impl(@This());
+    pub const WTApi = wt_api.Api(@This());
+    pub const RequestStateType = RequestState;
 
     pub const StreamKey = conn_state.StreamKey;
     pub const StreamKeyContext = conn_state.StreamKeyContext;
@@ -305,7 +306,7 @@ pub const QuicServer = struct {
         self.event_loop.startTimer(self.flush_timer.?, 0.0, 0.0);
     }
 
-    fn destroyWtSessionState(
+    pub fn destroyWtSessionState(
         self: *QuicServer,
         conn: *connection.Connection,
         session_id: u64,
@@ -316,13 +317,13 @@ pub const QuicServer = struct {
         _ = self.wt.sessions.remove(.{ .conn = conn, .session_id = session_id });
         _ = self.wt.dgram_map.remove(.{ .conn = conn, .flow_id = flow_id });
 
-        var stream_keys = std.ArrayList(StreamKey).init(self.allocator);
-        defer stream_keys.deinit();
+        var stream_keys = std.ArrayListUnmanaged(StreamKey){};
+        defer stream_keys.deinit(self.allocator);
 
         var stream_it = self.wt.streams.iterator();
         while (stream_it.next()) |entry| {
             if (entry.key_ptr.conn == conn and entry.value_ptr.*.session_id == session_id) {
-                stream_keys.append(entry.key_ptr.*) catch {};
+                stream_keys.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
 
@@ -358,20 +359,20 @@ pub const QuicServer = struct {
         self.wt.dgrams_sent += 1;
     }
 
-    fn dirName(dir: h3.WebTransportSession.StreamDir) []const u8 {
+    fn dirName(dir: wt_capsules.StreamDir) []const u8 {
         return switch (dir) {
             .bidi => "bidi",
             .uni => "uni",
         };
     }
 
-    fn recordLegacySessionAccept(self: *QuicServer) void {
+    pub fn recordLegacySessionAccept(self: *QuicServer) void {
         self.wt.capsules_sent_total += 1;
         self.wt.legacy_session_accept_sent += 1;
         server_logging.infof(self, "WT capsule sent: SESSION_ACCEPT (legacy)\n", .{});
     }
 
-    fn recordCapsuleSent(self: *QuicServer, capsule: wt_capsules.Capsule) void {
+    pub fn recordCapsuleSent(self: *QuicServer, capsule: wt_capsules.Capsule) void {
         self.wt.capsules_sent_total += 1;
         switch (capsule) {
             .close_session => |close_capsule| {

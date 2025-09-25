@@ -28,6 +28,10 @@ pub const ClientConfig = struct {
     connect_timeout_ms: u64 = 10_000,
     enable_webtransport: bool = false,
     request_timeout_ms: u64 = 30_000,
+    wt_max_outgoing_uni: u64 = 0,
+    wt_max_outgoing_bidi: u64 = 0,
+    wt_stream_recv_queue_len: usize = 32,
+    wt_stream_recv_buffer_bytes: usize = 256 * 1024,
 
     pub fn validate(self: *const ClientConfig) !void {
         if (self.alpn_protocols.len == 0) return error.EmptyAlpnList;
@@ -50,6 +54,7 @@ pub const ClientConfig = struct {
         }
         if (self.debug_log_throttle == 0) return error.InvalidDebugThrottle;
         if (self.connect_timeout_ms == 0) return error.InvalidConnectTimeout;
+        if (self.wt_stream_recv_buffer_bytes == 0) return error.InvalidWtStreamBuffer;
     }
 
     pub fn ensureQlogDir(self: *const ClientConfig) !void {

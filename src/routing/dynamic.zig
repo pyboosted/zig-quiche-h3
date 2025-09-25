@@ -11,6 +11,8 @@ pub const RouteDef = struct {
     on_headers: ?http.handler.OnHeaders = null,
     on_body_chunk: ?http.handler.OnBodyChunk = null,
     on_body_complete: ?http.handler.OnBodyComplete = null,
+    on_wt_session: ?http.handler.OnWebTransportSession = null,
+    on_wt_datagram: ?http.handler.OnWebTransportDatagram = null,
 };
 
 pub const Builder = struct {
@@ -45,8 +47,8 @@ pub const Builder = struct {
             .on_headers = def.on_headers,
             .on_body_chunk = def.on_body_chunk,
             .on_body_complete = def.on_body_complete,
-            .on_wt_session = null,
-            .on_wt_datagram = null,
+            .on_wt_session = def.on_wt_session,
+            .on_wt_datagram = def.on_wt_datagram,
         };
         if (core.isStaticPath(pat_copy)) {
             try self.lits.append(self.allocator, .{ .path = pat_copy, .method = def.method, .route = fr });
@@ -106,6 +108,8 @@ pub const Builder = struct {
             .on_body_chunk = opts.on_body_chunk,
             .on_body_complete = opts.on_body_complete,
             .on_h3_dgram = opts.on_h3_dgram,
+            .on_wt_session = opts.on_wt_session,
+            .on_wt_datagram = opts.on_wt_datagram,
         });
         return self;
     }
@@ -136,6 +140,8 @@ pub const Builder = struct {
         on_body_chunk: ?http.handler.OnBodyChunk = null,
         on_body_complete: ?http.handler.OnBodyComplete = null,
         on_h3_dgram: ?http.handler.OnH3Datagram = null,
+        on_wt_session: ?http.handler.OnWebTransportSession = null,
+        on_wt_datagram: ?http.handler.OnWebTransportDatagram = null,
     };
 
     pub fn streaming(self: *Builder, pattern: []const u8, opts: StreamingOpts) !*Builder {
@@ -149,6 +155,8 @@ pub const Builder = struct {
             .on_body_chunk = opts.on_body_chunk,
             .on_body_complete = opts.on_body_complete,
             .on_h3_dgram = opts.on_h3_dgram,
+            .on_wt_session = opts.on_wt_session,
+            .on_wt_datagram = opts.on_wt_datagram,
         });
         return self;
     }

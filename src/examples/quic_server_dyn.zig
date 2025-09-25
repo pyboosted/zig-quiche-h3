@@ -76,6 +76,7 @@ pub fn main() !void {
     bptr = try bptr.streaming("/upload/stream", .{ .on_headers = handlers.uploadStreamOnHeaders, .on_body_chunk = handlers.uploadStreamOnChunk, .on_body_complete = handlers.uploadStreamOnComplete });
     bptr = try bptr.streaming("/upload/echo", .{ .on_headers = handlers.uploadEchoOnHeaders, .on_body_chunk = handlers.uploadEchoOnChunk, .on_body_complete = handlers.uploadEchoOnComplete });
     _ = try bptr.getWithOpts("/h3dgram/echo", handlers.h3dgramEchoHandler, .{ .on_h3_dgram = handlers.h3dgramEchoCallback });
+    _ = try bptr.routeWithOpts(.CONNECT, "/wt/echo", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtEchoSessionHandler });
 
     var dyn = try builder.build();
     defer dyn.deinit();

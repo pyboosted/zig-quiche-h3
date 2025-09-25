@@ -157,6 +157,80 @@ pub fn h3dgramEchoCallback(_: *http.Request, res: *http.Response, payload: []con
     };
 }
 
+pub fn wtConnectInfoHandler(_: *http.Request, res: *http.Response) http.HandlerError!void {
+    res.status(@intFromEnum(http.Status.BadRequest)) catch return error.InternalServerError;
+    res.header(http.Headers.ContentType, http.MimeTypes.TextPlain) catch return error.InternalServerError;
+    res.writeAll(
+        "WebTransport requires Extended CONNECT requests with :protocol = webtransport\n",
+    ) catch |err| switch (err) {
+        error.StreamBlocked => return error.StreamBlocked,
+        else => return error.InternalServerError,
+    };
+    res.end(null) catch |err| switch (err) {
+        error.StreamBlocked => return error.StreamBlocked,
+        else => return error.InternalServerError,
+    };
+}
+
+pub fn wtEchoSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
+    const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+
+    session.setDatagramHandler(wtEchoDatagram);
+
+    if (session.server.wt.enable_streams) {
+        session.setStreamDataHandler(wtEchoStreamData) catch |err| switch (err) {
+            error.InvalidState => {},
+            else => return err,
+        };
+        session.setStreamClosedHandler(wtStreamClosed) catch |err| switch (err) {
+            error.InvalidState => {},
+            else => return err,
+        };
+        session.setUniOpenHandler(wtUniOpen) catch |err| switch (err) {
+            error.InvalidState => {},
+            else => return err,
+        };
+        if (session.server.wt.enable_bidi) {
+            session.setBidiOpenHandler(wtBidiOpen) catch |err| switch (err) {
+                error.InvalidState => {},
+                else => return err,
+            };
+        }
+    }
+
+    try session.accept(.{});
+}
+
+fn wtEchoDatagram(session_ptr: *anyopaque, payload: []const u8) http.WebTransportError!void {
+    const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+    if (payload.len == 0) return;
+    try session.sendDatagram(payload);
+}
+
+fn wtUniOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!void {
+    // No-op: stream data handler handles echoing.
+    return;
+}
+
+fn wtBidiOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!void {
+    return;
+}
+
+fn wtEchoStreamData(stream_ptr: *anyopaque, data: []const u8, fin: bool) http.WebTransportStreamError!void {
+    const stream = QuicServer.WebTransportStream.fromOpaque(stream_ptr);
+    if (data.len > 0) {
+        _ = try stream.send(data, false);
+    }
+    if (fin) {
+        _ = try stream.send(&[_]u8{}, true);
+    }
+}
+
+fn wtStreamClosed(stream_ptr: *anyopaque) void {
+    const stream = QuicServer.WebTransportStream.fromOpaque(stream_ptr);
+    std.debug.print("[server] WT stream {d} closed\n", .{stream.id()});
+}
+
 pub fn registerEventLoop(loop: *event_loop.EventLoop) void {
     g_event_loop = loop;
 }

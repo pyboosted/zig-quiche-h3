@@ -16,6 +16,7 @@ pub const BodyChunkResult = M.BodyChunkResult;
 
 // Export the helpers module for convenience
 pub const helpers = @import("client/helpers.zig");
+pub const webtransport = @import("client/webtransport.zig");
 
 // Export the connection pool
 pub const ConnectionPool = @import("client/pool.zig").ConnectionPool;

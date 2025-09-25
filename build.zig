@@ -1,5 +1,41 @@
 const std = @import("std");
 
+fn dirHasFile(path: []const u8, file: []const u8) bool {
+    var dir = std.fs.openDirAbsolute(path, .{}) catch return false;
+    defer dir.close();
+    _ = dir.statFile(file) catch return false;
+    return true;
+}
+
+fn detectLibevIncludeDir() ?[]const u8 {
+    const candidates = [_][]const u8{
+        "/opt/homebrew/include",
+        "/opt/homebrew/opt/libev/include",
+        "/usr/local/include",
+        "/usr/include",
+    };
+    for (candidates) |candidate| {
+        if (dirHasFile(candidate, "ev.h")) return candidate;
+    }
+    return null;
+}
+
+fn detectLibevLibDir() ?[]const u8 {
+    const candidates = [_][]const u8{
+        "/opt/homebrew/lib",
+        "/opt/homebrew/opt/libev/lib",
+        "/usr/local/lib",
+        "/usr/lib",
+    };
+    const files = [_][]const u8{ "libev.dylib", "libev.so", "libev.a" };
+    for (candidates) |candidate| {
+        for (files) |name| {
+            if (dirHasFile(candidate, name)) return candidate;
+        }
+    }
+    return null;
+}
+
 fn linkCommon(
     target: std.Build.ResolvedTarget,
     comp: *std.Build.Step.Compile,
@@ -59,9 +95,16 @@ pub fn build(b: *std.Build) void {
     const build_quiche = b.option(bool, "build-quiche", "Build Cloudflare quiche (Cargo) before linking") orelse !use_system_quiche;
     const quiche_profile = b.option([]const u8, "quiche-profile", "Cargo profile for quiche: release|debug") orelse "release";
     const link_ssl = b.option(bool, "link-ssl", "Link libssl and libcrypto (for OpenSSL/quictls builds)") orelse false;
-    const with_libev = b.option(bool, "with-libev", "Link libev system library") orelse false;
-    const libev_include_dir = b.option([]const u8, "libev-include", "Path to libev headers (dir containing ev.h)");
-    const libev_lib_dir = b.option([]const u8, "libev-lib", "Path to libev library directory (contains libev.dylib/.so)");
+    const with_libev_opt = b.option(bool, "with-libev", "Link libev system library");
+    const libev_include_opt = b.option([]const u8, "libev-include", "Path to libev headers (dir containing ev.h)");
+    const libev_lib_opt = b.option([]const u8, "libev-lib", "Path to libev library directory (contains libev.dylib/.so)");
+
+    const detected_libev_include = detectLibevIncludeDir();
+    const detected_libev_lib = detectLibevLibDir();
+
+    const with_libev = with_libev_opt orelse (detected_libev_include != null and detected_libev_lib != null);
+    const libev_include_dir = libev_include_opt orelse (if (with_libev) detected_libev_include else null);
+    const libev_lib_dir = libev_lib_opt orelse (if (with_libev) detected_libev_lib else null);
     const quiche_include_dir = b.option([]const u8, "quiche-include", "Path to quiche headers (quiche/include)") orelse "third_party/quiche/quiche/include";
     const with_webtransport = b.option(bool, "with-webtransport", "Enable WebTransport (experimental)") orelse true;
     const log_level_opt = b.option([]const u8, "log-level", "Default app log level: error|warn|info|debug|trace") orelse "warn";
@@ -435,6 +478,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        wt_client_mod.addImport("client", client_mod);
         wt_client_mod.addImport("quiche", quiche_ffi_mod);
         wt_client_mod.addImport("h3", h3_mod);
         wt_client_mod.addImport("net", udp_mod);
@@ -451,10 +495,13 @@ pub fn build(b: *std.Build) void {
 
         b.installArtifact(wt_client);
 
+        const wt_client_build_step = b.step("wt-client", "Build the WebTransport test client (Experimental)");
+        wt_client_build_step.dependOn(&wt_client.step);
+
         const run_wt_client = b.addRunArtifact(wt_client);
         if (b.args) |args| run_wt_client.addArgs(args);
-        const wt_client_step = b.step("wt-client", "Run the WebTransport test client (Experimental)");
-        wt_client_step.dependOn(&run_wt_client.step);
+        const wt_client_run_step = b.step("wt-client-run", "Run the WebTransport test client (Experimental)");
+        wt_client_run_step.dependOn(&run_wt_client.step);
     }
 
     // Pool client example: demonstrate connection pooling
