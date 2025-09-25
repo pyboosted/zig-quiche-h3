@@ -4,7 +4,7 @@
 - `build.zig` — Zig build script; installs to `zig-out/bin/`.
 - `src/` — main code:
   - `net/` (event loop, UDP), `quic/` (config, connection, server), `routing/` (generator, dynamic builder, matcher core), `http/` (request/response surfaces), `ffi/` (quiche C FFI shims).
-  - `examples/`: `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`, `wt_client.zig` (WebTransport stub client).
+  - `examples/`: `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`, `wt_client.zig` (WebTransport example client).
   - `main.zig` (smoke binary), `tests.zig` (unit tests).
 - `third_party/quiche/` — Cloudflare quiche submodule (do not edit).
 - `docs/` — design notes; `qlogs/` — QUIC qlog output.
@@ -20,7 +20,7 @@
   - UDP echo: `zig build echo` → send with `nc -u localhost 4433`.
   - QUIC server: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`.
   - QUIC DATAGRAM echo: `zig build quic-dgram-echo -- --port 4433 --cert … --key …`.
-  - WebTransport client stub (no real handshake): `zig build wt-client -- https://host:port/wt/echo`.
+  - WebTransport client (datagram echo): `zig build wt-client -- https://host:port/wt/echo`.
 - Tests: `zig build test` or `zig test src/tests.zig`.
 
 ## Coding Style & Naming Conventions
@@ -66,7 +66,7 @@
   - Smoke: `zig build run`
   - QUIC server: `zig build quic-server -- --port 4433 --cert … --key …`
   - QUIC dgram echo: `zig build quic-dgram-echo -- --port 4433 --cert … --key …`
-  - WebTransport stub client: `zig build wt-client -- https://127.0.0.1:4433/wt/echo`
+  - WebTransport client (datagram echo): `zig build wt-client -- https://127.0.0.1:4433/wt/echo`
 - Coding surfaces to prefer:
   - `Response` API: `status/header/write/writeAll/end/sendTrailers` (not the deprecated sendHead/sendBody docs pattern).
   - H3 DATAGRAM: `router.routeH3Datagram()` and `Response.sendH3Datagram()`; QUIC DATAGRAM via `QuicServer.onDatagram()` and `sendDatagram()`.

@@ -1,0 +1,54 @@
+# WebTransport Client Quickstart
+
+This guide demonstrates how to exercise the WebTransport client helpers that were introduced in Milestone 4. The examples assume you are running from the repository root on macOS or Linux with Zig 0.15.1 installed. Because the QUIC runtime currently depends on `libev`, make sure the `ev.h` headers are available (for example via `brew install libev` on macOS or your distribution package on Linux) or provide the appropriate `-Dwith-libev=true`, `-Dlibev-include=…`, and `-Dlibev-lib=…` build options.
+
+## 1. Build and Run the Example Server
+
+The bundled QUIC server exposes a `/wt/echo` route that accepts WebTransport sessions, echoes DATAGRAM payloads, and mirrors stream data. Enable the feature gate before launching:
+
+```bash
+export H3_WEBTRANSPORT=1
+zig build quic-server -- \
+  --port 4433 \
+  --cert third_party/quiche/quiche/examples/cert.crt \
+  --key third_party/quiche/quiche/examples/cert.key
+```
+
+The server listens on `127.0.0.1:4433`, auto-accepts WebTransport sessions, and will log stream closures and DATAGRAM activity when debug logging is enabled.
+
+## 2. Run the WebTransport Client
+
+The current `wt_client` example negotiates a session, sends a single DATAGRAM payload (`"WebTransport datagram #0"`), and waits for the echo before exiting. Run it alongside the example server:
+
+```bash
+zig build wt-client -- https://127.0.0.1:4433/wt/echo
+```
+
+Use `--quiet` to suppress the progress logs when scripting. The process exits with code `0` once the datagram echo is observed; failures (handshake, timeout, or send issues) return a non-zero status and print the reason to stderr.
+
+## 3. Client Configuration Knobs
+
+Milestone 4 added WebTransport-centric knobs to `QuicClient` configuration:
+
+- `wt_max_outgoing_uni` / `wt_max_outgoing_bidi` – soft caps for locally initiated streams.
+- `wt_stream_recv_queue_len` / `wt_stream_recv_buffer_bytes` – backpressure limits for buffered inbound stream data.
+
+The example client uses conservative defaults. To try different limits, clone the repo and edit the `ClientConfig` literal in `src/examples/wt_client.zig`.
+
+## 4. Expected Output
+
+With the server echo route running, the client prints lines similar to:
+
+```
+WebTransport session established!
+Session ID: 4
+Sent: WebTransport datagram #0
+Received echo: WebTransport datagram #0
+WebTransport test complete!
+```
+
+Use `--quiet` when scripting to suppress these logs.
+
+## 5. Cleanup
+
+The example exits automatically after the first successful echo (or when the timeout expires). Restart it to send another datagram. To customise payloads or stream behaviour, adjust `src/examples/wt_client.zig` and rebuild.

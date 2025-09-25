@@ -15,7 +15,7 @@ This repository explores how far Zig can push Cloudflare’s [`quiche`](https://
   - `routing/` — compile-time generator, dynamic builder, and `matcher_core.zig` shared literal/segment tables.
   - `http/` — request/response surfaces, status tables, JSON helpers, streaming extensions.
   - `ffi/` — Zig wrappers around `quiche.h` plus the lightweight shared library exports.
-  - `examples/` — `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`, `wt_client.zig` (WT stub client).
+  - `examples/` — `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`, `wt_client.zig` (WebTransport example client for datagram echo).
   - `tests.zig` — umbrella unit-test entry point (also prints quiche version during `zig build test`).
 - `third_party/quiche/` — git submodule (upstream quiche sources).
 - `docs/` — specification, implementation plan, and deeper design logs.
@@ -52,7 +52,7 @@ Useful flags:
   - JSON routes: `… -- https://127.0.0.1:4433/api/users --no-verify --alpn h3`
 - QUIC DATAGRAM echo: `zig build quic-dgram-echo -Dwith-libev=true …`
 - HTTP/3 DATAGRAM route: `GET /h3dgram/echo` echoes H3 DATAGRAM payloads when the peer negotiates the extension
-- WebTransport stub client: `zig build wt-client -Dwith-libev=true … -- --url https://127.0.0.1:4433/wt/echo`
+- WebTransport example client (datagram echo): `zig build wt-client -Dwith-libev=true … -- --url https://127.0.0.1:4433/wt/echo`
 
 ### Tests
 - Unit tests / smoke: `zig build test`
@@ -90,7 +90,7 @@ Useful flags:
 - Routing tables (static and dynamic) share literal/segment storage built by `matcher_core.zig`, keeping method precedence and wildcards unified.
 - Request/response surfaces use arena allocators per request, optional typed JSON responses, and backpressure-aware streaming helpers.
 - DATAGRAM handling supports both raw QUIC and HTTP/3 flows; per-connection buffers minimize allocations under typical MTUs.
-- WebTransport: Extended CONNECT negotiation, basic session bookkeeping, and stub client for tests (stream support still experimental).
+- WebTransport: Extended CONNECT negotiation, basic session bookkeeping, and an example client for datagram echo (stream support still experimental).
 - Shared library export (`zigquicheh3`) enables quick FFI smoke checks; Bun E2E harness covers core routes, datagrams, and stress runs.
 
 See `docs/spec.md` for the detailed technical specification and `docs/plan.md` for milestone-by-milestone progress. `AGENTS.md` captures contributor expectations.
