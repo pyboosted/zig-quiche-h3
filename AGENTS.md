@@ -77,4 +77,5 @@
   - Run `zig fmt .` before proposing patches.
   - Keep links canonical (no tracking params) in docs.
   - Use `rg` for fast code/search and read files in ≤250‑line chunks when tooling limits apply.
+  - Qlogs land in `qlogs/` by default (client traces under `qlogs/client/`); clean the directory between captures when debugging.
   - Roadmap: M9 introduces a dedicated HTTP/3/WebTransport client harness; interop/perf tuning and Bun FFI milestones now follow it.

@@ -52,3 +52,9 @@ Use `--quiet` when scripting to suppress these logs.
 ## 5. Cleanup
 
 The example exits automatically after the first successful echo (or when the timeout expires). Restart it to send another datagram. To customise payloads or stream behaviour, adjust `src/examples/wt_client.zig` and rebuild.
+
+## 6. Collecting QLOG Traces
+
+- The example server writes one qlog per connection to the `qlogs/` directory (the filename is derived from the connection ID). Pass `--no_qlog` to the server binary if you want to disable capture.
+- The client stores its trace in `qlogs/client/` so you can inspect both perspectives of the same run. Remove the directory between experiments to keep captures organised.
+- Visualise the traces with [qvis](https://qvis.edm.uhasselt.be/) or another qlog viewer to inspect handshake progress, datagram exchanges, and shutdown semantics.

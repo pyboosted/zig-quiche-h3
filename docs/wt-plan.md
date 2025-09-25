@@ -4,7 +4,7 @@
 - **Server** – `processH3` recognises Extended CONNECT when `H3_WEBTRANSPORT=1`, instantiates `WebTransportSession`/`WebTransportSessionState`, tracks them in `sessions`/`dgram_map`, and routes datagrams plus uni/bidi stream lifecycle callbacks through `src/quic/server/webtransport.zig`. Teardown is centralised via `destroyWtSessionState`, with metrics/logging covering session + capsule paths.
 - **Client** – `QuicClient.openWebTransport` negotiates sessions, retries DATAGRAM sends on backpressure, exposes helper APIs for outbound uni/bidi streams, and handles SESSION_ACCEPT/SESSION_CLOSE capsules. Peer-initiated streams remain unsupported by quiche's C FFI; the CLI surface still only exposes URL/quiet toggles despite the richer internals.
 - **Examples & Tooling** – `/wt/echo` route is wired into both static and dynamic server binaries with echo handlers in `src/examples/quic_server_handlers.zig`. `zig build wt-client` now runs a real WebTransport client that drives the QUIC event loop, emits a datagram, and drains echoes before exit.
-- **Tests & Automation** – Bun harness includes `tests/e2e/basic/wt_session.test.ts`, which builds the client, verifies handshake success, exercises datagram echo, and validates the feature gate. `src/tests.zig` now hosts an in-process server/client round trip that drives the QUIC loop and asserts datagram echoes.
+- **Tests & Automation** – Bun harness includes `tests/e2e/basic/wt_session.test.ts`, which builds the client, verifies handshake success, exercises datagram echo, and validates the feature gate. `src/tests.zig` includes an in-process server/client round trip that drives the QUIC loop and asserts datagram echoes.
 - **Feature Toggles** – Build flag `-Dwith-webtransport` (default true) and env vars `H3_WEBTRANSPORT`, `H3_WT_STREAMS`, `H3_WT_BIDI` still gate functionality; handlers defensively check `enable_streams`/`enable_bidi` before wiring callbacks.
 
 ## Goals
@@ -102,13 +102,13 @@
 - [x] Extend Zig unit tests (`src/tests.zig`) for session handshake and datagram round trip using in-process server/client.
 - [x] Add Bun E2E tests exercising datagrams and streams; enable stress mode with `H3_STRESS=1`.
 - [x] Document usage in README/docs (flags, example commands, troubleshooting).
-- [ ] Collect qlogs for interop runs.
+- [x] Collect qlogs for interop runs.
 
 **Progress (2025-09-25)**
 - `src/examples/wt_client.zig` now negotiates a real session, sends a datagram, and drains echoes via the shared event loop; CLI exposure is limited to URL/quiet flags.
 - `/wt/echo` is routed in both static and dynamic server binaries with handlers that echo datagrams and mirror stream data when enabled.
 - `tests/e2e/basic/wt_session.test.ts` builds the client, verifies session establishment, checks datagram echo, and asserts the feature gate; the stress suite runs multiple clients when `H3_STRESS=1`.
-- README and `docs/webtransport_client.md` now reflect the current datagram-only client; qlog capture guidance remains on the backlog.
+- README and `docs/webtransport_client.md` now reflect the current datagram-only client and explain how to collect server/client qlogs for debugging.
 - Added an in-process `WebTransport in-process handshake and datagram echo` test that drives both server and client event loops and asserts session/datagram success.
 
 **Exit Criteria**

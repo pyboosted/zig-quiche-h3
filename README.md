@@ -54,6 +54,11 @@ Useful flags:
 - HTTP/3 DATAGRAM route: `GET /h3dgram/echo` echoes H3 DATAGRAM payloads when the peer negotiates the extension
 - WebTransport example client (datagram echo): `zig build wt-client -Dwith-libev=true … -- --url https://127.0.0.1:4433/wt/echo`
 
+### Qlog Capture
+- Servers write per-connection traces under `qlogs/` by default (`--no_qlog` disables this). Each filename is derived from the connection ID for easy lookup in [qvis](https://qvis.edm.uhasselt.be/).
+- The WebTransport example client stores its traces under `qlogs/client/`; clean the directory between runs if you want a fresh capture set.
+- When iterating locally, pair `zig build quic-server …` with `zig build wt-client …` and inspect both qlogs to diagnose handshake or datagram flows.
+
 ### Tests
 - Unit tests / smoke: `zig build test`
 - Bun E2E (requires Bun 1.x):

@@ -54,6 +54,7 @@ pub fn main() !void {
         .wt_max_outgoing_bidi = 4,
         .wt_stream_recv_queue_len = 64,
         .wt_stream_recv_buffer_bytes = 512 * 1024,
+        .qlog_dir = "qlogs/client",
     };
 
     var quic_client = try QuicClient.init(allocator, config);
