@@ -18,6 +18,7 @@
 - Rate limiting for downloads
 - TLS/CA configuration with custom CA bundle support (file and directory)
 - Debug logging with configurable throttling
+- QLOG capture documented; server outputs under `qlogs/`, example client under `qlogs/client/`
 - Comprehensive h3_client CLI example with argument parsing
 - h3_client curl-compat mode (--silent/-i/-o) and DATAGRAM auto-toggle for CLI workflows
 - **WebTransport support** (COMPLETED as of 2025-01-19):
@@ -401,9 +402,9 @@ pub const ConnectionPool = struct {
 
 #### 4.1 Test Coverage Targets
 - [ ] TLS with custom CA bundle
-- [ ] Plain QUIC datagrams
-- [ ] H3 datagrams with flow-id
-- [ ] WebTransport session establishment
+- [x] Plain QUIC datagrams
+- [x] H3 datagrams with flow-id
+- [x] WebTransport session establishment
 - [ ] Concurrent requests (50+)
 - [ ] Large file transfers (1GB+)
 - [ ] Connection failures and retries
@@ -443,11 +444,11 @@ pub const ConnectionPool = struct {
 - [✓] Client connects to local server successfully
 - [✓] CA bundle configuration works with custom paths
 - [✓] Debug logging can be enabled and respects throttling
-- [ ] Both QUIC and H3 datagrams work (only H3 works currently)
+- [x] Both QUIC and H3 datagrams work end-to-end
 
 ### Phase 2 Complete
-- [ ] WebTransport sessions can be established
-- [ ] WT datagrams can be sent/received
+- [x] WebTransport sessions can be established
+- [x] WT datagrams can be sent/received
 - [ ] Client-initiated streams work in WT sessions
 
 ### Phase 3 Complete
