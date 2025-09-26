@@ -48,10 +48,12 @@ Useful flags:
 ### Examples
 - UDP echo: `zig build echo -Dwith-libev=true …` then send using `nc -u localhost 4433`
 - HTTP/3 server: `zig build quic-server -Dwith-libev=true … -- --port 4433 --cert … --key …`
-  - Exercise with quiche client: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`
-  - JSON routes: `… -- https://127.0.0.1:4433/api/users --no-verify --alpn h3`
+  - Test with native h3-client: `./zig-out/bin/h3-client --url https://127.0.0.1:4433/ --insecure`
+  - JSON routes: `./zig-out/bin/h3-client --url https://127.0.0.1:4433/api/users --insecure`
+- HTTP/3 client: `zig build h3-client -Dwith-libev=true …` builds the native HTTP/3 client with curl-compatible interface
 - QUIC DATAGRAM echo: `zig build quic-dgram-echo -Dwith-libev=true …`
 - HTTP/3 DATAGRAM route: `GET /h3dgram/echo` echoes H3 DATAGRAM payloads when the peer negotiates the extension
+  - Test with h3-client: `./zig-out/bin/h3-client --url https://127.0.0.1:4433/h3dgram/echo --h3-dgram --dgram-payload "test" --insecure`
 - WebTransport example client (datagram echo): `zig build wt-client -Dwith-libev=true … -- --url https://127.0.0.1:4433/wt/echo`
 
 ### Qlog Capture

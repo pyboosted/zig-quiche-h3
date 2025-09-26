@@ -44,9 +44,9 @@
   - Run: `bun test tests/e2e`
   - Stress: `H3_STRESS=1 bun test`
   - Coverage: `bun test --coverage`
-  - Note: curl helpers require HTTP/3 support; otherwise use the quiche client above.
+  - Note: E2E tests use the native h3-client via zigClient wrapper for all HTTP/3 testing.
   - WebTransport suite currently relies on the stub `wt-client`; a full client harness is planned in the roadmap (Milestone 9).
-- Manual: run the server, then from `third_party/quiche`: `cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`.
+- Manual testing: run the server, then test with native h3-client: `./zig-out/bin/h3-client --url https://127.0.0.1:4433/ --insecure`.
 
 ## Commit & Pull Request Guidelines
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `build:`, `chore:`. Keep subject ≤72 chars; add a body for context.

@@ -58,7 +58,8 @@
   - QUIC server: `zig build quic-server -- --port 4433 --cert third_party/quiche/quiche/examples/cert.crt --key third_party/quiche/quiche/examples/cert.key`
   - QUIC dgram echo: `zig build quic-dgram-echo -- --port 4433 --cert … --key …`
   - WebTransport stub client: `zig build wt-client -- https://127.0.0.1:4433/wt/echo`
-  - Client: `cd third_party/quiche && cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify --alpn h3`
+  - Native HTTP/3 client: `./zig-out/bin/h3-client --url https://127.0.0.1:4433/ --insecure`
+  - Test H3 DATAGRAMs: `./zig-out/bin/h3-client --url https://127.0.0.1:4433/h3dgram/echo --h3-dgram --dgram-payload "test" --insecure`
 - Code conventions:
   - Use the `Response` API (`status`, `header`, `write`/`writeAll`, `end`, `sendTrailers`); avoid the older `sendHead/sendBody` style in docs.
   - H3 DATAGRAM: gate on peer support and use `Response.sendH3Datagram()`; route via `router.routeH3Datagram()`.

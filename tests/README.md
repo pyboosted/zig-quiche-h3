@@ -5,8 +5,8 @@ This directory contains comprehensive end-to-end tests for the zig-quiche-h3 HTT
 ## Prerequisites
 
 - **Bun** >= 1.0.0
-- **curl** with HTTP/3 support (check with `curl --version | grep -i http3`)
-- **zig-quiche-h3 server** built with libev support
+- **zig-quiche-h3 server and client** built with libev support
+- Native h3-client binary (built automatically with the server)
 
 ## Setup
 
@@ -75,8 +75,9 @@ bun test e2e/basic/http3_basic.test.ts
 e2e/
 ├── helpers/           # Test utilities and server management
 │   ├── spawnServer.ts # Server lifecycle management
-│   ├── curlClient.ts  # HTTP/3 client wrapper
-│   ├── quicheClient.ts # quiche-client wrapper
+│   ├── zigClient.ts   # Native h3-client wrapper (curl-compatible)
+│   ├── curlClient.ts  # Legacy curl wrapper (not actively used)
+│   ├── quicheClient.ts # Legacy quiche-client wrapper (not actively used)
 │   └── testUtils.ts   # File generation, validation utilities
 ├── basic/             # Basic HTTP/3 functionality
 │   ├── http3_basic.test.ts  # Connection, headers, methods
@@ -149,12 +150,14 @@ H3_DEBUG=1 bun test e2e/basic/http3_basic.test.ts
 # Start server manually
 ../zig-out/bin/quic-server --port 4433 --cert ../third_party/quiche/quiche/examples/cert.crt --key ../third_party/quiche/quiche/examples/cert.key
 
-# Test with curl
-curl -sk --http3-only https://127.0.0.1:4433/ -i
+# Test with native h3-client
+../zig-out/bin/h3-client --url https://127.0.0.1:4433/ --insecure
 
-# Test with quiche-client  
-cd ../third_party/quiche
-cargo run -p quiche_apps --bin quiche-client -- https://127.0.0.1:4433/ --no-verify
+# Test JSON routes
+../zig-out/bin/h3-client --url https://127.0.0.1:4433/api/users --insecure
+
+# Test H3 DATAGRAMs
+../zig-out/bin/h3-client --url https://127.0.0.1:4433/h3dgram/echo --h3-dgram --dgram-payload "test" --insecure
 ```
 
 ## CI Integration
@@ -176,13 +179,13 @@ rm -rf ../zig-out ../zig-cache
 zig build -Dwith-libev=true -Dlibev-include=$(brew --prefix libev)/include -Dlibev-lib=$(brew --prefix libev)/lib
 ```
 
-### curl HTTP/3 Support Missing
+### Native Client Not Built
 ```bash
-# Check curl features
-curl --version | grep -i http3
+# Build h3-client
+zig build h3-client -Dwith-libev=true -Dlibev-include=$(brew --prefix libev)/include -Dlibev-lib=$(brew --prefix libev)/lib
 
-# Install curl with HTTP/3 (macOS)
-brew install curl --with-quiche
+# Verify client is available
+../zig-out/bin/h3-client --help
 ```
 
 ### Port Conflicts

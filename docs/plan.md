@@ -382,9 +382,17 @@ Interop checklist (for next milestone):
 - Observe qlogs for stream events; compare with expectations.
 
 Milestone 9: Full HTTP/3/WebTransport Client Harness
-Status: Planned — see `docs/client-spec.md`
-- Implement a Zig (or mixed) client that exercises streaming bodies, DATAGRAMs, and WebTransport flows against the server.
-- Provide CLI/batch modes for regression tests and load generation; mirror the example routes to cover edge cases (range, trailers, WT streams, etc.).
+Status: ✅ Completed (h3-client implemented)
+- ✅ Implemented native h3-client with curl-compatible interface
+- ✅ Full HTTP/3 support with GET, POST, HEAD, DELETE methods
+- ✅ H3 DATAGRAM support with flow-id handling
+- ✅ WebTransport session establishment (basic support)
+- ✅ Streaming bodies with rate limiting
+- ✅ Concurrent requests via --repeat flag
+- ✅ Integration with E2E test suite via zigClient wrapper
+- ✅ Replaced all curl/quiche-client usage in tests
+- See `docs/h3-client-usage.md` for full documentation
+- Note: Client architecture needs refactoring per `docs/client-refactoring-plan.md`
 - Serve as the foundation for Bun FFI validation (client side) and future benchmarking.
 
 Milestone 10: Interop + Performance (shifted after M9)
