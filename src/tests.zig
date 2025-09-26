@@ -192,6 +192,23 @@ fn waitForStreamLimits(server: *QuicServer, session: *client_mod.webtransport.We
     return error.Timeout;
 }
 
+fn waitForServerStreamCount(
+    server: *QuicServer,
+    client: *client_mod.QuicClient,
+    expected: usize,
+    timeout_ms: u32,
+) !void {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        pump(server, client, 10);
+        if (server.wt.streams.count() == expected) {
+            return;
+        }
+        remaining -= 10;
+    }
+    return error.Timeout;
+}
+
 fn openUniStreamWithRetry(
     server: *QuicServer,
     session: *client_mod.webtransport.WebTransportSession,
@@ -241,6 +258,29 @@ fn closeStreamWithRetry(
     var remaining: i64 = @intCast(timeout_ms);
     while (remaining > 0) {
         stream.close() catch |err| switch (err) {
+            client_mod.ClientError.StreamBlocked => {
+                pump(server, session.client, 10);
+                remaining -= 10;
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+    return error.Timeout;
+}
+
+fn sendStreamAllWithRetry(
+    server: *QuicServer,
+    session: *client_mod.webtransport.WebTransportSession,
+    stream: *client_mod.webtransport.WebTransportSession.Stream,
+    payload: []const u8,
+    fin: bool,
+    timeout_ms: u32,
+) !void {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        stream.sendAll(payload, fin) catch |err| switch (err) {
             client_mod.ClientError.StreamBlocked => {
                 pump(server, session.client, 10);
                 remaining -= 10;
@@ -467,14 +507,20 @@ test "WebTransport client stream allocation and cleanup" {
     const uni_dir = uni_stream.dir;
     const uni_id = uni_stream.stream_id;
     try std.testing.expect(uni_dir == .uni);
+    try sendStreamAllWithRetry(server, session, uni_stream, "client->server uni", false, 5_000);
+    try waitForServerStreamCount(server, session.client, 1, 1_000);
     try closeStreamWithRetry(server, session, uni_stream, 5_000);
+    try waitForServerStreamCount(server, session.client, 0, 1_000);
     session.removeStreamInternal(uni_id, true);
 
     const bidi_stream = try openBidiStreamWithRetry(server, session, 5_000);
     const bidi_dir = bidi_stream.dir;
     const bidi_id = bidi_stream.stream_id;
     try std.testing.expect(bidi_dir == .bidi);
+    try sendStreamAllWithRetry(server, session, bidi_stream, "client->server bidi", false, 5_000);
+    try waitForServerStreamCount(server, session.client, 1, 1_000);
     try closeStreamWithRetry(server, session, bidi_stream, 5_000);
+    try waitForServerStreamCount(server, session.client, 0, 1_000);
     session.removeStreamInternal(bidi_id, true);
 
     while (session.streams.count() > 0) {

@@ -103,16 +103,12 @@ pub fn Impl(comptime S: type) type {
         pub fn processReadableWtStreams(self: *Self, conn: *connection.Connection) !void {
             if (!Self.WithWT) return;
             while (conn.conn.streamReadableNext()) |stream_id| {
-                if ((stream_id & 0x2) == 1) {
-                    if ((stream_id & 0x1) != 0) continue;
+                if ((stream_id & 0x1) != 0) continue;
+                const is_uni = (stream_id & 0x2) != 0;
+                if (is_uni) {
                     const client_uni_index = stream_id >> 2;
                     if (client_uni_index < 3) continue;
-                } else {
-                    if ((stream_id & 0x1) != 0) continue;
                 }
-                if ((stream_id & 0x1) != 0) continue;
-                const client_uni_index = stream_id >> 2;
-                if (client_uni_index < 3) continue;
 
                 const sk = Self.StreamKey{ .conn = conn, .stream_id = stream_id };
                 if (self.wt.streams.get(sk)) |wt_stream| {
@@ -139,7 +135,7 @@ pub fn Impl(comptime S: type) type {
                     continue;
                 }
 
-                if ((stream_id & 0x2) == 1) {
+                if (is_uni) {
                     try tryBindIncomingUniStream(self, conn, stream_id);
                 } else if (self.wt.enable_bidi) {
                     try tryBindIncomingBidiStream(self, conn, stream_id);

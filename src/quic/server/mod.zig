@@ -820,6 +820,11 @@ pub const QuicServer = struct {
             var k: usize = 0;
             while (k < touched_len) : (k += 1) {
                 const cconn = touched[k];
+                if (self.wt.enable_streams and self.wt.sessions.count() > 0) {
+                    WT.processReadableWtStreams(self, cconn) catch |err| {
+                        std.debug.print("Error pre-processing WT streams: {}\n", .{err});
+                    };
+                }
                 if (cconn.http3 != null) {
                     H3.processH3(self, cconn) catch |err| {
                         if (err != quiche.h3.Error.StreamBlocked) {
