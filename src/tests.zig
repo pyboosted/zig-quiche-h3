@@ -704,12 +704,10 @@ test "WebTransport client stream allocation and cleanup" {
     const server_bidi_payload = "server->client bidi";
     try sendServerStreamAllWithRetry(server, session, server_bidi_stream, server_bidi_payload, true, 5_000);
     pump(server, session.client, 20);
-    if (waitForClientStreamData(server, session, bidi_stream, server_bidi_payload, 2_000)) |_| {
-        // server->client payload received on existing bidi stream
-    } else |err| {
-        // TODO(justincase): once server-initiated WT stream writes are implemented, expect success
+    waitForClientStreamData(server, session, bidi_stream, server_bidi_payload, 2_000) catch |err| {
+        // TODO(justincase): once server-initiated WT stream writes are implemented, expect success instead of timeout.
         try std.testing.expectEqual(error.Timeout, err);
-    }
+    };
 
     try closeStreamWithRetry(server, session, bidi_stream, 5_000);
     try waitForStreamClosed(server, session.client, bidi_id, 2_000);
