@@ -118,6 +118,65 @@ fn unsetEnvRaw(name: []const u8) !void {
     }
 }
 
+const StreamEvents = struct {
+    allocator: std.mem.Allocator,
+    payloads: std.AutoHashMap(u64, std.ArrayListUnmanaged(u8)),
+    closed: std.AutoHashMap(u64, bool),
+
+    fn init(allocator: std.mem.Allocator) StreamEvents {
+        return .{
+            .allocator = allocator,
+            .payloads = std.AutoHashMap(u64, std.ArrayList(u8)).init(allocator),
+            .closed = std.AutoHashMap(u64, bool).init(allocator),
+        };
+    }
+
+    fn deinit(self: *StreamEvents) void {
+        var it = self.payloads.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.*.deinit(self.allocator);
+        }
+        self.payloads.deinit();
+        self.closed.deinit();
+    }
+
+    fn append(self: *StreamEvents, stream_id: u64, data: []const u8) !void {
+        const entry = try self.payloads.getOrPut(stream_id);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = std.ArrayListUnmanaged(u8){};
+        }
+        try entry.value_ptr.*.appendSlice(self.allocator, data);
+    }
+
+    fn payloadEquals(self: *StreamEvents, stream_id: u64, expected: []const u8) bool {
+        if (self.payloads.get(stream_id)) |list_ptr| {
+            return std.mem.eql(u8, list_ptr.items, expected);
+        }
+        return false;
+    }
+
+    fn markClosed(self: *StreamEvents, stream_id: u64) !void {
+        try self.closed.put(stream_id, true);
+    }
+
+    fn isClosed(self: *StreamEvents, stream_id: u64) bool {
+        return self.closed.get(stream_id) orelse false;
+    }
+};
+
+var stream_events: ?StreamEvents = null;
+
+fn initStreamEvents(allocator: std.mem.Allocator) !void {
+    stream_events = StreamEvents.init(allocator);
+}
+
+fn deinitStreamEvents() void {
+    if (stream_events) |*events| {
+        events.deinit();
+        stream_events = null;
+    }
+}
+
 fn pump(server: *QuicServer, client: *client_mod.QuicClient, duration_ms: u32) void {
     const deadline = std.time.milliTimestamp() + @as(i64, @intCast(duration_ms));
     while (std.time.milliTimestamp() < deadline) {
@@ -203,6 +262,41 @@ fn waitForServerStreamCount(
         pump(server, client, 10);
         if (server.wt.streams.count() == expected) {
             return;
+        }
+        remaining -= 10;
+    }
+    return error.Timeout;
+}
+
+fn waitForStreamPayload(
+    server: *QuicServer,
+    client: *client_mod.QuicClient,
+    stream_id: u64,
+    expected: []const u8,
+    timeout_ms: u32,
+) !void {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        pump(server, client, 10);
+        if (stream_events) |*events| {
+            if (events.payloadEquals(stream_id, expected)) return;
+        }
+        remaining -= 10;
+    }
+    return error.Timeout;
+}
+
+fn waitForStreamClosed(
+    server: *QuicServer,
+    client: *client_mod.QuicClient,
+    stream_id: u64,
+    timeout_ms: u32,
+) !void {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        pump(server, client, 10);
+        if (stream_events) |*events| {
+            if (events.isClosed(stream_id)) return;
         }
         remaining -= 10;
     }
@@ -313,11 +407,24 @@ fn wtSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransport
     try session.accept(.{});
 }
 
-fn wtNoopStreamData(_: *anyopaque, _: []const u8, _: bool) http.WebTransportStreamError!void {
-    return;
+fn wtTrackingStreamData(stream_ptr: *anyopaque, data: []const u8, fin: bool) http.WebTransportStreamError!void {
+    if (stream_events) |*events| {
+        const stream = QuicServer.WebTransportStream.fromOpaque(stream_ptr);
+        if (data.len > 0) {
+            events.append(stream.id(), data) catch return error.OutOfMemory;
+        }
+        if (fin) {
+            events.markClosed(stream.id()) catch return error.OutOfMemory;
+        }
+    }
 }
 
-fn wtNoopStreamClosed(_: *anyopaque) void {}
+fn wtTrackingStreamClosed(stream_ptr: *anyopaque) void {
+    if (stream_events) |*events| {
+        const stream = QuicServer.WebTransportStream.fromOpaque(stream_ptr);
+        events.markClosed(stream.id()) catch {};
+    }
+}
 
 fn wtNoopUniOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!void {
     return;
@@ -330,11 +437,11 @@ fn wtNoopBidiOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!voi
 fn wtStreamSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
     const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
     session.setDatagramHandler(wtEchoDatagram);
-    session.setStreamDataHandler(wtNoopStreamData) catch |err| switch (err) {
+    session.setStreamDataHandler(wtTrackingStreamData) catch |err| switch (err) {
         error.InvalidState => {},
         else => return err,
     };
-    session.setStreamClosedHandler(wtNoopStreamClosed) catch |err| switch (err) {
+    session.setStreamClosedHandler(wtTrackingStreamClosed) catch |err| switch (err) {
         error.InvalidState => {},
         else => return err,
     };
@@ -443,6 +550,9 @@ test "WebTransport in-process handshake and datagram echo" {
 test "WebTransport client stream allocation and cleanup" {
     const allocator = std.testing.allocator;
 
+    try initStreamEvents(allocator);
+    defer deinitStreamEvents();
+
     var wt_guard = try EnvGuard.init(allocator, "H3_WEBTRANSPORT", "1");
     defer wt_guard.deinit();
 
@@ -507,9 +617,12 @@ test "WebTransport client stream allocation and cleanup" {
     const uni_dir = uni_stream.dir;
     const uni_id = uni_stream.stream_id;
     try std.testing.expect(uni_dir == .uni);
-    try sendStreamAllWithRetry(server, session, uni_stream, "client->server uni", false, 5_000);
+    const uni_payload = "client->server uni";
+    try sendStreamAllWithRetry(server, session, uni_stream, uni_payload, false, 5_000);
+    try waitForStreamPayload(server, session.client, uni_id, uni_payload, 2_000);
     try waitForServerStreamCount(server, session.client, 1, 1_000);
     try closeStreamWithRetry(server, session, uni_stream, 5_000);
+    try waitForStreamClosed(server, session.client, uni_id, 2_000);
     try waitForServerStreamCount(server, session.client, 0, 1_000);
     session.removeStreamInternal(uni_id, true);
 
@@ -517,9 +630,12 @@ test "WebTransport client stream allocation and cleanup" {
     const bidi_dir = bidi_stream.dir;
     const bidi_id = bidi_stream.stream_id;
     try std.testing.expect(bidi_dir == .bidi);
-    try sendStreamAllWithRetry(server, session, bidi_stream, "client->server bidi", false, 5_000);
+    const bidi_payload = "client->server bidi";
+    try sendStreamAllWithRetry(server, session, bidi_stream, bidi_payload, false, 5_000);
+    try waitForStreamPayload(server, session.client, bidi_id, bidi_payload, 2_000);
     try waitForServerStreamCount(server, session.client, 1, 1_000);
     try closeStreamWithRetry(server, session, bidi_stream, 5_000);
+    try waitForStreamClosed(server, session.client, bidi_id, 2_000);
     try waitForServerStreamCount(server, session.client, 0, 1_000);
     session.removeStreamInternal(bidi_id, true);
 
