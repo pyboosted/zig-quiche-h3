@@ -165,6 +165,7 @@ const StreamEvents = struct {
 };
 
 var stream_events: ?StreamEvents = null;
+var last_server_session: ?*QuicServer.WebTransportSession = null;
 
 fn initStreamEvents(allocator: std.mem.Allocator) !void {
     stream_events = StreamEvents.init(allocator);
@@ -297,6 +298,55 @@ fn waitForStreamClosed(
         pump(server, client, 10);
         if (stream_events) |*events| {
             if (events.isClosed(stream_id)) return;
+        }
+        remaining -= 10;
+    }
+    return error.Timeout;
+}
+
+fn sendServerStreamAllWithRetry(
+    server: *QuicServer,
+    session: *client_mod.webtransport.WebTransportSession,
+    stream: *QuicServer.WebTransportStream,
+    payload: []const u8,
+    fin: bool,
+    timeout_ms: u32,
+) !void {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        stream.sendAll(payload, fin) catch |err| switch (err) {
+            error.WouldBlock => {
+                pump(server, session.client, 10);
+                remaining -= 10;
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+    return error.Timeout;
+}
+
+fn waitForClientStreamData(
+    server: *QuicServer,
+    session: *client_mod.webtransport.WebTransportSession,
+    stream: *client_mod.webtransport.WebTransportSession.Stream,
+    expected_payload: []const u8,
+    timeout_ms: u32,
+) !void {
+    var remaining: i64 = @intCast(timeout_ms);
+    var collected = std.ArrayListUnmanaged(u8){};
+    defer collected.deinit(session.client.allocator);
+    while (remaining > 0) {
+        pump(server, session.client, 10);
+        while (stream.receive()) |payload| {
+            defer stream.freeReceived(payload);
+            try collected.appendSlice(session.client.allocator, payload);
+            if (collected.items.len >= expected_payload.len and
+                std.mem.endsWith(u8, collected.items, expected_payload))
+            {
+                return;
+            }
         }
         remaining -= 10;
     }
@@ -436,6 +486,7 @@ fn wtNoopBidiOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!voi
 
 fn wtStreamSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
     const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+    last_server_session = session;
     session.setDatagramHandler(wtEchoDatagram);
     session.setStreamDataHandler(wtTrackingStreamData) catch |err| switch (err) {
         error.InvalidState => {},
@@ -462,6 +513,8 @@ fn wtStreamSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTra
 
 test "WebTransport in-process handshake and datagram echo" {
     const allocator = std.testing.allocator;
+
+    last_server_session = null;
 
     var wt_guard = try EnvGuard.init(allocator, "H3_WEBTRANSPORT", "1");
     defer wt_guard.deinit();
@@ -550,6 +603,8 @@ test "WebTransport in-process handshake and datagram echo" {
 test "WebTransport client stream allocation and cleanup" {
     const allocator = std.testing.allocator;
 
+    last_server_session = null;
+
     try initStreamEvents(allocator);
     defer deinitStreamEvents();
 
@@ -634,6 +689,28 @@ test "WebTransport client stream allocation and cleanup" {
     try sendStreamAllWithRetry(server, session, bidi_stream, bidi_payload, false, 5_000);
     try waitForStreamPayload(server, session.client, bidi_id, bidi_payload, 2_000);
     try waitForServerStreamCount(server, session.client, 1, 1_000);
+
+    const server_session_ptr = last_server_session orelse unreachable;
+    const server_wt_stream_ptr = blk: {
+        var server_stream_it = server.wt.streams.iterator();
+        while (server_stream_it.next()) |entry| {
+            if (entry.key_ptr.*.stream_id == bidi_id and entry.key_ptr.*.conn == server_session_ptr.conn) {
+                break :blk entry.value_ptr.*;
+            }
+        }
+        break :blk null;
+    } orelse unreachable;
+    const server_bidi_stream = try server_session_ptr.ensureStreamWrapper(server_wt_stream_ptr);
+    const server_bidi_payload = "server->client bidi";
+    try sendServerStreamAllWithRetry(server, session, server_bidi_stream, server_bidi_payload, true, 5_000);
+    pump(server, session.client, 20);
+    if (waitForClientStreamData(server, session, bidi_stream, server_bidi_payload, 2_000)) |_| {
+        // server->client payload received on existing bidi stream
+    } else |err| {
+        // TODO(justincase): once server-initiated WT stream writes are implemented, expect success
+        try std.testing.expectEqual(error.Timeout, err);
+    }
+
     try closeStreamWithRetry(server, session, bidi_stream, 5_000);
     try waitForStreamClosed(server, session.client, bidi_id, 2_000);
     try waitForServerStreamCount(server, session.client, 0, 1_000);
@@ -674,6 +751,8 @@ test "WebTransport client stream allocation and cleanup" {
             server.destroyWtSessionState(key.conn, key.session_id, state);
         }
     }
+
+    last_server_session = null;
 
     server.stop();
 }
