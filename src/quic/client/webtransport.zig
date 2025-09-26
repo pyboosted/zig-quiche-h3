@@ -273,7 +273,7 @@ pub const WebTransportSession = struct {
             },
         }
 
-        const stream_id = self.client.allocLocalStreamId(dir);
+        const stream_id = try self.client.allocLocalStreamId(dir);
         const stream = try self.client.allocator.create(Stream);
         stream.* = .{
             .session = self,

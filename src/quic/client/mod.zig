@@ -114,6 +114,7 @@ pub const ClientError = error{
     ConnectionGoingAway,
     InvalidRequest,
     InvalidState,
+    StreamBlocked,
     RequestTimeout,
     DatagramNotEnabled,
     DatagramTooLarge,
@@ -318,6 +319,8 @@ pub const QuicClient = struct {
 
     // WebTransport sessions (stream_id -> session)
     wt_sessions: AutoHashMap(u64, *webtransport.WebTransportSession),
+    // Active WebTransport streams (stream_id -> stream wrapper)
+    wt_streams: AutoHashMap(u64, *webtransport.WebTransportSession.Stream),
 
     // Plain QUIC datagram callback
     on_quic_datagram: ?*const fn (client: *QuicClient, payload: []const u8, user: ?*anyopaque) void = null,
@@ -340,6 +343,8 @@ pub const QuicClient = struct {
 
     // Track most recent request stream ID for comparison
     last_request_stream_id: ?u64 = null,
+    next_wt_uni_stream_id: u64 = 0,
+    next_wt_bidi_stream_id: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, cfg: ClientConfig) !*QuicClient {
         try cfg.validate();
@@ -460,6 +465,9 @@ pub const QuicClient = struct {
             .log_context = log_ctx,
             .requests = AutoHashMap(u64, *FetchState).init(allocator),
             .wt_sessions = AutoHashMap(u64, *webtransport.WebTransportSession).init(allocator),
+            .wt_streams = AutoHashMap(u64, *webtransport.WebTransportSession.Stream).init(allocator),
+            .next_wt_uni_stream_id = 0,
+            .next_wt_bidi_stream_id = 0,
         };
 
         self.timeout_timer = try loop.createTimer(onQuicTimeout, self);
@@ -527,12 +535,17 @@ pub const QuicClient = struct {
             }
             session.pending_datagrams.deinit(self.allocator);
             session.capsule_buffer.deinit(self.allocator);
+            var stream_it = session.streams.iterator();
+            while (stream_it.next()) |stream_entry| {
+                _ = self.wt_streams.remove(stream_entry.key_ptr.*);
+            }
             session.streams.deinit();
             // Free the allocated path before destroying the session
             self.allocator.free(session.path);
             self.allocator.destroy(session);
         }
         self.wt_sessions.deinit();
+        self.wt_streams.deinit();
 
         if (self.socket) |*sock| {
             sock.close();
@@ -953,6 +966,7 @@ pub const QuicClient = struct {
         const stream_id = h3_conn.sendRequest(conn, headers, false) catch {
             return ClientError.H3Error;
         };
+        self.last_request_stream_id = stream_id;
 
         // Create WebTransport session
         const session = self.allocator.create(webtransport.WebTransportSession) catch {
@@ -1949,6 +1963,10 @@ pub const QuicClient = struct {
             }
             session.pending_datagrams.deinit(self.allocator);
             session.capsule_buffer.deinit(self.allocator);
+            var stream_it_cleanup = session.streams.iterator();
+            while (stream_it_cleanup.next()) |entry| {
+                _ = self.wt_streams.remove(entry.key_ptr.*);
+            }
             session.streams.deinit();
             self.allocator.free(session.path);
             // Remove from map
@@ -1956,6 +1974,82 @@ pub const QuicClient = struct {
             // Destroy the session struct
             self.allocator.destroy(session);
         }
+    }
+
+    pub fn ensureStreamWritable(self: *QuicClient, stream_id: u64, hint: usize) void {
+        const conn = self.requireConn() catch return;
+        _ = conn.streamWritable(stream_id, hint) catch {};
+    }
+
+    pub fn allocLocalStreamId(
+        self: *QuicClient,
+        dir: h3.WebTransportSession.StreamDir,
+    ) ClientError!u64 {
+        switch (dir) {
+            .uni => {
+                if (self.next_wt_uni_stream_id == 0) {
+                    self.next_wt_uni_stream_id = self.deriveNextUniStreamId();
+                }
+                const stream_id = self.next_wt_uni_stream_id;
+                self.next_wt_uni_stream_id += 4;
+                return stream_id;
+            },
+            .bidi => {
+                if (self.next_wt_bidi_stream_id == 0) {
+                    self.next_wt_bidi_stream_id = self.deriveNextBidiStreamId();
+                }
+                const stream_id = self.next_wt_bidi_stream_id;
+                self.next_wt_bidi_stream_id += 4;
+                return stream_id;
+            },
+        }
+    }
+
+    pub fn updateStreamIndicesFor(self: *QuicClient, stream_id: u64) void {
+        switch (stream_id & 0x3) {
+            0 => {
+                const next = stream_id + 4;
+                if (self.next_wt_bidi_stream_id <= stream_id) {
+                    self.next_wt_bidi_stream_id = next;
+                }
+            },
+            2 => {
+                const next = stream_id + 4;
+                if (self.next_wt_uni_stream_id <= stream_id) {
+                    self.next_wt_uni_stream_id = next;
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn deriveNextUniStreamId(self: *QuicClient) u64 {
+        var next: u64 = 14; // skip control/qpack streams (2,6,10)
+        var it = self.wt_streams.iterator();
+        while (it.next()) |entry| {
+            const stream_id = entry.key_ptr.*;
+            if ((stream_id & 0x3) == 2) {
+                const candidate = stream_id + 4;
+                if (candidate > next) next = candidate;
+            }
+        }
+        return next;
+    }
+
+    fn deriveNextBidiStreamId(self: *QuicClient) u64 {
+        var next: u64 = if (self.last_request_stream_id) |last|
+            last + 4
+        else
+            0;
+        var it = self.wt_streams.iterator();
+        while (it.next()) |entry| {
+            const stream_id = entry.key_ptr.*;
+            if ((stream_id & 0x3) == 0) {
+                const candidate = stream_id + 4;
+                if (candidate > next) next = candidate;
+            }
+        }
+        return next;
     }
 
     fn failFetch(self: *QuicClient, stream_id: u64, err: ClientError) void {

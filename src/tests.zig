@@ -17,6 +17,7 @@ const QuicServer = _server_tests.QuicServer;
 const routing_gen = @import("routing_gen");
 const routing_api = @import("routing");
 const http = @import("http");
+const wt_capsules = http.webtransport_capsules;
 
 extern fn quiche_version() [*:0]const u8;
 
@@ -178,6 +179,80 @@ fn waitForDatagram(server: *QuicServer, session: *client_mod.webtransport.WebTra
     return error.Timeout;
 }
 
+fn waitForStreamLimits(server: *QuicServer, session: *client_mod.webtransport.WebTransportSession, timeout_ms: u32) !void {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        pump(server, session.client, 10);
+        const info = session.acceptInfo();
+        if ((info.max_streams_uni orelse 0) > 0 and (info.max_streams_bidi orelse 0) > 0) {
+            return;
+        }
+        remaining -= 10;
+    }
+    return error.Timeout;
+}
+
+fn openUniStreamWithRetry(
+    server: *QuicServer,
+    session: *client_mod.webtransport.WebTransportSession,
+    timeout_ms: u32,
+) !*client_mod.webtransport.WebTransportSession.Stream {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        const stream = session.openUniStream() catch |err| switch (err) {
+            client_mod.ClientError.StreamBlocked => {
+                pump(server, session.client, 10);
+                remaining -= 10;
+                continue;
+            },
+            else => return err,
+        };
+        return stream;
+    }
+    return error.Timeout;
+}
+
+fn openBidiStreamWithRetry(
+    server: *QuicServer,
+    session: *client_mod.webtransport.WebTransportSession,
+    timeout_ms: u32,
+) !*client_mod.webtransport.WebTransportSession.Stream {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        const stream = session.openBidiStream() catch |err| switch (err) {
+            client_mod.ClientError.StreamBlocked => {
+                pump(server, session.client, 10);
+                remaining -= 10;
+                continue;
+            },
+            else => return err,
+        };
+        return stream;
+    }
+    return error.Timeout;
+}
+
+fn closeStreamWithRetry(
+    server: *QuicServer,
+    session: *client_mod.webtransport.WebTransportSession,
+    stream: *client_mod.webtransport.WebTransportSession.Stream,
+    timeout_ms: u32,
+) !void {
+    var remaining: i64 = @intCast(timeout_ms);
+    while (remaining > 0) {
+        stream.close() catch |err| switch (err) {
+            client_mod.ClientError.StreamBlocked => {
+                pump(server, session.client, 10);
+                remaining -= 10;
+                continue;
+            },
+            else => return err,
+        };
+        return;
+    }
+    return error.Timeout;
+}
+
 fn wtConnectInfoHandler(_: *http.Request, res: *http.Response) http.HandlerError!void {
     try res.status(@intFromEnum(http.Status.BadRequest));
     res.end(null) catch |err| switch (err) {
@@ -196,6 +271,46 @@ fn wtSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransport
     const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
     session.setDatagramHandler(wtEchoDatagram);
     try session.accept(.{});
+}
+
+fn wtNoopStreamData(_: *anyopaque, _: []const u8, _: bool) http.WebTransportStreamError!void {
+    return;
+}
+
+fn wtNoopStreamClosed(_: *anyopaque) void {}
+
+fn wtNoopUniOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!void {
+    return;
+}
+
+fn wtNoopBidiOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!void {
+    return;
+}
+
+fn wtStreamSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
+    const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+    session.setDatagramHandler(wtEchoDatagram);
+    session.setStreamDataHandler(wtNoopStreamData) catch |err| switch (err) {
+        error.InvalidState => {},
+        else => return err,
+    };
+    session.setStreamClosedHandler(wtNoopStreamClosed) catch |err| switch (err) {
+        error.InvalidState => {},
+        else => return err,
+    };
+    session.setUniOpenHandler(wtNoopUniOpen) catch |err| switch (err) {
+        error.InvalidState => {},
+        else => return err,
+    };
+    session.setBidiOpenHandler(wtNoopBidiOpen) catch |err| switch (err) {
+        error.InvalidState => {},
+        else => return err,
+    };
+    const caps = [_]wt_capsules.Capsule{
+        .{ .max_streams = .{ .dir = wt_capsules.StreamDir.uni, .maximum = 16 } },
+        .{ .max_streams = .{ .dir = wt_capsules.StreamDir.bidi, .maximum = 16 } },
+    };
+    try session.accept(.{ .extra_capsules = &caps });
 }
 
 test "WebTransport in-process handshake and datagram echo" {
@@ -264,6 +379,122 @@ test "WebTransport in-process handshake and datagram echo" {
 
     try std.testing.expectEqual(@as(u64, 1), session.datagrams_sent);
     try std.testing.expectEqual(@as(u64, 1), session.datagrams_received);
+
+    client.deinit();
+    client_deinited = true;
+    var remaining_ms: i64 = 500;
+    while (remaining_ms > 0 and server.wt.sessions.count() > 0) {
+        pumpServer(server, 10);
+        remaining_ms -= 10;
+    }
+
+    if (server.wt.sessions.count() > 0) {
+        var it = server.wt.sessions.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const state = entry.value_ptr.*;
+            server.destroyWtSessionState(key.conn, key.session_id, state);
+        }
+    }
+
+    server.stop();
+}
+
+test "WebTransport client stream allocation and cleanup" {
+    const allocator = std.testing.allocator;
+
+    var wt_guard = try EnvGuard.init(allocator, "H3_WEBTRANSPORT", "1");
+    defer wt_guard.deinit();
+
+    var streams_guard = try EnvGuard.init(allocator, "H3_WT_STREAMS", "1");
+    defer streams_guard.deinit();
+
+    var bidi_guard = try EnvGuard.init(allocator, "H3_WT_BIDI", "1");
+    defer bidi_guard.deinit();
+
+    const server_cfg = ServerConfig{
+        .bind_addr = "127.0.0.1",
+        .bind_port = 45448,
+        .cert_path = "third_party/quiche/quiche/examples/cert.crt",
+        .key_path = "third_party/quiche/quiche/examples/cert.key",
+        .alpn_protocols = &.{"h3"},
+        .enable_debug_logging = false,
+        .qlog_dir = null,
+        .enable_dgram = true,
+        .dgram_recv_queue_len = 128,
+        .dgram_send_queue_len = 128,
+    };
+
+    const RouterT = routing_gen.compileMatcherType(&[_]routing_gen.RouteDef{
+        routing_gen.ROUTE_OPTS(.CONNECT, "/wt/stream-test", wtConnectInfoHandler, .{ .on_wt_session = wtStreamSessionHandler }),
+    });
+    var router = RouterT{};
+    const matcher: routing_api.Matcher = router.matcher();
+
+    var server = try QuicServer.init(allocator, server_cfg, matcher);
+    defer server.deinit();
+
+    try server.bind();
+
+    const QuicClient = client_mod.QuicClient;
+    const client_config = ClientConfig{
+        .alpn_protocols = &.{"h3"},
+        .verify_peer = false,
+        .qlog_dir = null,
+        .enable_debug_logging = false,
+        .connect_timeout_ms = 5_000,
+        .enable_dgram = true,
+        .dgram_recv_queue_len = 128,
+        .dgram_send_queue_len = 128,
+        .enable_webtransport = true,
+        .wt_stream_recv_queue_len = 64,
+        .wt_stream_recv_buffer_bytes = 512 * 1024,
+    };
+
+    var client = try QuicClient.init(allocator, client_config);
+    var client_deinited = false;
+    defer if (!client_deinited) client.deinit();
+
+    const endpoint = ServerEndpoint{ .host = "127.0.0.1", .port = server_cfg.bind_port };
+
+    try client.connect(endpoint);
+
+    const session = try client.openWebTransport("/wt/stream-test");
+
+    try waitForSessionEstablished(server, session, 1_000);
+
+    const uni_stream = try openUniStreamWithRetry(server, session, 5_000);
+    const uni_dir = uni_stream.dir;
+    const uni_id = uni_stream.stream_id;
+    try std.testing.expect(uni_dir == .uni);
+    try closeStreamWithRetry(server, session, uni_stream, 5_000);
+    session.removeStreamInternal(uni_id, true);
+
+    const bidi_stream = try openBidiStreamWithRetry(server, session, 5_000);
+    const bidi_dir = bidi_stream.dir;
+    const bidi_id = bidi_stream.stream_id;
+    try std.testing.expect(bidi_dir == .bidi);
+    try closeStreamWithRetry(server, session, bidi_stream, 5_000);
+    session.removeStreamInternal(bidi_id, true);
+
+    while (session.streams.count() > 0) {
+        var it = session.streams.iterator();
+        if (it.next()) |entry| {
+            session.removeStreamInternal(entry.key_ptr.*, true);
+        }
+    }
+
+    while (session.client.wt_streams.count() > 0) {
+        var it = session.client.wt_streams.iterator();
+        if (it.next()) |entry| {
+            _ = session.client.wt_streams.remove(entry.key_ptr.*);
+        }
+    }
+
+    pump(server, session.client, 50);
+
+    try std.testing.expectEqual(@as(usize, 0), session.streams.count());
+    try std.testing.expectEqual(@as(usize, 0), session.client.wt_streams.count());
 
     client.deinit();
     client_deinited = true;
