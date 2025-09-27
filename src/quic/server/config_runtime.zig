@@ -150,21 +150,27 @@ pub fn applyRuntimeOverrides(
     };
 
     var enable_h3_dgram = cfg_eff.enable_dgram;
+    var dgram_overridden = false;
 
     if (std.process.getEnvVarOwned(allocator, "H3_ENABLE_DGRAM")) |env_val| {
         defer allocator.free(env_val);
         enable_h3_dgram = truthy.value(env_val);
+        dgram_overridden = true;
     } else |_| {}
 
     if (std.process.getEnvVarOwned(allocator, "H3_DGRAM_ECHO")) |env_val| {
         defer allocator.free(env_val);
         if (truthy.value(env_val)) {
             enable_h3_dgram = true;
+            dgram_overridden = true;
         }
     } else |_| {}
 
-    if (enable_h3_dgram) {
-        cfg_eff.enable_dgram = true;
+    if (dgram_overridden) {
+        cfg_eff.enable_dgram = enable_h3_dgram;
+    }
+
+    if (cfg_eff.enable_dgram) {
         if (cfg_eff.dgram_recv_queue_len == 0) cfg_eff.dgram_recv_queue_len = 1024;
         if (cfg_eff.dgram_send_queue_len == 0) cfg_eff.dgram_send_queue_len = 1024;
     }
