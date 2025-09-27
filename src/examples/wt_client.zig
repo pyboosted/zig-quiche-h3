@@ -20,6 +20,7 @@ const CliOptions = struct {
     quiet: bool = false,
     datagram_count: u32 = 1,
     payload_size: usize = 0,
+    expect_close: bool = false,
 };
 
 pub fn main() !void {
@@ -72,14 +73,42 @@ pub fn main() !void {
 
     try quic_client.connect(.{ .host = host_owned, .port = port });
 
-    const session = try quic_client.openWebTransport(path);
+    const session = quic_client.openWebTransport(path) catch |err| {
+        std.debug.print("[client] WebTransport connect failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
     const handshake = client.FetchHandle{ .client = quic_client, .stream_id = session.session_id };
-    var fetch = try handshake.await();
+    var fetch = handshake.await() catch |err| {
+        std.debug.print("[client] WebTransport handshake failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
     defer fetch.deinit(allocator);
 
     if (!cli.quiet) {
         std.debug.print("WebTransport session established!\n", .{});
         std.debug.print("Session ID: {d}\n", .{session.session_id});
+    }
+
+    if (cli.expect_close) {
+        var remaining: i64 = DEFAULT_WAIT_MS * 5;
+        while (remaining > 0 and session.state != .closed) {
+            const slice: u32 = if (remaining >= POLL_SLICE_MS) POLL_SLICE_MS else @intCast(remaining);
+            pumpClient(quic_client, slice);
+            remaining -= @intCast(slice);
+        }
+        if (session.state != .closed) {
+            std.debug.print("[client] session did not close within timeout\n", .{});
+            std.process.exit(1);
+        }
+        std.debug.print("[client] WebTransport session closed by peer\n", .{});
+        return;
+    }
+
+    if (cli.datagram_count == 0) {
+        if (!cli.quiet) {
+            std.debug.print("WebTransport session established (no datagrams requested)\n", .{});
+        }
+        return;
     }
 
     var send_index: u32 = 0;
@@ -92,11 +121,8 @@ pub fn main() !void {
     }
 
     var recv_index: u32 = 0;
-    const multiplier = std.math.clamp(
-        if (cli.datagram_count == 0) 1 else cli.datagram_count,
-        @as(u32, 1),
-        @as(u32, 3),
-    );
+    const effective_count: u32 = if (cli.datagram_count == 0) 1 else cli.datagram_count;
+    const multiplier: u32 = if (effective_count > 3) 3 else effective_count;
     var remaining_wait: u32 = DEFAULT_WAIT_MS * multiplier;
     while (recv_index < cli.datagram_count and remaining_wait > 0) {
         const slice = if (remaining_wait >= POLL_SLICE_MS) POLL_SLICE_MS else remaining_wait;
@@ -200,7 +226,6 @@ fn parseCli(argv: []const [:0]u8) CliError!CliOptions {
             if (i + 1 >= argv.len) return CliError.MissingUrlValue;
             const value = std.mem.sliceTo(argv[i + 1], 0);
             opts.datagram_count = std.fmt.parseInt(u32, value, 10) catch return CliError.InvalidNumber;
-            if (opts.datagram_count == 0) return CliError.InvalidNumber;
             i += 1;
             continue;
         }
@@ -208,7 +233,6 @@ fn parseCli(argv: []const [:0]u8) CliError!CliOptions {
         if (std.mem.startsWith(u8, arg, "--count=")) {
             const value = arg[8..];
             opts.datagram_count = std.fmt.parseInt(u32, value, 10) catch return CliError.InvalidNumber;
-            if (opts.datagram_count == 0) return CliError.InvalidNumber;
             continue;
         }
 
@@ -223,6 +247,11 @@ fn parseCli(argv: []const [:0]u8) CliError!CliOptions {
         if (std.mem.startsWith(u8, arg, "--payload-size=")) {
             const value = arg[15..];
             opts.payload_size = std.fmt.parseInt(usize, value, 10) catch return CliError.InvalidNumber;
+            continue;
+        }
+
+        if (std.mem.eql(u8, arg, "--expect-close")) {
+            opts.expect_close = true;
             continue;
         }
 
@@ -267,6 +296,7 @@ fn printUsage(program_name: [:0]const u8) void {
     std.debug.print("  -q, --quiet            Reduce log output\n", .{});
     std.debug.print("  --count <n>            Number of datagrams to send (default: 1)\n", .{});
     std.debug.print("  --payload-size <n>     Override datagram payload size in bytes\n", .{});
+    std.debug.print("  --expect-close         Treat peer-initiated close as success\n", .{});
 }
 
 fn parseUrl(url: []const u8, host_out: *[]const u8, port_out: *u16, path_out: *[]const u8) !void {

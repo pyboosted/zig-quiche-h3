@@ -76,6 +76,8 @@ pub fn main() !void {
         routing_gen.STREAM("/upload/echo", .{ .on_headers = handlers.uploadEchoOnHeaders, .on_body_chunk = handlers.uploadEchoOnChunk, .on_body_complete = handlers.uploadEchoOnComplete }),
         routing_gen.ROUTE_OPTS(.GET, "/h3dgram/echo", handlers.h3dgramEchoHandler, .{ .on_h3_dgram = handlers.h3dgramEchoCallback }),
         routing_gen.ROUTE_OPTS(.CONNECT, "/wt/echo", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtEchoSessionHandler }),
+        routing_gen.ROUTE_OPTS(.CONNECT, "/wt/close", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtCloseSessionHandler }),
+        routing_gen.ROUTE_OPTS(.CONNECT, "/wt/reject", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtRejectSessionHandler }),
     });
     var router = RouterT{};
     const matcher: routing.Matcher = router.matcher();

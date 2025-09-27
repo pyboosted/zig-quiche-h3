@@ -165,6 +165,45 @@ pub fn Api(comptime Server: type) type {
                 req_state.response.sendWebTransportClose(options.code, options.reason) catch |err| return mapSessionError(err);
                 self.server.recordCapsuleSent(capsule);
                 self.state.last_activity_ms = std.time.milliTimestamp();
+
+                // Signal the underlying H3 session that we are done sending data so
+                // the peer observes a FIN in addition to the CLOSE capsule.
+                self.state.session.close(options.code, options.reason) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        try self.deferClose(options);
+                        self.server.requestFlush();
+                        return;
+                    },
+                    else => return mapSessionError(err),
+                };
+
+                self.clearPendingClose();
+
+                // Ensure egress is flushed promptly so the CLOSE capsule and FIN
+                // are delivered without waiting for the next timer tick.
+                self.server.requestFlush();
+            }
+
+            fn deferClose(self: *Session, options: CloseOptions) errors.WebTransportError!void {
+                const req_state = self.request_state orelse return error.InvalidState;
+                if (req_state.pending_wt_close != null) return;
+
+                const arena_allocator = req_state.arena.allocator();
+                const reason_slice: []const u8 = if (options.reason.len == 0)
+                    ""
+                else
+                    try arena_allocator.dupe(u8, options.reason);
+
+                req_state.pending_wt_close = .{
+                    .code = options.code,
+                    .reason = reason_slice,
+                };
+            }
+
+            fn clearPendingClose(self: *Session) void {
+                if (self.request_state) |req_state| {
+                    req_state.pending_wt_close = null;
+                }
             }
         };
 

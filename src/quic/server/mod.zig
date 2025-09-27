@@ -25,6 +25,11 @@ const posix = std.posix;
 pub const WtHandshakeState = enum { none, pending, accepted, rejected };
 
 // Request state for streaming bodies
+pub const PendingWtClose = struct {
+    code: u32,
+    reason: []const u8,
+};
+
 pub const RequestState = struct {
     arena: std.heap.ArenaAllocator,
     request: http.Request,
@@ -59,6 +64,7 @@ pub const RequestState = struct {
     // MILESTONE-1: Datagram flow ID for WebTransport (negotiated or defaults to stream ID)
     wt_flow_id: ?u64 = null,
     wt_handshake_state: WtHandshakeState = .none,
+    pending_wt_close: ?PendingWtClose = null,
 };
 
 // WT uni-stream preface accumulator lives in the WT facade now

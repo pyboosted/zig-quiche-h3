@@ -11,6 +11,8 @@ const ServerConfig = @import("config").ServerConfig;
 const routing_gen = @import("routing_gen");
 const routing_api = @import("routing");
 const logging = @import("logging.zig");
+const http = @import("http");
+const wt_capsules = http.webtransport_capsules;
 
 const AutoHashMap = std.AutoHashMap;
 
@@ -331,6 +333,30 @@ pub const QuicClient = struct {
         sent: u64 = 0,
         received: u64 = 0,
         dropped_send: u64 = 0,
+    } = .{},
+
+    wt_capsules_sent_total: usize = 0,
+    wt_capsules_received_total: usize = 0,
+    wt_legacy_session_accept_received: usize = 0,
+    wt_capsules_sent: struct {
+        close_session: usize = 0,
+        drain_session: usize = 0,
+        wt_max_streams_bidi: usize = 0,
+        wt_max_streams_uni: usize = 0,
+        wt_streams_blocked_bidi: usize = 0,
+        wt_streams_blocked_uni: usize = 0,
+        wt_max_data: usize = 0,
+        wt_data_blocked: usize = 0,
+    } = .{},
+    wt_capsules_received: struct {
+        close_session: usize = 0,
+        drain_session: usize = 0,
+        wt_max_streams_bidi: usize = 0,
+        wt_max_streams_uni: usize = 0,
+        wt_streams_blocked_bidi: usize = 0,
+        wt_streams_blocked_uni: usize = 0,
+        wt_max_data: usize = 0,
+        wt_data_blocked: usize = 0,
     } = .{},
 
     // GOAWAY state tracking
@@ -1351,18 +1377,30 @@ pub const QuicClient = struct {
 
     fn finalizeFetch(self: *QuicClient, stream_id: u64) ClientError!FetchResponse {
         const state = self.requests.get(stream_id) orelse return ClientError.ResponseIncomplete;
+        const keep_state_for_wt = blk: {
+            if (!state.is_webtransport) break :blk false;
+            if (state.err != null) break :blk false;
+            const status = state.status orelse break :blk false;
+            break :blk status == 200;
+        };
+
         defer {
-            // Clean up WebTransport session if this was a WT CONNECT request
-            if (state.is_webtransport) {
-                if (self.wt_sessions.get(stream_id)) |session| {
-                    if (session.state != .established) {
-                        // Failed sessions get cleaned up immediately
-                        self.cleanupWebTransportSession(stream_id);
+            if (keep_state_for_wt) {
+                // Keep the FetchState around so capsule processing and stream
+                // bookkeeping continue to work for the established session.
+                // Body/headers have been moved out by the response, so nothing
+                // else to do here. Cleanup happens when the session closes.
+            } else {
+                if (state.is_webtransport) {
+                    if (self.wt_sessions.get(stream_id)) |session| {
+                        if (session.state != .established) {
+                            self.cleanupWebTransportSession(stream_id);
+                        }
                     }
                 }
+                _ = self.requests.remove(stream_id);
+                state.destroy();
             }
-            _ = self.requests.remove(stream_id);
-            state.destroy();
         }
 
         if (state.err) |fetch_err| {
@@ -1728,6 +1766,48 @@ pub const QuicClient = struct {
         return false;
     }
 
+    pub fn recordLegacySessionAcceptReceived(self: *QuicClient) void {
+        self.wt_legacy_session_accept_received += 1;
+    }
+
+    pub fn recordCapsuleReceived(self: *QuicClient, capsule: wt_capsules.CapsuleType) void {
+        self.wt_capsules_received_total += 1;
+        switch (capsule) {
+            .close_session => self.wt_capsules_received.close_session += 1,
+            .drain_session => self.wt_capsules_received.drain_session += 1,
+            .wt_max_streams_bidi => self.wt_capsules_received.wt_max_streams_bidi += 1,
+            .wt_max_streams_uni => self.wt_capsules_received.wt_max_streams_uni += 1,
+            .wt_streams_blocked_bidi => self.wt_capsules_received.wt_streams_blocked_bidi += 1,
+            .wt_streams_blocked_uni => self.wt_capsules_received.wt_streams_blocked_uni += 1,
+            .wt_max_data => self.wt_capsules_received.wt_max_data += 1,
+            .wt_data_blocked => self.wt_capsules_received.wt_data_blocked += 1,
+        }
+    }
+
+    pub fn recordCapsuleSent(self: *QuicClient, capsule: wt_capsules.Capsule) void {
+        self.wt_capsules_sent_total += 1;
+        switch (capsule) {
+            .close_session => self.wt_capsules_sent.close_session += 1,
+            .drain_session => self.wt_capsules_sent.drain_session += 1,
+            .max_streams => |info| {
+                if (info.dir == .bidi) {
+                    self.wt_capsules_sent.wt_max_streams_bidi += 1;
+                } else {
+                    self.wt_capsules_sent.wt_max_streams_uni += 1;
+                }
+            },
+            .streams_blocked => |info| {
+                if (info.dir == .bidi) {
+                    self.wt_capsules_sent.wt_streams_blocked_bidi += 1;
+                } else {
+                    self.wt_capsules_sent.wt_streams_blocked_uni += 1;
+                }
+            },
+            .max_data => self.wt_capsules_sent.wt_max_data += 1,
+            .data_blocked => self.wt_capsules_sent.wt_data_blocked += 1,
+        }
+    }
+
     fn onH3Headers(self: *QuicClient, stream_id: u64, event: *quiche.c.quiche_h3_event) void {
         const state = self.requests.get(stream_id) orelse return;
 
@@ -1844,7 +1924,14 @@ pub const QuicClient = struct {
                 );
             }
             const slice = chunk[0..read];
-            if (state.collect_body) {
+            if (state.is_webtransport) {
+                if (state.wt_session) |session| {
+                    session.processCapsuleBytes(slice) catch |err| {
+                        self.failFetch(stream_id, err);
+                        return;
+                    };
+                }
+            } else if (state.collect_body) {
                 state.body_chunks.appendSlice(slice) catch {
                     self.failFetch(stream_id, ClientError.H3Error);
                     return;
@@ -1869,7 +1956,7 @@ pub const QuicClient = struct {
 
         // Check if stream is finished after receiving all available data
         // This is a fallback for when Finished event is not received
-        if (conn.streamFinished(stream_id)) {
+        if (!state.is_webtransport and conn.streamFinished(stream_id)) {
             if (self.config.enable_debug_logging) {
                 std.debug.print("DEBUG: Stream {} is finished (via streamFinished check)\n", .{stream_id});
             }
@@ -1892,6 +1979,14 @@ pub const QuicClient = struct {
 
         // For WebTransport, we keep the FetchState alive for datagram routing
         // It will be cleaned up when the user calls close() on the session
+        if (state.is_webtransport) {
+            if (state.wt_session) |session| {
+                if (session.state != .closed) {
+                    session.state = .closed;
+                    self.markWebTransportSessionClosed(stream_id);
+                }
+            }
+        }
     }
 
     fn onH3Reset(self: *QuicClient, stream_id: u64) void {
@@ -1940,7 +2035,7 @@ pub const QuicClient = struct {
 
     /// Helper to mark a WebTransport session as closed without destroying it
     /// Used when the session might still have user references
-    fn markWebTransportSessionClosed(self: *QuicClient, stream_id: u64) void {
+    pub fn markWebTransportSessionClosed(self: *QuicClient, stream_id: u64) void {
         if (self.wt_sessions.get(stream_id)) |session| {
             session.state = .closed;
             // Keep it tracked so close() can still clean up properly
@@ -1950,7 +2045,7 @@ pub const QuicClient = struct {
 
     /// Helper to properly clean up a WebTransport session
     /// Only use when certain no user references exist
-    fn cleanupWebTransportSession(self: *QuicClient, stream_id: u64) void {
+    pub fn cleanupWebTransportSession(self: *QuicClient, stream_id: u64) void {
         if (self.wt_sessions.get(stream_id)) |session| {
             session.state = .closed;
             // Free any queued datagrams

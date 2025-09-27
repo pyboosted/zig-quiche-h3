@@ -549,6 +549,27 @@ pub fn Impl(comptime S: type) type {
                         };
                     }
 
+                    if (state.is_webtransport and state.wt_session != null) {
+                        if (state.pending_wt_close) |pending| {
+                            if (state.wt_session.?.session_ctx) |session_ctx| {
+                                const session_wrapper = Self.WTApi.sessionFromOpaque(session_ctx);
+                                var close_err: ?errors.WebTransportError = null;
+                                session_wrapper.close(.{ .code = pending.code, .reason = pending.reason }) catch |err| {
+                                    close_err = err;
+                                };
+
+                                if (close_err) |err| {
+                                    switch (err) {
+                                        error.WouldBlock => {},
+                                        else => state.pending_wt_close = null,
+                                    }
+                                } else {
+                                    state.pending_wt_close = null;
+                                }
+                            }
+                        }
+                    }
+
                     if (state.response.partial_response != null) {
                         state.response.processPartialResponse() catch |err| {
                             if (err == error.StreamBlocked or err == quiche.h3.Error.StreamBlocked or err == quiche.h3.Error.Done) {

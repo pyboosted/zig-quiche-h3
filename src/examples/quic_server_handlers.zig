@@ -207,6 +207,20 @@ fn wtEchoDatagram(session_ptr: *anyopaque, payload: []const u8) http.WebTranspor
     try session.sendDatagram(payload);
 }
 
+pub fn wtCloseSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
+    const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+    try session.accept(.{});
+    session.close(.{ .code = 0, .reason = "server closing" }) catch |err| switch (err) {
+        error.WouldBlock => {},
+        else => return err,
+    };
+}
+
+pub fn wtRejectSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
+    const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+    try session.reject(.{ .status = 403 });
+}
+
 fn wtUniOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!void {
     // No-op: stream data handler handles echoing.
     return;
