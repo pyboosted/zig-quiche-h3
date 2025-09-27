@@ -12,11 +12,14 @@ const CliError = error{
     MissingUrl,
     MissingUrlValue,
     UnknownArgument,
+    InvalidNumber,
 };
 
 const CliOptions = struct {
     url: []const u8,
-    quiet: bool,
+    quiet: bool = false,
+    datagram_count: u32 = 1,
+    payload_size: usize = 0,
 };
 
 pub fn main() !void {
@@ -34,6 +37,10 @@ pub fn main() !void {
             },
             CliError.UnknownArgument => {
                 std.debug.print("Error: Unknown argument\n\n", .{});
+                printUsage(argv[0]);
+            },
+            CliError.InvalidNumber => {
+                std.debug.print("Error: Invalid numeric value\n\n", .{});
                 printUsage(argv[0]);
             },
         }
@@ -75,12 +82,23 @@ pub fn main() !void {
         std.debug.print("Session ID: {d}\n", .{session.session_id});
     }
 
-    const datagram_payload = "WebTransport datagram #0";
-    try sendDatagramWithRetry(session, datagram_payload, cli.quiet);
+    var send_index: u32 = 0;
+    while (send_index < cli.datagram_count) : (send_index += 1) {
+        {
+            const payload = try buildPayload(allocator, cli, send_index);
+            defer allocator.free(payload);
+            try sendDatagramWithRetry(session, payload, cli.quiet, send_index);
+        }
+    }
 
     var recv_index: u32 = 0;
-    var remaining_wait: u32 = DEFAULT_WAIT_MS;
-    while (recv_index == 0 and remaining_wait > 0) {
+    const multiplier = std.math.clamp(
+        if (cli.datagram_count == 0) 1 else cli.datagram_count,
+        @as(u32, 1),
+        @as(u32, 3),
+    );
+    var remaining_wait: u32 = DEFAULT_WAIT_MS * multiplier;
+    while (recv_index < cli.datagram_count and remaining_wait > 0) {
         const slice = if (remaining_wait >= POLL_SLICE_MS) POLL_SLICE_MS else remaining_wait;
         pumpClient(quic_client, slice);
         if (session.state == .closed) break;
@@ -92,8 +110,11 @@ pub fn main() !void {
         }
     }
 
-    if (recv_index == 0) {
-        std.debug.print("[client] timed out waiting for echoed datagram\n", .{});
+    if (recv_index < cli.datagram_count) {
+        std.debug.print(
+            "[client] timed out waiting for echoed datagram(s); received {d}/{d}\n",
+            .{ recv_index, cli.datagram_count },
+        );
         std.process.exit(1);
     }
 
@@ -102,7 +123,12 @@ pub fn main() !void {
     }
 }
 
-fn sendDatagramWithRetry(session: *WebTransportSession, payload: []const u8, quiet: bool) !void {
+fn sendDatagramWithRetry(
+    session: *WebTransportSession,
+    payload: []const u8,
+    quiet: bool,
+    index: u32,
+) !void {
     while (true) {
         session.sendDatagram(payload) catch |err| switch (err) {
             error.WouldBlock => {
@@ -112,10 +138,26 @@ fn sendDatagramWithRetry(session: *WebTransportSession, payload: []const u8, qui
             else => return err,
         };
         if (!quiet) {
-            std.debug.print("Sent: WebTransport datagram #0\n", .{});
+            std.debug.print(
+                "Sent: WebTransport datagram #{d} (len={d})\n",
+                .{ index, payload.len },
+            );
         }
         break;
     }
+}
+
+fn buildPayload(allocator: std.mem.Allocator, opts: CliOptions, index: u32) ![]u8 {
+    if (opts.payload_size == 0) {
+        return std.fmt.allocPrint(allocator, "WebTransport datagram #{d}", .{index});
+    }
+
+    const payload = try allocator.alloc(u8, opts.payload_size);
+    for (payload, 0..) |*byte, i| {
+        const ch: u8 = @intCast('A' + @as(u8, @intCast((i + index) % 26)));
+        byte.* = ch;
+    }
+    return payload;
 }
 
 fn pumpClient(qc: *QuicClient, duration_ms: u32) void {
@@ -132,7 +174,10 @@ fn drainSession(session: *WebTransportSession, recv_index: *u32, quiet: bool) vo
     const allocator = session.client.allocator;
     while (session.receiveDatagram()) |payload| {
         if (!quiet) {
-            std.debug.print("Received echo: WebTransport datagram #{d}\n", .{recv_index.*});
+            std.debug.print(
+                "Received echo: WebTransport datagram #{d} (len={d})\n",
+                .{ recv_index.*, payload.len },
+            );
         }
         recv_index.* += 1;
         allocator.free(payload);
@@ -140,42 +185,78 @@ fn drainSession(session: *WebTransportSession, recv_index: *u32, quiet: bool) vo
 }
 
 fn parseCli(argv: []const [:0]u8) CliError!CliOptions {
-    var url_value: []const u8 = "";
-    var quiet = false;
+    var opts = CliOptions{ .url = "" };
 
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const arg = std.mem.sliceTo(argv[i], 0);
+
         if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
-            quiet = true;
+            opts.quiet = true;
             continue;
         }
-        if (std.mem.startsWith(u8, arg, "--url=")) {
-            url_value = arg[6..];
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--url")) {
+
+        if (std.mem.eql(u8, arg, "--count")) {
             if (i + 1 >= argv.len) return CliError.MissingUrlValue;
-            url_value = std.mem.sliceTo(argv[i + 1], 0);
+            const value = std.mem.sliceTo(argv[i + 1], 0);
+            opts.datagram_count = std.fmt.parseInt(u32, value, 10) catch return CliError.InvalidNumber;
+            if (opts.datagram_count == 0) return CliError.InvalidNumber;
             i += 1;
             continue;
         }
+
+        if (std.mem.startsWith(u8, arg, "--count=")) {
+            const value = arg[8..];
+            opts.datagram_count = std.fmt.parseInt(u32, value, 10) catch return CliError.InvalidNumber;
+            if (opts.datagram_count == 0) return CliError.InvalidNumber;
+            continue;
+        }
+
+        if (std.mem.eql(u8, arg, "--payload-size")) {
+            if (i + 1 >= argv.len) return CliError.MissingUrlValue;
+            const value = std.mem.sliceTo(argv[i + 1], 0);
+            opts.payload_size = std.fmt.parseInt(usize, value, 10) catch return CliError.InvalidNumber;
+            i += 1;
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, arg, "--payload-size=")) {
+            const value = arg[15..];
+            opts.payload_size = std.fmt.parseInt(usize, value, 10) catch return CliError.InvalidNumber;
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, arg, "--url=")) {
+            opts.url = arg[6..];
+            continue;
+        }
+
+        if (std.mem.eql(u8, arg, "--url")) {
+            if (i + 1 >= argv.len) return CliError.MissingUrlValue;
+            opts.url = std.mem.sliceTo(argv[i + 1], 0);
+            i += 1;
+            continue;
+        }
+
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage(argv[0]);
             std.process.exit(0);
         }
+
         if (arg.len > 0 and arg[0] == '-') {
             return CliError.UnknownArgument;
         }
-        if (url_value.len == 0) {
-            url_value = arg;
+
+        if (opts.url.len == 0) {
+            opts.url = arg;
             continue;
         }
+
         return CliError.UnknownArgument;
     }
 
-    if (url_value.len == 0) return CliError.MissingUrl;
-    return CliOptions{ .url = url_value, .quiet = quiet };
+    if (opts.url.len == 0) return CliError.MissingUrl;
+    return opts;
 }
 
 fn printUsage(program_name: [:0]const u8) void {
@@ -184,6 +265,8 @@ fn printUsage(program_name: [:0]const u8) void {
     std.debug.print("Options:\n", .{});
     std.debug.print("  --url <value>          WebTransport URL (https://host:port/path)\n", .{});
     std.debug.print("  -q, --quiet            Reduce log output\n", .{});
+    std.debug.print("  --count <n>            Number of datagrams to send (default: 1)\n", .{});
+    std.debug.print("  --payload-size <n>     Override datagram payload size in bytes\n", .{});
 }
 
 fn parseUrl(url: []const u8, host_out: *[]const u8, port_out: *u16, path_out: *[]const u8) !void {

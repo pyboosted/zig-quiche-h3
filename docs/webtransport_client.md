@@ -18,13 +18,19 @@ The server listens on `127.0.0.1:4433`, auto-accepts WebTransport sessions, and 
 
 ## 2. Run the WebTransport Client
 
-The current `wt_client` example negotiates a session, sends a single DATAGRAM payload (`"WebTransport datagram #0"`), and waits for the echo before exiting. Run it alongside the example server:
+The `wt_client` example negotiates a session, sends one or more DATAGRAM payloads, and waits for their echoes before exiting. Run it alongside the example server:
 
 ```bash
 zig build wt-client -- https://127.0.0.1:4433/wt/echo
 ```
 
-Use `--quiet` to suppress the progress logs when scripting. The process exits with code `0` once the datagram echo is observed; failures (handshake, timeout, or send issues) return a non-zero status and print the reason to stderr.
+Useful switches:
+
+- `--quiet` suppresses the progress logs when scripting.
+- `--count <n>` sends `n` datagrams (default: 1).
+- `--payload-size <bytes>` overrides the payload length; the client fills the buffer with a repeating alphabet pattern so echoes are easy to recognise.
+
+The process exits with code `0` once the configured datagrams are echoed back; failures (handshake, timeout, send errors) return a non-zero status and print the reason to stderr.
 
 ## 3. Client Configuration Knobs
 
@@ -42,8 +48,8 @@ With the server echo route running, the client prints lines similar to:
 ```
 WebTransport session established!
 Session ID: 4
-Sent: WebTransport datagram #0
-Received echo: WebTransport datagram #0
+Sent: WebTransport datagram #0 (len=1200)
+Received echo: WebTransport datagram #0 (len=1200)
 WebTransport test complete!
 ```
 

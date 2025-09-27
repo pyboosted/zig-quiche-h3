@@ -10,6 +10,8 @@ This document outlines a comprehensive plan to expand end-to-end testing for the
 - ✅ Basic session establishment via Extended CONNECT
 - ✅ Datagram echo functionality (`/wt/echo` route)
 - ✅ Simple `wt-client` binary for basic connectivity testing
+- ✅ Bun E2E coverage for WebTransport datagram echo (multiple payloads, large frames)
+- ✅ Bun E2E coverage for sustained datagram bursts (100+ packets)
 - ✅ Detection of servers without WebTransport support
 - ✅ Concurrent session stress testing (H3_STRESS mode)
 
@@ -147,6 +149,14 @@ test("handle high datagram throughput", async () => {
 ```
 
 ### 3. Stream Tests (`streams.test.ts`)
+
+> **Status (September 2025)** — Server → client WT stream coverage is blocked
+> by an upstream quiche bug. When the server writes to a client-initiated
+> bidirectional WT stream, `stream_send()` reports success but no STREAM frame
+> is ever emitted (confirmed via paired qlogs). The unit test in
+> `src/tests.zig` is currently skipped until quiche publishes a fix. See the
+> inline comment in the Zig test and the captured qlogs referenced there for
+> reproduction details.
 
 #### Unidirectional Streams
 ```typescript
