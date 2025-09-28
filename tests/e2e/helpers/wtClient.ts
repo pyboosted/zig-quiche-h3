@@ -21,7 +21,7 @@ export type WtClientResult = {
     exitCode: number;
 };
 
-export function runWtClient(args: string[], timeoutMs = 5_000): Promise<WtClientResult> {
+export function runWtClient(args: string[], timeoutMs = 5_000, quiet?: boolean): Promise<WtClientResult> {
     const verbose = process.env.H3_VERBOSE === "1" || process.env.H3_VERBOSE === "true";
     return new Promise((resolve, reject) => {
         const proc = spawn(wtClientPath, args, {
@@ -33,9 +33,10 @@ export function runWtClient(args: string[], timeoutMs = 5_000): Promise<WtClient
         let stderr = "";
 
         proc.stdout?.on("data", (data) => {
-            stdout += data.toString();
+            const text = data.toString();
+            if (!quiet) stdout += text;
             if (verbose) {
-                process.stdout.write(`[wt-client stdout] ${data}`);
+                process.stdout.write(`[wt-client stdout] ${text}`);
             }
         });
 

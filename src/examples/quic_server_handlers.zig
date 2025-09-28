@@ -218,7 +218,7 @@ fn wtEchoDatagram(session_ptr: *anyopaque, payload: []const u8) http.WebTranspor
 pub fn wtCloseSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
     const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
     try session.accept(.{});
-    session.close(.{ .code = 0, .reason = "server closing" }) catch |err| switch (err) {
+    session.close(.{ .code = 0x10, .reason = "server closing" }) catch |err| switch (err) {
         error.WouldBlock => {},
         else => return err,
     };
