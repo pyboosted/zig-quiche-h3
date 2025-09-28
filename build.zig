@@ -581,7 +581,17 @@ pub fn build(b: *std.Build) void {
     const lib = b.addLibrary(.{ .name = "zigquicheh3", .root_module = lib_mod, .linkage = .dynamic });
     addQuicheLink(b, lib, use_system_quiche, quiche_lib_path, cargo_step);
     linkCommon(target, lib, link_ssl, with_libev, libev_lib_dir, true);
-    b.installArtifact(lib);
+
+    const bun_lib_install = b.addInstallArtifact(lib, .{});
+    b.getInstallStep().dependOn(&bun_lib_install.step);
+
+    const bun_header_install = b.addInstallFile(b.path("include/zig_h3.h"), "include/zig_h3.h");
+    b.getInstallStep().dependOn(&bun_header_install.step);
+
+    const bunffi_step = b.step("bun-ffi", "Build Bun FFI shared library and headers");
+    bunffi_step.dependOn(&lib.step);
+    bunffi_step.dependOn(&bun_lib_install.step);
+    bunffi_step.dependOn(&bun_header_install.step);
 
     // Ensure we build quiche before compiling/linking is handled in addQuicheLink()
 
