@@ -32,6 +32,7 @@ const CliOptions = struct {
     stream_bytes: usize = 0,
     stream_chunk: usize = 0,
     stream_delay_ms: u32 = 0,
+    close_session: bool = false,
 };
 
 const StreamEchoResult = struct {
@@ -133,6 +134,7 @@ pub fn main() !void {
             "[client] stream echo verified bytes={d} blocked={s}\n",
             .{ result.verified_bytes, if (result.blocked) "true" else "false" },
         );
+        closeSessionIfRequested(session, quic_client, &cli);
         return;
     }
 
@@ -140,6 +142,7 @@ pub fn main() !void {
         if (!cli.quiet) {
             std.debug.print("WebTransport session established (no datagrams requested)\n", .{});
         }
+        closeSessionIfRequested(session, quic_client, &cli);
         return;
     }
 
@@ -179,6 +182,7 @@ pub fn main() !void {
     if (!cli.quiet) {
         std.debug.print("WebTransport test complete!\n", .{});
     }
+    closeSessionIfRequested(session, quic_client, &cli);
 }
 
 fn sendDatagramWithRetry(
@@ -203,6 +207,19 @@ fn sendDatagramWithRetry(
         }
         break;
     }
+}
+
+fn closeSessionIfRequested(
+    session: *WebTransportSession,
+    quic_client: *QuicClient,
+    opts: *const CliOptions,
+) void {
+    if (!opts.close_session) return;
+    if (!opts.quiet) {
+        std.debug.print("[client] sending CLOSE_SESSION capsule\n", .{});
+    }
+    session.close();
+    pumpClient(quic_client, STREAM_SEND_SLEEP_MS * 3);
 }
 
 fn buildPayload(allocator: std.mem.Allocator, opts: CliOptions, index: u32) ![]u8 {
@@ -533,6 +550,11 @@ fn parseCli(argv: []const [:0]u8) CliError!CliOptions {
             continue;
         }
 
+        if (std.mem.eql(u8, arg, "--close-session")) {
+            opts.close_session = true;
+            continue;
+        }
+
         if (std.mem.startsWith(u8, arg, "--url=")) {
             opts.url = arg[6..];
             continue;
@@ -578,6 +600,7 @@ fn printUsage(program_name: [:0]const u8) void {
     std.debug.print("  --stream-chunk <n>     Chunk size for stream sends (default 64KiB)\n", .{});
     std.debug.print("  --stream-delay <ms>    Delay between stream chunks in milliseconds\n", .{});
     std.debug.print("  --expect-close         Treat peer-initiated close as success\n", .{});
+    std.debug.print("  --close-session        Send a CLOSE_SESSION capsule before exit\n", .{});
 }
 
 fn parseUrl(url: []const u8, host_out: *[]const u8, port_out: *u16, path_out: *[]const u8) !void {

@@ -195,7 +195,7 @@ const FetchState = struct {
         return self.body_chunks.toOwnedSlice();
     }
 
-    fn destroy(self: *FetchState) void {
+    pub fn destroy(self: *FetchState) void {
         self.body_chunks.deinit();
         if (self.body_owned and self.body_buffer.len > 0) {
             self.allocator.free(@constCast(self.body_buffer));

@@ -97,4 +97,37 @@ describeStatic("WebTransport datagram burst", (binaryType: ServerBinaryType) => 
         },
         40_000,
     );
+
+    test(
+        "client surfaces datagram rejection error",
+        async () => {
+            await withServer(
+                async ({ port, getLogs }) => {
+                    const url = `https://127.0.0.1:${port}/wt/dgram-reject`;
+                    const result = await runWtClient([
+                        "--url",
+                        url,
+                        "--count",
+                        "1",
+                    ], 5_000);
+
+                    expect(result.exitCode).not.toBe(0);
+                    expect(result.stderr).toContain("timed out waiting for echoed datagram");
+
+                    const logs = getLogs().join("\n");
+                    expect(logs).toContain("wtRejectDatagram payload_len");
+                },
+                {
+                    env: {
+                        H3_WEBTRANSPORT: "1",
+                        H3_WT_STREAMS: "1",
+                        H3_WT_BIDI: "1",
+                    },
+                    binaryType,
+                    timeoutMs: 5_000,
+                },
+            );
+        },
+        5_000,
+    );
 });

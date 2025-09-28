@@ -229,6 +229,21 @@ pub fn wtRejectSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.We
     try session.reject(.{ .status = 403 });
 }
 
+fn wtRejectDatagram(session_ptr: *anyopaque, payload: []const u8) http.WebTransportError!void {
+    const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+    std.debug.print(
+        "[server] wtRejectDatagram payload_len={d} session={d}\n",
+        .{ payload.len, session.sessionId() },
+    );
+    return error.StreamBlocked;
+}
+
+pub fn wtRejectDatagramSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
+    const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+    try session.accept(.{});
+    session.setDatagramHandler(wtRejectDatagram);
+}
+
 fn wtUniOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!void {
     // No-op: stream data handler handles echoing.
     return;

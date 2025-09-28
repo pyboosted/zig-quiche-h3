@@ -79,6 +79,7 @@ pub fn main() !void {
     _ = try bptr.routeWithOpts(.CONNECT, "/wt/echo", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtEchoSessionHandler });
     _ = try bptr.routeWithOpts(.CONNECT, "/wt/close", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtCloseSessionHandler });
     _ = try bptr.routeWithOpts(.CONNECT, "/wt/reject", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtRejectSessionHandler });
+    _ = try bptr.routeWithOpts(.CONNECT, "/wt/dgram-reject", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtRejectDatagramSessionHandler });
 
     var dyn = try builder.build();
     defer dyn.deinit();

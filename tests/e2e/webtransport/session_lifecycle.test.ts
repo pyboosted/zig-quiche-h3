@@ -116,4 +116,33 @@ describeStatic("WebTransport session lifecycle", (binaryType: ServerBinaryType) 
         },
         15_000,
     );
+
+    test(
+        "client-initiated close sends capsule",
+        async () => {
+            await withServer(
+                async ({ port }) => {
+                    const url = `https://127.0.0.1:${port}/wt/echo`;
+                    const result = await runWtClient([
+                        "--url",
+                        url,
+                        "--close-session",
+                    ], 5_000);
+
+                    expect(result.exitCode).toBe(0);
+                    expect(result.stderr).toContain("sending CLOSE_SESSION capsule");
+                },
+                {
+                    env: {
+                        H3_WEBTRANSPORT: "1",
+                        H3_WT_STREAMS: "1",
+                        H3_WT_BIDI: "1",
+                    },
+                    binaryType,
+                    timeoutMs: 5_000,
+                },
+            );
+        },
+        5_000,
+    );
 });

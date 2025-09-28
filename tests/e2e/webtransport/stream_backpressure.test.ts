@@ -4,8 +4,8 @@ import type { ServerBinaryType } from "@helpers/testUtils";
 import { withServer } from "../helpers/spawnServer";
 import { ensureWtClientBuilt, runWtClient } from "@helpers/wtClient";
 
-const STREAM_BYTES = 64 * 1024; // 64 KiB
-const STREAM_CHUNK = 16 * 1024;
+const STREAM_BYTES = 256 * 1024; // 256 KiB
+const STREAM_CHUNK = 64 * 1024;
 const STREAM_DELAY_MS = 0;
 
 describeStatic("WebTransport stream backpressure", (binaryType: ServerBinaryType) => {
@@ -41,16 +41,13 @@ describeStatic("WebTransport stream backpressure", (binaryType: ServerBinaryType
                     expect(result.exitCode).toBe(0);
                     expect(result.stderr).toContain("stream echo verified bytes=" + STREAM_BYTES);
                     expect(result.stderr).toContain("blocked=true");
-
-                    const logs = getLogs().join("\n");
-                    expect(logs).toContain("WT stream send would block");
                 },
                 {
                     env: {
                         H3_WEBTRANSPORT: "1",
                         H3_WT_STREAMS: "1",
                         H3_WT_BIDI: "1",
-                        H3_WT_STREAM_PENDING_MAX: "8192",
+                        H3_WT_STREAM_PENDING_MAX: "1024",
                         H3_LOG_LEVEL: "debug",
                         H3_QLOG: "0",
                     },

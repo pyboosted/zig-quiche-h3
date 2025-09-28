@@ -78,6 +78,7 @@ pub fn main() !void {
         routing_gen.ROUTE_OPTS(.CONNECT, "/wt/echo", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtEchoSessionHandler }),
         routing_gen.ROUTE_OPTS(.CONNECT, "/wt/close", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtCloseSessionHandler }),
         routing_gen.ROUTE_OPTS(.CONNECT, "/wt/reject", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtRejectSessionHandler }),
+        routing_gen.ROUTE_OPTS(.CONNECT, "/wt/dgram-reject", handlers.wtConnectInfoHandler, .{ .on_wt_session = handlers.wtRejectDatagramSessionHandler }),
     });
     var router = RouterT{};
     const matcher: routing.Matcher = router.matcher();
