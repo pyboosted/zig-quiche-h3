@@ -22,32 +22,40 @@ pub const ZigServerConfig = extern struct {
 };
 
 pub const ZigHeader = extern struct {
-    name: [*]const u8 = null,
+    name: ?[*]const u8 = null,
     name_len: usize = 0,
-    value: [*]const u8 = null,
+    value: ?[*]const u8 = null,
     value_len: usize = 0,
 };
 
 pub const ZigRequest = extern struct {
-    method: [*]const u8 = null,
+    method: ?[*]const u8 = null,
     method_len: usize = 0,
-    path: [*]const u8 = null,
+    path: ?[*]const u8 = null,
     path_len: usize = 0,
-    authority: [*]const u8 = null,
+    authority: ?[*]const u8 = null,
     authority_len: usize = 0,
-    headers: [*]const ZigHeader = null,
+    headers: ?[*]const ZigHeader = null,
     headers_len: usize = 0,
     stream_id: u64 = 0,
 };
+
+comptime {
+    if (@sizeOf(ZigHeader) != @sizeOf(http.Header)) {
+        @compileError("ZigHeader must match http.Header layout");
+    }
+}
 
 pub const ZigResponse = opaque {};
 pub const ZigServer = opaque {};
 
 const RequestCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, resp: *ZigResponse) callconv(.C) void;
+const DatagramCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, resp: *ZigResponse, data: ?[*]const u8, data_len: usize) callconv(.C) void;
 
 const RouteContext = struct {
     server: *ServerHandle,
     callback: RequestCallback,
+    datagram_callback: DatagramCallback,
     user_data: ?*anyopaque,
 };
 
@@ -109,6 +117,35 @@ const ResponseHandle = struct {
     response: *http.Response,
 };
 
+fn toOptionalPtr(slice: []const u8) ?[*]const u8 {
+    return if (slice.len == 0) null else slice.ptr;
+}
+
+fn toZigHeaderSlice(headers: []const http.Header) []const ZigHeader {
+    if (headers.len == 0) return &[_]ZigHeader{};
+    const ptr: [*]const ZigHeader = @ptrCast(headers.ptr);
+    return ptr[0..headers.len];
+}
+
+fn buildRequestView(req: *http.Request) ZigRequest {
+    const method_slice = req.method.toString();
+    const path_slice = req.path_decoded;
+    const authority_slice = req.authority orelse &[_]u8{};
+    const headers_slice = toZigHeaderSlice(req.headers);
+
+    return ZigRequest{
+        .method = toOptionalPtr(method_slice),
+        .method_len = method_slice.len,
+        .path = toOptionalPtr(path_slice),
+        .path_len = path_slice.len,
+        .authority = toOptionalPtr(authority_slice),
+        .authority_len = authority_slice.len,
+        .headers = if (headers_slice.len == 0) null else headers_slice.ptr,
+        .headers_len = headers_slice.len,
+        .stream_id = req.stream_id,
+    };
+}
+
 fn cStringDup(allocator: Allocator, list: *std.ArrayListUnmanaged([]u8), cstr: ?[*:0]const u8) ![]u8 {
     if (cstr) |ptr| {
         const bytes = std.mem.span(ptr);
@@ -167,53 +204,50 @@ fn mapHandlerError(err: anyerror) i32 {
 fn requestHandler(req: *http.Request, res: *http.Response) errors.HandlerError!void {
     const ctx_ptr = req.user_data orelse return errors.HandlerError.InternalServerError;
     const ctx = @as(*RouteContext, @ptrCast(@alignCast(ctx_ptr)));
-    if (ctx.callback == null) return errors.HandlerError.InternalServerError;
-
-    const allocator = req.arena.allocator();
-    var headers_buf = try allocator.alloc(ZigHeader, req.headers.len);
-    for (req.headers, 0..) |header, idx| {
-        headers_buf[idx] = .{
-            .name = header.name.ptr,
-            .name_len = header.name.len,
-            .value = header.value.ptr,
-            .value_len = header.value.len,
-        };
+    if (ctx.callback) |callback| {
+        const request_view = buildRequestView(req);
+        var resp_wrapper = ResponseHandle{ .response = res };
+        const resp_ptr: *ZigResponse = @ptrCast(@alignCast(&resp_wrapper));
+        callback(ctx.user_data, &request_view, resp_ptr);
     }
-
-    const method_str = req.method.toString();
-    const path = req.path_decoded;
-    const authority_slice = req.authority orelse &[_]u8{};
-
-    var request_view = ZigRequest{
-        .method = method_str.ptr,
-        .method_len = method_str.len,
-        .path = path.ptr,
-        .path_len = path.len,
-        .authority = authority_slice.ptr,
-        .authority_len = authority_slice.len,
-        .headers = headers_buf.ptr,
-        .headers_len = headers_buf.len,
-        .stream_id = req.stream_id,
-    };
-
-    var resp_wrapper = ResponseHandle{ .response = res };
-    const resp_ptr: *ZigResponse = @ptrCast(@alignCast(&resp_wrapper));
-    const cb = ctx.callback.?;
-    cb(ctx.user_data, &request_view, resp_ptr);
 }
 
-fn registerRoute(handle: *ServerHandle, method_str: []const u8, pattern: []const u8, cb: RequestCallback, user: ?*anyopaque) !void {
+fn datagramHandler(req: *http.Request, res: *http.Response, payload: []const u8) errors.DatagramError!void {
+    const ctx_ptr = req.user_data orelse return;
+    const ctx = @as(*RouteContext, @ptrCast(@alignCast(ctx_ptr)));
+    if (ctx.datagram_callback) |callback| {
+        const request_view = buildRequestView(req);
+        var resp_wrapper = ResponseHandle{ .response = res };
+        const resp_ptr: *ZigResponse = @ptrCast(@alignCast(&resp_wrapper));
+        const data_ptr: ?[*]const u8 = if (payload.len == 0) null else payload.ptr;
+        callback(ctx.user_data, &request_view, resp_ptr, data_ptr, payload.len);
+    }
+}
+
+fn registerRoute(
+    handle: *ServerHandle,
+    method_str: []const u8,
+    pattern: []const u8,
+    cb: RequestCallback,
+    dgram_cb: DatagramCallback,
+    user: ?*anyopaque,
+) !void {
     const method = Method.fromString(method_str) orelse return FfiError.InvalidMethod;
     const ctx = try handle.allocator.create(RouteContext);
-    ctx.* = .{ .server = handle, .callback = cb, .user_data = user };
+    ctx.* = .{ .server = handle, .callback = cb, .datagram_callback = dgram_cb, .user_data = user };
     try handle.route_contexts.append(handle.allocator, ctx);
 
     try handle.builder.add(.{
         .pattern = pattern,
         .method = method,
         .handler = requestHandler,
+        .on_h3_dgram = if (dgram_cb != null) datagramHandler else null,
         .user_data = ctx,
     });
+
+    if (dgram_cb != null) {
+        handle.config.enable_dgram = true;
+    }
 }
 
 fn startServer(handle: *ServerHandle) !void {
@@ -305,16 +339,18 @@ pub export fn zig_h3_server_route(
     method_c: ?[*:0]const u8,
     pattern_c: ?[*:0]const u8,
     cb: RequestCallback,
+    dgram_cb: DatagramCallback,
     user: ?*anyopaque,
 ) i32 {
     const handle = asHandle(server_ptr) orelse return -1;
     if (handle.state != .created) return -2;
     if (method_c == null or pattern_c == null) return -3;
+    if (cb == null) return -4;
     const method = std.mem.span(method_c.?);
     const pattern = std.mem.span(pattern_c.?);
-    registerRoute(handle, method, pattern, cb, user) catch |err| {
+    registerRoute(handle, method, pattern, cb, dgram_cb, user) catch |err| {
         std.log.err("zig_h3_server_route failed: {s}", .{@errorName(err)});
-        return -4;
+        return -5;
     };
     return 0;
 }

@@ -59,6 +59,7 @@ typedef struct zig_h3_request {
 
 /** Request callback signature. */
 typedef void (*zig_h3_request_cb)(void *user, const zig_h3_request *req, zig_h3_response *resp);
+typedef void (*zig_h3_datagram_cb)(void *user, const zig_h3_request *req, zig_h3_response *resp, const uint8_t *data, size_t data_len);
 
 zig_h3_server *zig_h3_server_new(const zig_h3_server_config *config);
 int zig_h3_server_free(zig_h3_server *server);
@@ -66,7 +67,8 @@ int zig_h3_server_route(
     zig_h3_server *server,
     const char *method,
     const char *pattern,
-    zig_h3_request_cb callback,
+    zig_h3_request_cb request_cb,
+    zig_h3_datagram_cb datagram_cb,
     void *user_data);
 int zig_h3_server_start(zig_h3_server *server);
 int zig_h3_server_stop(zig_h3_server *server);
