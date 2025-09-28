@@ -21,6 +21,8 @@ typedef struct zig_h3_server zig_h3_server;
 /** Opaque response handle passed to request callbacks. */
 typedef struct zig_h3_response zig_h3_response;
 typedef struct zig_h3_wt_session zig_h3_wt_session;
+/** Opaque client handle returned by zig_h3_client_new. */
+typedef struct zig_h3_client zig_h3_client;
 
 /**
  * Server configuration. All string pointers may be NULL to use defaults and
@@ -63,6 +65,39 @@ typedef void (*zig_h3_request_cb)(void *user, const zig_h3_request *req, zig_h3_
 typedef void (*zig_h3_datagram_cb)(void *user, const zig_h3_request *req, zig_h3_response *resp, const uint8_t *data, size_t data_len);
 typedef void (*zig_h3_wt_session_cb)(void *user, const zig_h3_request *req, zig_h3_wt_session *session);
 typedef void (*zig_h3_log_cb)(void *user, const char *line);
+
+typedef struct zig_h3_client_config {
+    uint8_t verify_peer;
+    uint8_t enable_dgram;
+    uint8_t enable_webtransport;
+    uint32_t idle_timeout_ms;
+    uint32_t request_timeout_ms;
+} zig_h3_client_config;
+
+typedef struct zig_h3_fetch_options {
+    const char *method;
+    size_t method_len;
+    const char *path;
+    size_t path_len;
+    const zig_h3_header *headers;
+    size_t headers_len;
+    const uint8_t *body;
+    size_t body_len;
+    uint8_t stream_body;
+    uint8_t collect_body;
+} zig_h3_fetch_options;
+
+typedef void (*zig_h3_fetch_cb)(
+    void *user,
+    uint16_t status,
+    const zig_h3_header *headers,
+    size_t headers_len,
+    const uint8_t *body,
+    size_t body_len,
+    const zig_h3_header *trailers,
+    size_t trailers_len);
+
+typedef void (*zig_h3_client_datagram_cb)(void *user, uint64_t flow_id, const uint8_t *data, size_t data_len);
 
 zig_h3_server *zig_h3_server_new(const zig_h3_server_config *config);
 int zig_h3_server_free(zig_h3_server *server);
@@ -111,6 +146,18 @@ int zig_h3_wt_reject(zig_h3_wt_session *session, uint16_t status);
 int zig_h3_wt_close(zig_h3_wt_session *session, uint32_t code, const uint8_t *reason, size_t reason_len);
 int zig_h3_wt_send_datagram(zig_h3_wt_session *session, const uint8_t *data, size_t data_len);
 int zig_h3_wt_release(zig_h3_wt_session *session);
+
+zig_h3_client *zig_h3_client_new(const zig_h3_client_config *config);
+int zig_h3_client_free(zig_h3_client *client);
+int zig_h3_client_connect(zig_h3_client *client, const char *host, uint16_t port, const char *sni);
+int zig_h3_client_set_datagram_callback(zig_h3_client *client, zig_h3_client_datagram_cb callback, void *user_data);
+int zig_h3_client_fetch(
+    zig_h3_client *client,
+    const zig_h3_fetch_options *options,
+    zig_h3_fetch_cb callback,
+    void *user_data);
+int zig_h3_client_send_h3_datagram(zig_h3_client *client, uint64_t stream_id, const uint8_t *data, size_t data_len);
+int zig_h3_client_send_datagram(zig_h3_client *client, const uint8_t *data, size_t data_len);
 
 #ifdef __cplusplus
 } // extern "C"
