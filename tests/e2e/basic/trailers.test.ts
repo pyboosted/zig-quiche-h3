@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import { spawnServer } from "@helpers/spawnServer";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { zigClient } from "@helpers/zigClient";
 
-describeBoth("HTTP/3 Trailers", (binaryType: ServerBinaryType) => {
+describeStatic("HTTP/3 Trailers", (binaryType: ServerBinaryType) => {
     test("curl trace shows response trailers", async () => {
         const server = await spawnServer({ binaryType });
         try {

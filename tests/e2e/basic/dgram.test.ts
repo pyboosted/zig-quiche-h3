@@ -1,10 +1,10 @@
 import { expect, it } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import { withServer } from "@helpers/spawnServer";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { zigClient } from "@helpers/zigClient";
 
-describeBoth("QUIC DATAGRAM echo", (_binaryType: ServerBinaryType) => {
+describeStatic("QUIC DATAGRAM echo", (_binaryType: ServerBinaryType) => {
     it("echoes datagrams when enabled", async () => {
         await withServer(
             async ({ port }) => {

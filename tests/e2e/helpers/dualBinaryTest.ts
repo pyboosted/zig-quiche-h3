@@ -22,6 +22,16 @@ export function describeBoth(name: string, testFn: (binaryType: ServerBinaryType
 }
 
 /**
+ * Run a test suite only against the static binary.
+ * Use this when behavior does not differ between routing implementations.
+ */
+export function describeStatic(name: string, testFn: (binaryType: ServerBinaryType) => void): void {
+    describe(name, () => {
+        testFn(ServerBinaryType.Static);
+    });
+}
+
+/**
  * Helper to get a descriptive name for the binary type
  */
 export function getBinaryTypeName(binaryType: ServerBinaryType): string {

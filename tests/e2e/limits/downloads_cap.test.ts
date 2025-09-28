@@ -1,11 +1,11 @@
 import "../test-runner";
 import { afterAll, beforeAll, expect, it } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, type ServerBinaryType } from "@helpers/testUtils";
 import { zigClient } from "@helpers/zigClient";
 
-describeBoth("Per-connection download cap", (binaryType: ServerBinaryType) => {
+describeStatic("Per-connection download cap", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {

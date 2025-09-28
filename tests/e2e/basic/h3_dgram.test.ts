@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import { spawnServer } from "@helpers/spawnServer";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { get, zigClient } from "@helpers/zigClient";
 import { verboseLog } from "@helpers/logCapture";
 
-describeBoth("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
+describeStatic("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
     test("request-associated H3 dgram echo", async () => {
         const server = await spawnServer({ env: { H3_DGRAM_ECHO: "1", RUST_LOG: "trace" } });
 

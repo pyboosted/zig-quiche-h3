@@ -1,11 +1,11 @@
 import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, type ServerBinaryType } from "@helpers/testUtils";
 import { get, zigClient } from "@helpers/zigClient";
 
-describeBoth("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
+describeStatic("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {

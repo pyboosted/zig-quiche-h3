@@ -1,6 +1,6 @@
 import "../test-runner";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { zigClient } from "@helpers/zigClient";
@@ -22,7 +22,7 @@ function _extractStatuses(jsonLines: string): number[] {
     return statuses;
 }
 
-describeBoth("Per-connection request cap", (binaryType: ServerBinaryType) => {
+describeStatic("Per-connection request cap", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {

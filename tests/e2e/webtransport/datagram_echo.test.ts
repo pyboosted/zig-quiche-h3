@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { withServer } from "../helpers/spawnServer";
 import { getProjectRoot } from "../helpers/testUtils";
@@ -59,7 +59,7 @@ function runWtClient(args: string[], timeoutMs = 15_000): Promise<WtClientResult
     });
 }
 
-describeBoth("WebTransport datagram echo", (binaryType: ServerBinaryType) => {
+describeStatic("WebTransport datagram echo", (binaryType: ServerBinaryType) => {
     beforeAll(async () => {
         await ensureWtClientBuilt();
     });

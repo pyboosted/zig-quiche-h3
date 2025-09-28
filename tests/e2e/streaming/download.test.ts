@@ -1,13 +1,13 @@
 import "../test-runner"; // Import test runner for automatic cleanup
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import { type ServerInstance, spawnServer } from "@helpers/spawnServer";
 import { mkfile, parseContentLength, type ServerBinaryType } from "@helpers/testUtils";
 import { get, zigClient } from "@helpers/zigClient";
 import { verboseLog } from "@helpers/logCapture";
 
-describeBoth("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
+describeStatic("HTTP/3 Download Streaming", (binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {

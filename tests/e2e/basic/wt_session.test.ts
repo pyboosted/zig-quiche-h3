@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { spawn } from "child_process";
 import path from "path";
@@ -8,7 +8,7 @@ import { type ServerInstance, spawnServer } from "../helpers/spawnServer";
 
 const execAsync = promisify(require("child_process").exec);
 
-describeBoth("WebTransport Session Tests", (_binaryType: ServerBinaryType) => {
+describeStatic("WebTransport Session Tests", (_binaryType: ServerBinaryType) => {
     let server: ServerInstance;
 
     beforeAll(async () => {

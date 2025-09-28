@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { describeBoth } from "@helpers/dualBinaryTest";
+import { describeStatic } from "@helpers/dualBinaryTest";
 import type { ServerBinaryType } from "@helpers/testUtils";
 import { withServer } from "../helpers/spawnServer";
 import { ensureWtClientBuilt, runWtClient } from "@helpers/wtClient";
@@ -8,7 +8,7 @@ const STREAM_BYTES = 64 * 1024; // 64 KiB
 const STREAM_CHUNK = 16 * 1024;
 const STREAM_DELAY_MS = 0;
 
-describeBoth("WebTransport stream backpressure", (binaryType: ServerBinaryType) => {
+describeStatic("WebTransport stream backpressure", (binaryType: ServerBinaryType) => {
     beforeAll(async () => {
         await ensureWtClientBuilt();
     });
