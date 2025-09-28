@@ -62,6 +62,7 @@ typedef struct zig_h3_request {
 typedef void (*zig_h3_request_cb)(void *user, const zig_h3_request *req, zig_h3_response *resp);
 typedef void (*zig_h3_datagram_cb)(void *user, const zig_h3_request *req, zig_h3_response *resp, const uint8_t *data, size_t data_len);
 typedef void (*zig_h3_wt_session_cb)(void *user, const zig_h3_request *req, zig_h3_wt_session *session);
+typedef void (*zig_h3_log_cb)(void *user, const char *line);
 
 zig_h3_server *zig_h3_server_new(const zig_h3_server_config *config);
 int zig_h3_server_free(zig_h3_server *server);
@@ -75,6 +76,7 @@ int zig_h3_server_route(
     void *user_data);
 int zig_h3_server_start(zig_h3_server *server);
 int zig_h3_server_stop(zig_h3_server *server);
+int zig_h3_server_set_log(zig_h3_server *server, zig_h3_log_cb callback, void *user_data);
 
 int zig_h3_response_status(zig_h3_response *response, uint16_t status);
 int zig_h3_response_header(
@@ -91,6 +93,18 @@ int zig_h3_response_end(
     zig_h3_response *response,
     const uint8_t *data,
     size_t data_len);
+int zig_h3_response_send_h3_datagram(
+    zig_h3_response *response,
+    const uint8_t *data,
+    size_t data_len);
+int zig_h3_response_send_trailers(
+    zig_h3_response *response,
+    const zig_h3_header *trailers,
+    size_t trailers_len);
+int zig_h3_response_defer_end(zig_h3_response *response);
+int zig_h3_response_set_auto_end(zig_h3_response *response, uint8_t enable);
+int zig_h3_response_should_auto_end(zig_h3_response *response);
+int zig_h3_response_process_partial(zig_h3_response *response);
 
 int zig_h3_wt_accept(zig_h3_wt_session *session);
 int zig_h3_wt_reject(zig_h3_wt_session *session, uint16_t status);

@@ -1,5 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
 const config_mod = @import("../quic/config.zig");
 const server_pkg = @import("../quic/server.zig");
 const routing_dynamic = @import("../routing/dynamic.zig");
@@ -11,6 +10,7 @@ const QuicServer = server_pkg.QuicServer;
 const Method = http.Method;
 const FfiError = error{ InvalidMethod, InvalidState };
 const WTSession = QuicServer.WTApi.Session;
+const LogCallback = ?*const fn (user: ?*anyopaque, line: [*:0]const u8) callconv(.C) void;
 
 pub const ZigServerConfig = extern struct {
     cert_path: ?[*:0]const u8 = null,
@@ -78,6 +78,8 @@ const ServerHandle = struct {
     session_handles: std.ArrayListUnmanaged(*WebTransportSessionHandle) = .{},
     owned_strings: std.ArrayListUnmanaged([]u8) = .{},
     force_webtransport: bool = false,
+    log_callback: LogCallback = null,
+    log_user: ?*anyopaque = null,
 
     fn deinit(self: *ServerHandle) void {
         if (self.thread) |t| {
@@ -175,6 +177,25 @@ fn removeSessionHandle(server: *ServerHandle, target: *WebTransportSessionHandle
     }
 }
 
+fn logMessage(handle: ?*ServerHandle, comptime fmt: []const u8, args: anytype) void {
+    if (handle) |h| {
+        if (h.log_callback) |cb| {
+            var buf: [512:0]u8 = undefined;
+            const line = std.fmt.bufPrintZ(&buf, fmt ++ "\n", args) catch {
+                cb(h.log_user, "log formatting error");
+                return;
+            };
+            cb(h.log_user, line.ptr);
+            return;
+        }
+    }
+    std.log.err(fmt ++ "\n", args);
+}
+
+fn logError(handle: ?*ServerHandle, comptime fmt: []const u8, args: anytype) void {
+    logMessage(handle, fmt, args);
+}
+
 fn toOptionalPtr(slice: []const u8) ?[*]const u8 {
     return if (slice.len == 0) null else slice.ptr;
 }
@@ -204,11 +225,12 @@ fn buildRequestView(req: *http.Request) ZigRequest {
     };
 }
 
-fn applyForcedWebTransport(handle: *ServerHandle) void {
+fn applyForcedWebTransport(handle: *ServerHandle, server: *QuicServer) void {
     if (!handle.force_webtransport) return;
-    posix.setenvZ("H3_WEBTRANSPORT", "1", true) catch {};
-    posix.setenvZ("H3_WT_STREAMS", "1", true) catch {};
-    posix.setenvZ("H3_WT_BIDI", "1", true) catch {};
+    server.config.enable_dgram = true;
+    server.wt.enabled = true;
+    server.wt.enable_streams = true;
+    server.wt.enable_bidi = true;
 }
 
 fn cStringDup(allocator: Allocator, list: *std.ArrayListUnmanaged([]u8), cstr: ?[*:0]const u8) ![]u8 {
@@ -351,6 +373,8 @@ fn startServer(handle: *ServerHandle) !void {
         server.deinit();
     }
 
+    applyForcedWebTransport(handle, server);
+
     try server.bind();
     handle.server = server;
 
@@ -361,7 +385,7 @@ fn startServer(handle: *ServerHandle) !void {
 fn runServerThread(handle: *ServerHandle) void {
     if (handle.server) |srv| {
         srv.run() catch |err| {
-            std.log.err("zig_h3_server run() failed: {s}", .{@errorName(err)});
+            logError(handle, "zig_h3_server run() failed: {s}", .{@errorName(err)});
         };
     }
     handle.state = .stopped;
@@ -405,6 +429,11 @@ fn sliceFromC(ptr: ?[*]const u8, len: usize) []const u8 {
     return ptr.?[0..len];
 }
 
+fn headersFromC(ptr: ?[*]const ZigHeader, len: usize) []const ZigHeader {
+    if (len == 0 or ptr == null) return &[_]ZigHeader{};
+    return ptr.?[0..len];
+}
+
 pub export fn zig_h3_server_new(cfg_ptr: ?*const ZigServerConfig) ?*ZigServer {
     const allocator = std.heap.c_allocator;
     var handle = allocator.create(ServerHandle) catch return null;
@@ -412,11 +441,16 @@ pub export fn zig_h3_server_new(cfg_ptr: ?*const ZigServerConfig) ?*ZigServer {
         .allocator = allocator,
         .config = config_mod.ServerConfig{},
         .builder = routing_dynamic.Builder.init(allocator),
+        .session_handles = .{},
+        .owned_strings = .{},
+        .force_webtransport = false,
+        .log_callback = null,
+        .log_user = null,
     };
 
     if (applyConfigDefaults(handle, cfg_ptr)) |_| {} else |err| {
+        logError(handle, "zig_h3_server_new failed: {s}", .{@errorName(err)});
         handle.deinit();
-        std.log.err("zig_h3_server_new failed: {s}", .{@errorName(err)});
         return null;
     }
     return @ptrCast(handle);
@@ -447,7 +481,7 @@ pub export fn zig_h3_server_route(
     const method = std.mem.span(method_c.?);
     const pattern = std.mem.span(pattern_c.?);
     registerRoute(handle, method, pattern, cb, dgram_cb, wt_cb, user) catch |err| {
-        std.log.err("zig_h3_server_route failed: {s}", .{@errorName(err)});
+        logError(handle, "zig_h3_server_route failed: {s}", .{@errorName(err)});
         return -5;
     };
     return 0;
@@ -456,7 +490,7 @@ pub export fn zig_h3_server_route(
 pub export fn zig_h3_server_start(server_ptr: ?*ZigServer) i32 {
     const handle = asHandle(server_ptr) orelse return -1;
     startServer(handle) catch |err| {
-        std.log.err("zig_h3_server_start failed: {s}", .{@errorName(err)});
+        logError(handle, "zig_h3_server_start failed: {s}", .{@errorName(err)});
         return -2;
     };
     return 0;
@@ -465,6 +499,13 @@ pub export fn zig_h3_server_start(server_ptr: ?*ZigServer) i32 {
 pub export fn zig_h3_server_stop(server_ptr: ?*ZigServer) i32 {
     const handle = asHandle(server_ptr) orelse return -1;
     stopServer(handle);
+    return 0;
+}
+
+pub export fn zig_h3_server_set_log(server_ptr: ?*ZigServer, cb: LogCallback, user: ?*anyopaque) i32 {
+    const handle = asHandle(server_ptr) orelse return -1;
+    handle.log_callback = cb;
+    handle.log_user = if (cb != null) user else null;
     return 0;
 }
 
@@ -507,6 +548,71 @@ pub export fn zig_h3_response_end(
     const handle = asResponse(resp_ptr) orelse return -1;
     const data_slice = if (data_len == 0 or data_ptr == null) null else sliceFromC(data_ptr, data_len);
     handle.response.end(data_slice) catch |err| return mapHandlerError(err);
+    return 0;
+}
+
+pub export fn zig_h3_response_send_h3_datagram(
+    resp_ptr: ?*ZigResponse,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    const handle = asResponse(resp_ptr) orelse return -1;
+    if (data_len == 0 or data_ptr == null) return 0;
+    const data = sliceFromC(data_ptr, data_len);
+    handle.response.sendH3Datagram(data) catch |err| return mapHandlerError(err);
+    return 0;
+}
+
+pub export fn zig_h3_response_send_trailers(
+    resp_ptr: ?*ZigResponse,
+    headers_ptr: ?[*]const ZigHeader,
+    headers_len: usize,
+) i32 {
+    const handle = asResponse(resp_ptr) orelse return -1;
+    if (headers_len == 0 or headers_ptr == null) {
+        handle.response.sendTrailers(&.{}) catch |err| return mapHandlerError(err);
+        return 0;
+    }
+    const headers = headersFromC(headers_ptr, headers_len);
+    const allocator = handle.response.allocator;
+    var trailers = allocator.alloc(http.Response.Trailer, headers_len) catch {
+        return -500;
+    };
+    defer allocator.free(trailers);
+    for (headers, 0..) |hdr, idx| {
+        trailers[idx] = .{
+            .name = sliceFromC(hdr.name, hdr.name_len),
+            .value = sliceFromC(hdr.value, hdr.value_len),
+        };
+    }
+    handle.response.sendTrailers(trailers) catch |err| return mapHandlerError(err);
+    return 0;
+}
+
+pub export fn zig_h3_response_defer_end(resp_ptr: ?*ZigResponse) i32 {
+    const handle = asResponse(resp_ptr) orelse return -1;
+    handle.response.deferEnd();
+    return 0;
+}
+
+pub export fn zig_h3_response_set_auto_end(resp_ptr: ?*ZigResponse, enable: u8) i32 {
+    const handle = asResponse(resp_ptr) orelse return -1;
+    if (enable != 0) {
+        handle.response.enableAutoEnd();
+    } else {
+        handle.response.deferEnd();
+    }
+    return 0;
+}
+
+pub export fn zig_h3_response_should_auto_end(resp_ptr: ?*ZigResponse) i32 {
+    const handle = asResponse(resp_ptr) orelse return -1;
+    return if (handle.response.shouldAutoEnd()) 1 else 0;
+}
+
+pub export fn zig_h3_response_process_partial(resp_ptr: ?*ZigResponse) i32 {
+    const handle = asResponse(resp_ptr) orelse return -1;
+    handle.response.processPartialResponse() catch |err| return mapHandlerError(err);
     return 0;
 }
 
