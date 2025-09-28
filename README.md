@@ -1,6 +1,6 @@
 # zig-quiche-h3
 
-> ⚠️ Experimental only. This codebase is a playground for QUIC + HTTP/3 in Zig; it is **not** production ready. Expect breaking changes, partial implementations, and sharp edges.
+> ⚠️ Still experimental. The project now powers its own end-to-end harness and native HTTP/3 client, but it remains a protocol playground—expect rapid change and sharp edges.
 
 ## Overview
 This repository explores how far Zig can push Cloudflare’s [`quiche`](https://github.com/cloudflare/quiche) when accessed through its C FFI. It ships a libev-backed event loop, reusable HTTP/3 server scaffolding, QUIC and H3 DATAGRAM helpers, and experimental WebTransport hooks. Routing can be defined at compile time or build up at runtime, and both paths share the same matcher core so precedence and wildcard handling stay consistent.
@@ -18,7 +18,7 @@ This repository explores how far Zig can push Cloudflare’s [`quiche`](https://
   - `examples/` — `udp_echo.zig`, `quic_server.zig`, `quic_dgram_echo.zig`, `wt_client.zig` (WebTransport example client for datagram echo).
   - `tests.zig` — umbrella unit-test entry point (also prints quiche version during `zig build test`).
 - `third_party/quiche/` — git submodule (upstream quiche sources).
-- `docs/` — specification, implementation plan, and deeper design logs.
+- `docs/` — specifications and roadmaps (see `docs/spec.md`, `docs/plan.md`, `docs/client-plan.md`).
 - `qlogs/` — runtime output when qlog capture is enabled.
 
 ## Prerequisites
@@ -56,6 +56,14 @@ Useful flags:
   - Test with h3-client: `./zig-out/bin/h3-client --url https://127.0.0.1:4433/h3dgram/echo --h3-dgram --dgram-payload "test" --insecure`
 - WebTransport example client (datagram echo): `zig build wt-client -Dwith-libev=true … -- --url https://127.0.0.1:4433/wt/echo`
 
+## Native HTTP/3 Client
+- Build with `zig build h3-client` (installs to `zig-out/bin/h3-client`).
+- Curl-compatible output via `--curl-compat`, `--include-headers`, and optional `--json` structured logs.
+- Concurrency (`--repeat`, pooled connections) and streaming controls (`--stream`, `--limit-rate`).
+- DATAGRAM helpers (`--h3-dgram`, `--dgram-*`, `--wait-for-dgrams`) plus plain QUIC echo support.
+- WebTransport toggles (`--enable-webtransport`) expose WT datagram queues and client-initiated streams.
+- The Bun harness (`tests/e2e/helpers/zigClient.ts`) wraps this binary; usage details and roadmap live in `docs/h3-client-usage.md` and `docs/client-plan.md`.
+
 ### Qlog Capture
 - Servers write per-connection traces under `qlogs/` by default (`--no_qlog` disables this). Each filename is derived from the connection ID for easy lookup in [qvis](https://qvis.edm.uhasselt.be/).
 - The WebTransport example client stores its traces under `qlogs/client/`; clean the directory between runs if you want a fresh capture set.
@@ -63,8 +71,9 @@ Useful flags:
 
 ### Tests
 - Unit tests / smoke: `zig build test`
-- Bun E2E (requires Bun 1.x):
+- Bun E2E (requires Bun 1.x and the native client build):
   - `bun install`
+  - `zig build h3-client` (once per checkout; the harness shells out to it)
   - `bun test tests/e2e`
   - Stress: `H3_STRESS=1 bun test`
 
