@@ -212,6 +212,10 @@ pub fn Impl(comptime S: type) type {
                                     }
                                     state.request.params = params;
 
+                                    if (f.route.user_data) |ptr| {
+                                        state.user_data = ptr;
+                                    }
+
                                     // Install handler/callbacks
                                     if (f.route.on_h3_dgram) |cb| {
                                         state.on_h3_dgram = cb;
@@ -267,8 +271,7 @@ pub fn Impl(comptime S: type) type {
                                 if (mr == .Found) {
                                     const route = mr.Found.route;
                                     if (route.on_wt_session != null and state.is_webtransport) {
-                                        // Store the callback pointer in user_data for later invocation
-                                        state.user_data = @ptrCast(@constCast(route.on_wt_session));
+                                        state.wt_session_handler = route.on_wt_session;
                                     }
                                 }
 
@@ -338,9 +341,7 @@ pub fn Impl(comptime S: type) type {
                                     state.wt_handshake_state = .pending;
 
                                     // Invoke the on_wt_session callback if provided by the route
-                                    if (state.user_data) |callback_ptr| {
-                                        // Cast user_data back to WebTransport session callback type
-                                        const wt_handler = @as(http.handler.OnWebTransportSession, @ptrCast(@alignCast(callback_ptr)));
+                                    if (state.wt_session_handler) |wt_handler| {
                                         wt_handler(&state.request, session_wrapper.asAnyOpaque()) catch |err| {
                                             server_logging.warnf(self, "WebTransport session handler error: {s}\n", .{@errorName(err)});
                                             state.wt_handshake_state = .rejected;

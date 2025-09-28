@@ -110,6 +110,7 @@ pub const Builder = struct {
             .on_h3_dgram = opts.on_h3_dgram,
             .on_wt_session = opts.on_wt_session,
             .on_wt_datagram = opts.on_wt_datagram,
+            .user_data = opts.user_data,
         });
         return self;
     }
@@ -142,6 +143,7 @@ pub const Builder = struct {
         on_h3_dgram: ?http.handler.OnH3Datagram = null,
         on_wt_session: ?http.handler.OnWebTransportSession = null,
         on_wt_datagram: ?http.handler.OnWebTransportDatagram = null,
+        user_data: ?*anyopaque = null,
     };
 
     pub fn streaming(self: *Builder, pattern: []const u8, opts: StreamingOpts) !*Builder {
@@ -157,6 +159,7 @@ pub const Builder = struct {
             .on_h3_dgram = opts.on_h3_dgram,
             .on_wt_session = opts.on_wt_session,
             .on_wt_datagram = opts.on_wt_datagram,
+            .user_data = opts.user_data,
         });
         return self;
     }

@@ -20,6 +20,7 @@ pub const FoundRoute = struct {
     on_body_complete: ?http.handler.OnBodyComplete = null,
     on_wt_session: ?http.handler.OnWebTransportSession = null,
     on_wt_datagram: ?http.handler.OnWebTransportDatagram = null,
+    user_data: ?*anyopaque = null,
 };
 
 pub const MatchResult = union(enum) {

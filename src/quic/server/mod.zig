@@ -43,6 +43,7 @@ pub const RequestState = struct {
 
     // User data for streaming handlers to store context
     user_data: ?*anyopaque = null,
+    wt_session_handler: ?http.handler.OnWebTransportSession = null,
 
     // Push-mode streaming callbacks (include Response pointer for bidirectional streaming)
     on_headers: ?http.OnHeaders = null,
@@ -1170,7 +1171,9 @@ pub const QuicServer = struct {
             .body_complete = false,
             .handler_invoked = false,
             .is_streaming = false,
+            .is_download = false,
             .user_data = null,
+            .wt_session_handler = null,
             .on_headers = null,
             .on_body_chunk = null,
             .on_body_complete = null,
