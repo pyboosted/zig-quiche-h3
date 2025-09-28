@@ -43,11 +43,10 @@ Deliver first-class Bun bindings for the zig-quiche-h3 server and client so Bun 
 - Bun tooling can locate the library by setting `process.env.ZIG_H3_LIBDIR` (defaults to `${projectRoot}/zig-out/lib`) and resolving the header via `${projectRoot}/zig-out/include`.
 
 ### M1 — Server FFI Surface
-- [ ] Implement `zig_h3_server_new/free/start/stop` plus configuration struct ingestion.
-- [ ] Expose routing registration APIs (`zig_h3_route`, `zig_h3_datagram`, WebTransport hooks) with opaque handle lifetimes.
-- [ ] Provide request/response helpers (`zig_h3_resp_*`, streaming bodies, trailers) mapped to Bun-friendly pointer semantics.
-- [ ] Add polling event API (`zig_h3_next_event`) returning tagged unions covering request start, body chunk, completion, datagram, and log events.
-- [ ] Implement thread-safe callback path (JSCallback) guarded by runtime checks and meaningful error codes when Bun lacks `threadsafe` support.
+- [x] Implement `zig_h3_server_new/free/start/stop` plus configuration struct ingestion.
+- [x] Expose routing registration APIs (requests, H3 DATAGRAM, WebTransport) with opaque handle lifetimes.
+- [x] Provide request/response helpers (status/headers/body, streaming controls, trailers, DATAGRAM send).
+- [x] Deliver thread-safe callback support via Bun `JSCallback`/Worker guidance; no polling API required.
 
 ### M2 — Client FFI Surface
 - [ ] Expose `zig_h3_client_init/deinit`, configuration ingestion, and connection pooling hints.
@@ -83,7 +82,7 @@ Deliver first-class Bun bindings for the zig-quiche-h3 server and client so Bun 
 - **CI**: Extend workflows to build dynamic libs, run Bun tests on macOS 14 and Ubuntu 22.04 (x86_64). Add optional aarch64 job once runners are available.
 
 ## Risks & Mitigations
-- **Thread safety of callbacks** — Bun’s thread-safe JSCallback support is still experimental; provide a polling API fallback and favor Worker-based dispatch where possible.citeturn0search6
+- **Thread safety of callbacks** — Bun’s thread-safe JSCallback support is still experimental; emphasize Worker-based dispatch and document how to construct `JSCallback` with `threadsafe: true`.citeturn0search6
 - **Resource leaks** — Require explicit `close`/`free` methods and add Bun wrappers that automatically dispose via `FinalizationRegistry` for best-effort cleanup.
 - **Platform differences** — Validate dlopen paths and calling conventions on macOS/Linux; add automated smoke tests invoking `zig_h3_version()` before running suites.
 - **FFI instability** — Version exported symbols (e.g., `zig_h3_server_new_v1`) and maintain semver doc for breaking changes.
