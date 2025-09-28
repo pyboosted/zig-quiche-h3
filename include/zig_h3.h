@@ -20,6 +20,7 @@ typedef struct zig_h3_server zig_h3_server;
 
 /** Opaque response handle passed to request callbacks. */
 typedef struct zig_h3_response zig_h3_response;
+typedef struct zig_h3_wt_session zig_h3_wt_session;
 
 /**
  * Server configuration. All string pointers may be NULL to use defaults and
@@ -60,6 +61,7 @@ typedef struct zig_h3_request {
 /** Request callback signature. */
 typedef void (*zig_h3_request_cb)(void *user, const zig_h3_request *req, zig_h3_response *resp);
 typedef void (*zig_h3_datagram_cb)(void *user, const zig_h3_request *req, zig_h3_response *resp, const uint8_t *data, size_t data_len);
+typedef void (*zig_h3_wt_session_cb)(void *user, const zig_h3_request *req, zig_h3_wt_session *session);
 
 zig_h3_server *zig_h3_server_new(const zig_h3_server_config *config);
 int zig_h3_server_free(zig_h3_server *server);
@@ -69,6 +71,7 @@ int zig_h3_server_route(
     const char *pattern,
     zig_h3_request_cb request_cb,
     zig_h3_datagram_cb datagram_cb,
+    zig_h3_wt_session_cb wt_session_cb,
     void *user_data);
 int zig_h3_server_start(zig_h3_server *server);
 int zig_h3_server_stop(zig_h3_server *server);
@@ -88,6 +91,12 @@ int zig_h3_response_end(
     zig_h3_response *response,
     const uint8_t *data,
     size_t data_len);
+
+int zig_h3_wt_accept(zig_h3_wt_session *session);
+int zig_h3_wt_reject(zig_h3_wt_session *session, uint16_t status);
+int zig_h3_wt_close(zig_h3_wt_session *session, uint32_t code, const uint8_t *reason, size_t reason_len);
+int zig_h3_wt_send_datagram(zig_h3_wt_session *session, const uint8_t *data, size_t data_len);
+int zig_h3_wt_release(zig_h3_wt_session *session);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const config_mod = @import("../quic/config.zig");
 const server_pkg = @import("../quic/server.zig");
 const routing_dynamic = @import("../routing/dynamic.zig");
@@ -9,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const QuicServer = server_pkg.QuicServer;
 const Method = http.Method;
 const FfiError = error{ InvalidMethod, InvalidState };
+const WTSession = QuicServer.WTApi.Session;
 
 pub const ZigServerConfig = extern struct {
     cert_path: ?[*:0]const u8 = null,
@@ -48,14 +50,17 @@ comptime {
 
 pub const ZigResponse = opaque {};
 pub const ZigServer = opaque {};
+pub const ZigWebTransportSession = opaque {};
 
 const RequestCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, resp: *ZigResponse) callconv(.C) void;
 const DatagramCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, resp: *ZigResponse, data: ?[*]const u8, data_len: usize) callconv(.C) void;
+const WTSessionCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, session: *ZigWebTransportSession) callconv(.C) void;
 
 const RouteContext = struct {
     server: *ServerHandle,
     callback: RequestCallback,
     datagram_callback: DatagramCallback,
+    wt_session_callback: WTSessionCallback,
     user_data: ?*anyopaque,
 };
 
@@ -70,7 +75,9 @@ const ServerHandle = struct {
     thread: ?std.Thread = null,
     state: ServerState = .created,
     route_contexts: std.ArrayListUnmanaged(*RouteContext) = .{},
+    session_handles: std.ArrayListUnmanaged(*WebTransportSessionHandle) = .{},
     owned_strings: std.ArrayListUnmanaged([]u8) = .{},
+    force_webtransport: bool = false,
 
     fn deinit(self: *ServerHandle) void {
         if (self.thread) |t| {
@@ -90,6 +97,11 @@ const ServerHandle = struct {
             self.allocator.destroy(ctx);
         }
         self.route_contexts.deinit(self.allocator);
+        for (self.session_handles.items) |sess_handle| {
+            sess_handle.*.clear();
+            self.allocator.destroy(sess_handle);
+        }
+        self.session_handles.deinit(self.allocator);
         for (self.owned_strings.items) |s| {
             self.allocator.free(s);
         }
@@ -116,6 +128,52 @@ fn asResponse(resp_ptr: ?*ZigResponse) ?*ResponseHandle {
 const ResponseHandle = struct {
     response: *http.Response,
 };
+
+const WebTransportSessionHandle = struct {
+    ctx: *RouteContext,
+    session: *WTSession,
+
+    fn asOpaque(self: *WebTransportSessionHandle) *ZigWebTransportSession {
+        return @ptrCast(@alignCast(self));
+    }
+
+    fn clear(self: *WebTransportSessionHandle) void {
+        self.session.state.session.user_data = null;
+    }
+};
+
+fn sessionHandleFromOpaque(ptr: ?*ZigWebTransportSession) ?*WebTransportSessionHandle {
+    if (ptr) |raw| return @ptrCast(@alignCast(raw));
+    return null;
+}
+
+fn ensureSessionHandle(ctx: *RouteContext, session: *WTSession) errors.WebTransportError!*WebTransportSessionHandle {
+    if (session.state.session.user_data) |existing| {
+        return @ptrCast(@alignCast(existing));
+    }
+
+    const handle = ctx.server.allocator.create(WebTransportSessionHandle) catch {
+        return errors.WebTransportError.OutOfMemory;
+    };
+    handle.* = .{ .ctx = ctx, .session = session };
+    session.state.session.user_data = handle;
+    ctx.server.session_handles.append(ctx.server.allocator, handle) catch {
+        session.state.session.user_data = null;
+        ctx.server.allocator.destroy(handle);
+        return errors.WebTransportError.OutOfMemory;
+    };
+    return handle;
+}
+
+fn removeSessionHandle(server: *ServerHandle, target: *WebTransportSessionHandle) void {
+    var i: usize = 0;
+    while (i < server.session_handles.items.len) : (i += 1) {
+        if (server.session_handles.items[i] == target) {
+            _ = server.session_handles.swapRemove(i);
+            return;
+        }
+    }
+}
 
 fn toOptionalPtr(slice: []const u8) ?[*]const u8 {
     return if (slice.len == 0) null else slice.ptr;
@@ -144,6 +202,13 @@ fn buildRequestView(req: *http.Request) ZigRequest {
         .headers_len = headers_slice.len,
         .stream_id = req.stream_id,
     };
+}
+
+fn applyForcedWebTransport(handle: *ServerHandle) void {
+    if (!handle.force_webtransport) return;
+    posix.setenvZ("H3_WEBTRANSPORT", "1", true) catch {};
+    posix.setenvZ("H3_WT_STREAMS", "1", true) catch {};
+    posix.setenvZ("H3_WT_BIDI", "1", true) catch {};
 }
 
 fn cStringDup(allocator: Allocator, list: *std.ArrayListUnmanaged([]u8), cstr: ?[*:0]const u8) ![]u8 {
@@ -188,6 +253,7 @@ fn applyConfigDefaults(handle: *ServerHandle, cfg_src: ?*const ZigServerConfig) 
     }
     if (cfg.enable_webtransport != 0) {
         handle.config.enable_dgram = true;
+        handle.force_webtransport = true;
     }
 }
 
@@ -224,17 +290,34 @@ fn datagramHandler(req: *http.Request, res: *http.Response, payload: []const u8)
     }
 }
 
+fn wtSessionHandler(req: *http.Request, session_ptr: *anyopaque) errors.WebTransportError!void {
+    const ctx_ptr = req.user_data orelse return errors.WebTransportError.InvalidState;
+    const ctx = @as(*RouteContext, @ptrCast(@alignCast(ctx_ptr)));
+    const callback = ctx.wt_session_callback orelse return errors.WebTransportError.InvalidState;
+    const session_wrapper = WTSession.fromOpaque(session_ptr);
+    const handle = try ensureSessionHandle(ctx, session_wrapper);
+    const request_view = buildRequestView(req);
+    callback(ctx.user_data, &request_view, handle.asOpaque());
+}
+
 fn registerRoute(
     handle: *ServerHandle,
     method_str: []const u8,
     pattern: []const u8,
     cb: RequestCallback,
     dgram_cb: DatagramCallback,
+    wt_cb: WTSessionCallback,
     user: ?*anyopaque,
 ) !void {
     const method = Method.fromString(method_str) orelse return FfiError.InvalidMethod;
     const ctx = try handle.allocator.create(RouteContext);
-    ctx.* = .{ .server = handle, .callback = cb, .datagram_callback = dgram_cb, .user_data = user };
+    ctx.* = .{
+        .server = handle,
+        .callback = cb,
+        .datagram_callback = dgram_cb,
+        .wt_session_callback = wt_cb,
+        .user_data = user,
+    };
     try handle.route_contexts.append(handle.allocator, ctx);
 
     try handle.builder.add(.{
@@ -242,16 +325,22 @@ fn registerRoute(
         .method = method,
         .handler = requestHandler,
         .on_h3_dgram = if (dgram_cb != null) datagramHandler else null,
+        .on_wt_session = if (wt_cb != null) wtSessionHandler else null,
         .user_data = ctx,
     });
 
     if (dgram_cb != null) {
         handle.config.enable_dgram = true;
     }
+    if (wt_cb != null) {
+        handle.config.enable_dgram = true;
+        handle.force_webtransport = true;
+    }
 }
 
 fn startServer(handle: *ServerHandle) !void {
     if (handle.state == .running) return FfiError.InvalidState;
+    applyForcedWebTransport(handle);
     const dyn = try handle.allocator.create(routing_dynamic.DynMatcher);
     handle.matcher = dyn;
     dyn.* = try handle.builder.build();
@@ -291,6 +380,14 @@ fn stopServer(handle: *ServerHandle) void {
         srv.deinit();
         handle.server = null;
     }
+    var idx: usize = 0;
+    while (idx < handle.session_handles.items.len) {
+        const sess_handle = handle.session_handles.items[idx];
+        sess_handle.clear();
+        handle.allocator.destroy(sess_handle);
+        idx += 1;
+    }
+    handle.session_handles.items.len = 0;
     if (handle.matcher) |m| {
         m.deinit();
         handle.allocator.destroy(m);
@@ -340,6 +437,7 @@ pub export fn zig_h3_server_route(
     pattern_c: ?[*:0]const u8,
     cb: RequestCallback,
     dgram_cb: DatagramCallback,
+    wt_cb: WTSessionCallback,
     user: ?*anyopaque,
 ) i32 {
     const handle = asHandle(server_ptr) orelse return -1;
@@ -348,7 +446,7 @@ pub export fn zig_h3_server_route(
     if (cb == null) return -4;
     const method = std.mem.span(method_c.?);
     const pattern = std.mem.span(pattern_c.?);
-    registerRoute(handle, method, pattern, cb, dgram_cb, user) catch |err| {
+    registerRoute(handle, method, pattern, cb, dgram_cb, wt_cb, user) catch |err| {
         std.log.err("zig_h3_server_route failed: {s}", .{@errorName(err)});
         return -5;
     };
@@ -409,5 +507,50 @@ pub export fn zig_h3_response_end(
     const handle = asResponse(resp_ptr) orelse return -1;
     const data_slice = if (data_len == 0 or data_ptr == null) null else sliceFromC(data_ptr, data_len);
     handle.response.end(data_slice) catch |err| return mapHandlerError(err);
+    return 0;
+}
+
+pub export fn zig_h3_wt_accept(session_ptr: ?*ZigWebTransportSession) i32 {
+    const handle = sessionHandleFromOpaque(session_ptr) orelse return -1;
+    handle.session.accept(.{}) catch |err| return mapHandlerError(err);
+    return 0;
+}
+
+pub export fn zig_h3_wt_reject(session_ptr: ?*ZigWebTransportSession, status: u16) i32 {
+    const handle = sessionHandleFromOpaque(session_ptr) orelse return -1;
+    handle.session.reject(.{ .status = status }) catch |err| return mapHandlerError(err);
+    return 0;
+}
+
+pub export fn zig_h3_wt_close(
+    session_ptr: ?*ZigWebTransportSession,
+    code: u32,
+    reason_ptr: ?[*]const u8,
+    reason_len: usize,
+) i32 {
+    const handle = sessionHandleFromOpaque(session_ptr) orelse return -1;
+    const reason = sliceFromC(reason_ptr, reason_len);
+    handle.session.close(.{ .code = code, .reason = reason }) catch |err| return mapHandlerError(err);
+    return 0;
+}
+
+pub export fn zig_h3_wt_send_datagram(
+    session_ptr: ?*ZigWebTransportSession,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    const handle = sessionHandleFromOpaque(session_ptr) orelse return -1;
+    if (data_len == 0 or data_ptr == null) return 0;
+    const data = sliceFromC(data_ptr, data_len);
+    handle.session.sendDatagram(data) catch |err| return mapHandlerError(err);
+    return 0;
+}
+
+pub export fn zig_h3_wt_release(session_ptr: ?*ZigWebTransportSession) i32 {
+    const handle = sessionHandleFromOpaque(session_ptr) orelse return -1;
+    const server_handle = handle.ctx.server;
+    removeSessionHandle(server_handle, handle);
+    handle.clear();
+    server_handle.allocator.destroy(handle);
     return 0;
 }
