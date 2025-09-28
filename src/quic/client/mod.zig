@@ -32,6 +32,7 @@ const lifecycle = @import("lifecycle.zig");
 const h3_core = @import("h3_core.zig");
 const datagram = @import("datagram.zig");
 const webtransport_core = @import("webtransport_core.zig");
+const event_loop_core = @import("event_loop_core.zig");
 
 pub const ClientError = client_errors.ClientError;
 pub const HeaderPair = client_state.HeaderPair;
@@ -341,7 +342,7 @@ pub const QuicClient = struct {
         return H3Core.emitEvent(self, state, event);
     }
 
-    fn sendPendingBodies(self: *QuicClient) void {
+    pub fn sendPendingBodies(self: *QuicClient) void {
         H3Core.sendPendingBodies(self);
     }
 
@@ -381,7 +382,7 @@ pub const QuicClient = struct {
         return Datagram.sendQuicDatagram(self, payload);
     }
 
-    fn processDatagrams(self: *QuicClient) void {
+    pub fn processDatagrams(self: *QuicClient) void {
         Datagram.processDatagrams(self);
     }
 
@@ -414,11 +415,11 @@ pub const QuicClient = struct {
         WebTransportCore.recordCapsuleSent(self, capsule);
     }
 
-    fn processReadableWtStreams(self: *QuicClient) void {
+    pub fn processReadableWtStreams(self: *QuicClient) void {
         WebTransportCore.processReadableWtStreams(self);
     }
 
-    fn processWritableWtStreams(self: *QuicClient) void {
+    pub fn processWritableWtStreams(self: *QuicClient) void {
         WebTransportCore.processWritableWtStreams(self);
     }
 
@@ -506,190 +507,38 @@ pub const QuicClient = struct {
     }
 
     fn handleReadable(self: *QuicClient, fd: posix.socket_t) ClientError!void {
-        const conn = try self.requireConn();
-        if (self.socket == null) return ClientError.NoSocket;
-
-        while (true) {
-            var peer_addr: posix.sockaddr.storage = undefined;
-            var peer_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-            const n = posix.recvfrom(fd, &self.recv_buf, 0, @ptrCast(&peer_addr), &peer_len) catch |err| switch (err) {
-                error.WouldBlock => break,
-                else => return ClientError.IoFailure,
-            };
-
-            if (n == 0) break;
-
-            if (self.config.enable_debug_logging) {
-                std.debug.print("[client] recvfrom bytes={d}\n", .{n});
-            }
-
-            var recv_info = quiche.c.quiche_recv_info{
-                .from = @ptrCast(&peer_addr),
-                .from_len = peer_len,
-                .to = @ptrCast(&self.local_addr),
-                .to_len = self.local_addr_len,
-            };
-
-            const slice = self.recv_buf[0..n];
-            _ = conn.recv(slice, &recv_info) catch |err| switch (err) {
-                QuicheError.Done => break,
-                else => return ClientError.QuicRecvFailed,
-            };
-
-            if (self.config.enable_debug_logging) {
-                std.debug.print("[client] quiche.recv consumed={d}\n", .{n});
-            }
-        }
-
-        try self.flushSend();
-        self.afterQuicProgress();
-
-        // Critical: Flush any flow control updates generated during data processing
-        // This ensures MAX_STREAM_DATA frames are sent after consuming data
-        try self.flushSend();
+        return EventLoopCore.handleReadable(self, fd);
     }
 
     pub fn flushSend(self: *QuicClient) ClientError!void {
-        const conn = try self.requireConn();
-        const sock = self.socket orelse return ClientError.NoSocket;
-
-        while (true) {
-            var send_info: quiche.c.quiche_send_info = undefined;
-            const written = conn.send(self.send_buf[0..], &send_info) catch |err| switch (err) {
-                QuicheError.Done => break,
-                else => return ClientError.QuicSendFailed,
-            };
-
-            const payload = self.send_buf[0..written];
-            const dest_ptr: *const posix.sockaddr = if (send_info.to_len != 0)
-                @ptrCast(&send_info.to)
-            else
-                @ptrCast(&self.remote_addr);
-            const dest_len: posix.socklen_t = if (send_info.to_len != 0)
-                send_info.to_len
-            else
-                self.remote_addr_len;
-
-            _ = posix.sendto(sock.fd, payload, 0, dest_ptr, dest_len) catch |err| switch (err) {
-                error.WouldBlock => break,
-                else => return ClientError.IoFailure,
-            };
-        }
+        return EventLoopCore.flushSend(self);
     }
 
     fn handleTimeout(self: *QuicClient) ClientError!void {
-        const conn = try self.requireConn();
-        conn.onTimeout();
-        try self.flushSend();
-        self.afterQuicProgress();
+        return EventLoopCore.handleTimeout(self);
     }
 
     pub fn afterQuicProgress(self: *QuicClient) void {
-        self.updateTimeout();
-        self.sendPendingBodies();
-        self.checkHandshakeState();
-        self.processReadableWtStreams();
-        self.processWritableWtStreams();
-        self.processH3Events();
-        self.processReadableWtStreams();
-        self.processWritableWtStreams();
-        self.processDatagrams();
+        EventLoopCore.afterQuicProgress(self);
     }
 
     fn updateTimeout(self: *QuicClient) void {
-        if (self.timeout_timer) |handle| {
-            const conn = if (self.conn) |*conn_ref| conn_ref else return;
-            const timeout_ms = conn.timeoutAsMillis();
-            if (timeout_ms == std.math.maxInt(u64)) {
-                self.event_loop.stopTimer(handle);
-                return;
-            }
-            const after_s = @as(f64, @floatFromInt(timeout_ms)) / 1000.0;
-            self.event_loop.startTimer(handle, after_s, 0);
-        }
+        EventLoopCore.updateTimeout(self);
     }
 
     fn checkHandshakeState(self: *QuicClient) void {
-        const conn = if (self.conn) |*conn_ref| conn_ref else return;
-        if (self.state != .connecting) return;
-
-        if (conn.isEstablished()) {
-            self.state = .established;
-            self.handshake_error = null;
-            self.stopTimeoutTimer();
-            self.stopConnectTimer();
-            self.event_loop.stop();
-            return;
-        }
-
-        if (conn.isClosed()) {
-            self.recordFailure(ClientError.ConnectionClosed);
-        }
+        EventLoopCore.checkHandshakeState(self);
     }
 
     fn stopTimeoutTimer(self: *QuicClient) void {
-        if (self.timeout_timer) |handle| {
-            self.event_loop.stopTimer(handle);
-        }
+        EventLoopCore.stopTimeoutTimer(self);
     }
 
     fn processH3Events(self: *QuicClient) void {
-        const conn = if (self.conn) |*conn_ref| conn_ref else return;
-        const h3_conn = blk: {
-            if (self.h3_conn) |*ptr| break :blk ptr;
-            return;
-        };
-
-        while (true) {
-            const result = h3_conn.poll(conn);
-            if (result == null) break;
-            var poll = result.?;
-            defer poll.deinit();
-
-            if (self.config.enable_debug_logging) {
-                std.debug.print(
-                    "[client] poll event={s} stream={d}\n",
-                    .{ @tagName(poll.event_type), poll.stream_id },
-                );
-            }
-
-            switch (poll.event_type) {
-                .Headers => self.onH3Headers(poll.stream_id, poll.raw_event),
-                .Data => self.onH3Data(poll.stream_id),
-                .Finished => self.onH3Finished(poll.stream_id),
-                .GoAway => self.onH3GoAway(poll.stream_id),
-                .Reset => self.onH3Reset(poll.stream_id),
-                .PriorityUpdate => {},
-            }
-        }
-
-        // After processing all H3 events, check for stream completion
-        // This is a fallback for large transfers where Finished event might not arrive
-        var it = self.requests.iterator();
-        while (it.next()) |entry| {
-            const stream_id = entry.key_ptr.*;
-            const state = entry.value_ptr.*;
-            if (!state.finished and state.status != null) {
-                // First check if we've received all expected content
-                if (state.content_length) |expected| {
-                    if (state.bytes_received >= expected) {
-                        self.onH3Finished(stream_id);
-                        continue;
-                    }
-                    // If we haven't received all data yet, try to read more
-                    // This handles the case where H3 stops sending Data events
-                    self.onH3Data(stream_id);
-                }
-
-                // Also check if stream is actually finished at QUIC level
-                if (conn.streamFinished(stream_id)) {
-                    self.onH3Finished(stream_id);
-                }
-            }
-        }
+        EventLoopCore.processH3Events(self);
     }
 
-    fn onH3Headers(self: *QuicClient, stream_id: u64, event: *quiche.c.quiche_h3_event) void {
+    pub fn onH3Headers(self: *QuicClient, stream_id: u64, event: *quiche.c.quiche_h3_event) void {
         const state = self.requests.get(stream_id) orelse return;
 
         const headers = h3.collectHeaders(state.allocator, event) catch {
@@ -770,7 +619,7 @@ pub const QuicClient = struct {
         }
     }
 
-    fn onH3Data(self: *QuicClient, stream_id: u64) void {
+    pub fn onH3Data(self: *QuicClient, stream_id: u64) void {
         const state = self.requests.get(stream_id) orelse return;
 
         const conn = if (self.conn) |*conn_ref| conn_ref else return;
@@ -849,7 +698,7 @@ pub const QuicClient = struct {
         }
     }
 
-    fn onH3Finished(self: *QuicClient, stream_id: u64) void {
+    pub fn onH3Finished(self: *QuicClient, stream_id: u64) void {
         const state = self.requests.get(stream_id) orelse return;
         state.finished = true;
         if (self.config.enable_debug_logging) {
@@ -870,11 +719,11 @@ pub const QuicClient = struct {
         }
     }
 
-    fn onH3Reset(self: *QuicClient, stream_id: u64) void {
+    pub fn onH3Reset(self: *QuicClient, stream_id: u64) void {
         self.failFetch(stream_id, ClientError.H3Error);
     }
 
-    fn onH3GoAway(self: *QuicClient, last_accepted_id: u64) void {
+    pub fn onH3GoAway(self: *QuicClient, last_accepted_id: u64) void {
         // Note: The stream_id from poll might be the GOAWAY stream ID,
         // but for HTTP/3 GOAWAY, it represents the last accepted request ID
 
@@ -967,6 +816,7 @@ const Lifecycle = lifecycle.Impl(QuicClient);
 const H3Core = h3_core.Impl(QuicClient);
 const Datagram = datagram.Impl(QuicClient);
 const WebTransportCore = webtransport_core.Impl(QuicClient);
+const EventLoopCore = event_loop_core.Impl(QuicClient);
 
 const ServerThreadCtx = struct {
     server: *QuicServer,
