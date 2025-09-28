@@ -49,10 +49,11 @@ Deliver first-class Bun bindings for the zig-quiche-h3 server and client so Bun 
 - [x] Deliver thread-safe callback support via Bun `JSCallback`/Worker guidance; no polling API required.
 
 ### M2 — Client FFI Surface
-- [ ] Expose `zig_h3_client_init/deinit`, configuration ingestion, and connection pooling hints.
-- [ ] Implement request issuance (`zig_h3_client_fetch_async` + callback, `zig_h3_client_poll`) including streaming bodies, datagrams, and WebTransport sessions.
-- [ ] Surface cancellation/timeouts and explicit flush APIs for long-lived requests.
-- [ ] Provide synchronous convenience wrappers (`zig_h3_client_fetch_blocking`) built atop the poll loop for simpler Bun usage.
+- [x] Expose `zig_h3_client_new/free/connect` plus configuration ingestion for basic clients.
+- [x] Implement fetch issuance with callback results and DATAGRAM send/receive hooks.
+- [ ] Add streaming/event callbacks (collect_body = 0), cancellation, and request timeouts.
+- [ ] Provide WebTransport session APIs mirroring the server façade.
+- [ ] Deliver connection pooling helpers or document reuse strategy.
 
 ### M3 — Bun TypeScript Bindings
 - [ ] Create `src/bun/server.ts` and `src/bun/client.ts` wrappers encapsulating the FFI map, pointer management, and error translation.
