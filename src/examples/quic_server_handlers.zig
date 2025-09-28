@@ -174,6 +174,14 @@ pub fn wtConnectInfoHandler(_: *http.Request, res: *http.Response) http.HandlerE
 
 pub fn wtEchoSessionHandler(_: *http.Request, session_ptr: *anyopaque) http.WebTransportError!void {
     const session = QuicServer.WebTransportSession.fromOpaque(session_ptr);
+    std.debug.print(
+        "[server] wtEchoSessionHandler enable_streams={s} enable_bidi={s} wt_enabled={s}\n",
+        .{
+            if (session.server.wt.enable_streams) "true" else "false",
+            if (session.server.wt.enable_bidi) "true" else "false",
+            if (session.server.wt.enabled) "true" else "false",
+        },
+    );
 
     session.setDatagramHandler(wtEchoDatagram);
 
@@ -232,11 +240,43 @@ fn wtBidiOpen(_: *anyopaque, _: *anyopaque) http.WebTransportStreamError!void {
 
 fn wtEchoStreamData(stream_ptr: *anyopaque, data: []const u8, fin: bool) http.WebTransportStreamError!void {
     const stream = QuicServer.WebTransportStream.fromOpaque(stream_ptr);
+    std.debug.print(
+        "[server] wtEchoStreamData stream={d} session={d} recv_len={d} fin={s} pending_before={d}\n",
+        .{
+            stream.id(),
+            stream.stream.session_id,
+            data.len,
+            if (fin) "true" else "false",
+            stream.stream.pending.items.len,
+        },
+    );
     if (data.len > 0) {
-        _ = try stream.send(data, false);
+        _ = stream.send(data, false) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.debug.print(
+                    "[server] wtEchoStreamData would block stream={d} session={d} pending_now={d}\n",
+                    .{ stream.id(), stream.stream.session_id, stream.stream.pending.items.len },
+                );
+                stream.server.requestFlush();
+                return error.WouldBlock;
+            },
+            else => return err,
+        };
+        stream.server.requestFlush();
     }
     if (fin) {
-        _ = try stream.send(&[_]u8{}, true);
+        _ = stream.send(&[_]u8{}, true) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.debug.print(
+                    "[server] wtEchoStreamData fin would block stream={d} session={d} pending_now={d}\n",
+                    .{ stream.id(), stream.stream.session_id, stream.stream.pending.items.len },
+                );
+                stream.server.requestFlush();
+                return;
+            },
+            else => return err,
+        };
+        stream.server.requestFlush();
     }
 }
 

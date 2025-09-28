@@ -87,7 +87,9 @@ pub const WebTransportSession = struct {
 
         pub fn send(self: *Stream, data: []const u8, fin: bool) ClientError!usize {
             if (self.session.state != .established) return ClientError.InvalidState;
-            if (!self.writable and data.len > 0) return ClientError.StreamBlocked;
+            if (!self.writable and data.len > 0) {
+                self.session.client.ensureStreamWritable(self.stream_id, data.len);
+            }
 
             if (data.len == 0) {
                 if (!fin) return 0;

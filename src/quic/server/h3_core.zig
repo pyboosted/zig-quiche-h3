@@ -153,6 +153,14 @@ pub fn Impl(comptime S: type) type {
                             }
 
                             if (is_webtransport) {
+                                if (!self.config.enable_dgram) {
+                                    server_logging.warnf(self, "WebTransport CONNECT rejected: QUIC DATAGRAM disabled\n", .{});
+                                    try sendErrorResponse(self, h3_conn, &conn.conn, result.stream_id, 501);
+                                    state.arena.deinit();
+                                    self.allocator.destroy(state);
+                                    conn.releaseRequest();
+                                    continue;
+                                }
                                 // Check if WebTransport is enabled at runtime
                                 // Must check the actual runtime flag, not just build flag
                                 if (!self.wt.enabled) {

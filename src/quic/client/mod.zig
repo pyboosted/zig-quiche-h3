@@ -1571,7 +1571,11 @@ pub const QuicClient = struct {
         self.updateTimeout();
         self.sendPendingBodies();
         self.checkHandshakeState();
+        self.processReadableWtStreams();
+        self.processWritableWtStreams();
         self.processH3Events();
+        self.processReadableWtStreams();
+        self.processWritableWtStreams();
         self.processDatagrams();
     }
 
@@ -1669,6 +1673,76 @@ pub const QuicClient = struct {
                 // Also check if stream is actually finished at QUIC level
                 if (conn.streamFinished(stream_id)) {
                     self.onH3Finished(stream_id);
+                }
+            }
+        }
+    }
+
+    fn processReadableWtStreams(self: *QuicClient) void {
+        const conn = if (self.conn) |*conn_ref| conn_ref else return;
+
+        var it = self.wt_streams.iterator();
+        while (it.next()) |entry| {
+            const stream_id = entry.key_ptr.*;
+            const wt_stream = entry.value_ptr.*;
+
+            var buf: [4096]u8 = undefined;
+            while (true) {
+                const res = conn.streamRecv(stream_id, &buf) catch |err| {
+                    if (err == quiche.QuicheError.Done) break;
+                    if (self.config.enable_debug_logging) {
+                        std.debug.print(
+                            "[client] WT stream recv error stream={d} err={s}\n",
+                            .{ stream_id, @errorName(err) },
+                        );
+                    }
+                    break;
+                };
+
+                if (res.n > 0 or res.fin) {
+                    std.debug.print(
+                        "[client] WT recv result stream={d} n={d} fin={s} \n",
+                        .{ stream_id, res.n, if (res.fin) "true" else "false" },
+                    );
+                }
+
+                if (res.n == 0 and !res.fin) {
+                    break;
+                }
+
+                if (res.n > 0 or res.fin) {
+                    const slice = buf[0..res.n];
+                    wt_stream.handleIncoming(slice, res.fin) catch |err| {
+                        std.debug.print(
+                            "[client] WT handleIncoming error stream={d} err={s}\n",
+                            .{ stream_id, @errorName(err) },
+                        );
+                        // On failure drop the stream but continue draining
+                    };
+                    std.debug.print(
+                        "[client] WT delivered bytes={d} fin={s} stream={d}\n",
+                        .{ res.n, if (res.fin) "true" else "false", stream_id },
+                    );
+                }
+
+                if (res.fin) break;
+            }
+        }
+    }
+
+    fn processWritableWtStreams(self: *QuicClient) void {
+        const conn = if (self.conn) |*conn_ref| conn_ref else return;
+
+        while (conn.streamWritableNext()) |stream_id| {
+            if (self.wt_streams.get(stream_id)) |stream| {
+                std.debug.print("[client] WT writable stream={d}\n", .{stream_id});
+                stream.writable = true;
+                if (stream.pending_fin) {
+                    _ = stream.send(&.{}, true) catch {
+                        // Ignore errors; will retry on next writable notification
+                        stream.pending_fin = true;
+                        continue;
+                    };
                 }
             }
         }

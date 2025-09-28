@@ -77,7 +77,6 @@ describeBoth("WebTransport session lifecycle", (binaryType: ServerBinaryType) =>
                         "--expect-close",
                     ]);
 
-                    console.error("expect-close result", result);
                     expect(result.exitCode).toBe(0);
                     expect(result.stderr).toContain("session closed by peer");
                 },

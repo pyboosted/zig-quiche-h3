@@ -175,6 +175,20 @@ pub fn applyRuntimeOverrides(
         if (cfg_eff.dgram_send_queue_len == 0) cfg_eff.dgram_send_queue_len = 1024;
     }
 
+    if (std.process.getEnvVarOwned(allocator, "H3_WT_STREAM_PENDING_MAX")) |pending| {
+        defer allocator.free(pending);
+        const val = std.fmt.parseUnsigned(usize, pending, 10) catch 0;
+        if (val > 0) {
+            cfg_eff.wt_stream_pending_max = val;
+            if (cfg_eff.enable_debug_logging) {
+                std.debug.print(
+                    "[INFO] H3: wt_stream_pending_max set to {d} via H3_WT_STREAM_PENDING_MAX\n",
+                    .{val},
+                );
+            }
+        }
+    } else |_| {}
+
     return RuntimeOverrides{
         .config = cfg_eff,
         .webtransport_enabled = webtransport_enabled,

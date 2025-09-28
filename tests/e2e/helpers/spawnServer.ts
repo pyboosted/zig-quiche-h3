@@ -121,25 +121,58 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
     verboseLog(`[E2E] Process spawned with PID: ${proc.pid} at ${new Date().toISOString()}`);
 
     // Only capture output if not in verbose mode to avoid complexity
-    if (!isVerboseMode()) {
-        // Simple non-blocking capture for non-verbose mode
-        if (proc.stdout) {
-            (async () => {
-                try {
-                    const text = await new Response(proc.stdout).text();
-                    if (text) serverLogs.push(`[stdout] ${text}`);
-                } catch {}
-            })();
-        }
-        if (proc.stderr) {
-            (async () => {
-                try {
-                    const text = await new Response(proc.stderr).text();
-                    if (text) serverLogs.push(`[stderr] ${text}`);
-                } catch {}
-            })();
-        }
-    }
+    const captureStream = (
+        stream: ReadableStream<Uint8Array> | null | undefined,
+        label: "stdout" | "stderr",
+    ): void => {
+        if (!stream) return;
+
+        const decoder = new TextDecoder();
+        let pending = "";
+
+        (async () => {
+            const reader = stream.getReader();
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (!value || value.byteLength == 0) continue;
+                    pending += decoder.decode(value, { stream: true });
+
+                    let newlineIndex = pending.indexOf("\n");
+                    while (newlineIndex !== -1) {
+                        const line = pending.slice(0, newlineIndex);
+                        pending = pending.slice(newlineIndex + 1);
+                        const entry = `[${label}] ${line}`;
+                        serverLogs.push(entry);
+                        if (isVerboseMode()) {
+                            const target = label === "stdout" ? process.stdout : process.stderr;
+                            target.write(`[server ${label}] ${line}\n`);
+                        }
+                        newlineIndex = pending.indexOf("\n");
+                    }
+                }
+
+                const trailing = pending + decoder.decode();
+                if (trailing.length > 0) {
+                    const entry = `[${label}] ${trailing}`;
+                    serverLogs.push(entry);
+                    if (isVerboseMode()) {
+                        const target = label === "stdout" ? process.stdout : process.stderr;
+                        target.write(`[server ${label}] ${trailing}\n`);
+                    }
+                    pending = "";
+                }
+            } catch (err) {
+                verboseLog(`[E2E] Error capturing server ${label}: ${err}`);
+            } finally {
+                reader.releaseLock();
+            }
+        })();
+    };
+
+    captureStream(proc.stdout, "stdout");
+    captureStream(proc.stderr, "stderr");
 
     // Create cleanup function
     const cleanup = async (): Promise<void> => {

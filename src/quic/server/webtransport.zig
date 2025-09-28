@@ -3,6 +3,7 @@ const quiche = @import("quiche");
 const h3 = @import("h3");
 const h3_datagram = @import("h3").datagram;
 const connection = @import("connection");
+const config_mod = @import("config");
 
 pub fn Impl(comptime S: type) type {
     return struct {
@@ -150,6 +151,12 @@ pub fn Impl(comptime S: type) type {
                 const sk = Self.StreamKey{ .conn = conn, .stream_id = stream_id };
                 if (self.wt.streams.get(sk)) |wt_stream| {
                     if (wt_stream.pending.items.len == 0) continue;
+                    const pending_before = wt_stream.pending.items.len;
+                    logDebug(
+                        self,
+                        "[server] WT flush attempt stream={d} session={d} pending_before={d} fin_on_flush={s}\n",
+                        .{ stream_id, wt_stream.session_id, pending_before, if (wt_stream.fin_on_flush) "true" else "false" },
+                    );
                     const buf = wt_stream.pending.items;
                     const written = conn.conn.streamSend(stream_id, buf, wt_stream.fin_on_flush) catch |err| {
                         if (err == quiche.QuicheError.Done) continue;
@@ -159,13 +166,23 @@ pub fn Impl(comptime S: type) type {
                         continue;
                     };
                     if (written > 0) {
+                        const pending_after = if (written >= pending_before) 0 else pending_before - written;
+                        logDebug(
+                            self,
+                            "[server] WT flush wrote={d} stream={d} session={d} pending_after={d} fin_on_flush={s}\n",
+                            .{ written, stream_id, wt_stream.session_id, pending_after, if (wt_stream.fin_on_flush) "true" else "false" },
+                        );
                         remaining -= @intCast(@as(i64, @min(@as(usize, written), @as(usize, std.math.maxInt(i64)))));
                         if (remaining <= 0) return;
                         if (written >= buf.len) {
                             wt_stream.pending.clearRetainingCapacity();
                         } else {
-                            @memmove(buf[0 .. buf.len - written], buf[written..]);
-                            wt_stream.pending.items = buf[0 .. buf.len - written];
+                            const new_len = buf.len - written;
+                            @memmove(buf[0..new_len], buf[written..]);
+                            wt_stream.pending.items = wt_stream.pending.items[0..new_len];
+                        }
+                        if (pending_after == 0 and wt_stream.fin_on_flush) {
+                            wt_stream.fin_on_flush = false;
                         }
                     }
                 }
@@ -180,29 +197,65 @@ pub fn Impl(comptime S: type) type {
             fin: bool,
         ) !usize {
             if (!Self.WithWT) return error.FeatureDisabled;
+            logDebug(
+                self,
+                "[server] WT send start stream={d} session={d} len={d} fin={s} pending_before={d}\n",
+                .{ stream.stream_id, stream.session_id, data.len, if (fin) "true" else "false", stream.pending.items.len },
+            );
             if (stream.pending.items.len == 0) {
                 const n = conn.conn.streamSend(stream.stream_id, data, fin) catch |err| {
                     if (err == quiche.QuicheError.Done or err == quiche.QuicheError.FlowControl) {
-                        if (data.len > self.config.wt_stream_pending_max) return error.WouldBlock;
+                        if (data.len > self.config.wt_stream_pending_max) {
+                            logWtStreamBlocked(stream, data.len, stream.pending.items.len, "pending_limit");
+                            return error.WouldBlock;
+                        }
                         try stream.pending.appendSlice(self.allocator, data);
                         if (fin) stream.fin_on_flush = true;
+                        logWtStreamBlocked(stream, data.len, stream.pending.items.len, "flow_control");
+                        logDebug(
+                            self,
+                            "[server] WT send enqueued (flow control) stream={d} session={d} queued_bytes={d} fin={s}\n",
+                            .{ stream.stream_id, stream.session_id, stream.pending.items.len, if (fin) "true" else "false" },
+                        );
                         return error.WouldBlock;
                     }
                     return err;
                 };
                 if (n < data.len) {
                     const rem = data.len - n;
-                    if (rem + stream.pending.items.len > self.config.wt_stream_pending_max) return error.WouldBlock;
+                    if (rem + stream.pending.items.len > self.config.wt_stream_pending_max) {
+                        logWtStreamBlocked(stream, rem, stream.pending.items.len, "pending_limit");
+                        return error.WouldBlock;
+                    }
                     try stream.pending.appendSlice(self.allocator, data[n..]);
                     if (fin) stream.fin_on_flush = true;
+                    logDebug(
+                        self,
+                        "[server] WT send partial queued stream={d} session={d} rem={d} fin={s} pending_now={d}\n",
+                        .{ stream.stream_id, stream.session_id, rem, if (fin) "true" else "false", stream.pending.items.len },
+                    );
                 }
                 if (self.wt.sessions.get(.{ .conn = conn, .session_id = stream.session_id })) |st| st.last_activity_ms = std.time.milliTimestamp();
+                logDebug(
+                    self,
+                    "[server] WT send immediate wrote={d} stream={d} session={d} pending_after={d} fin_on_flush={s}\n",
+                    .{ n, stream.stream_id, stream.session_id, stream.pending.items.len, if (stream.fin_on_flush) "true" else "false" },
+                );
                 return n;
             }
-            if (data.len + stream.pending.items.len > self.config.wt_stream_pending_max) return error.WouldBlock;
+            if (data.len + stream.pending.items.len > self.config.wt_stream_pending_max) {
+                logWtStreamBlocked(stream, data.len, stream.pending.items.len, "pending_limit");
+                return error.WouldBlock;
+            }
             try stream.pending.appendSlice(self.allocator, data);
             if (fin) stream.fin_on_flush = true;
             if (self.wt.sessions.get(.{ .conn = conn, .session_id = stream.session_id })) |st| st.last_activity_ms = std.time.milliTimestamp();
+            logWtStreamBlocked(stream, data.len, stream.pending.items.len, "queued");
+            logDebug(
+                self,
+                "[server] WT send appended to pending stream={d} session={d} pending_now={d} fin_on_flush={s}\n",
+                .{ stream.stream_id, stream.session_id, stream.pending.items.len, if (stream.fin_on_flush) "true" else "false" },
+            );
             return error.WouldBlock;
         }
 
@@ -220,6 +273,23 @@ pub fn Impl(comptime S: type) type {
                 return err;
             };
             if (n < data.len) return;
+        }
+
+        fn logWtStreamBlocked(
+            stream: *h3.WebTransportSession.WebTransportStream,
+            attempted: usize,
+            pending_after: usize,
+            reason: []const u8,
+        ) void {
+            std.debug.print(
+                "[server] WT stream send would block stream={d} session={d} pending={d} attempted={d} reason={s}\n",
+                .{ stream.stream_id, stream.session_id, pending_after, attempted, reason },
+            );
+        }
+
+        fn logDebug(self: *Self, comptime fmt: []const u8, args: anytype) void {
+            _ = self;
+            std.debug.print(fmt, args);
         }
 
         pub fn readWtStreamAll(
