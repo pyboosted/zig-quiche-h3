@@ -82,42 +82,4 @@ describeStatic("H3 DATAGRAM Tests", (binaryType: ServerBinaryType) => {
         }
     });
 
-    // TODO: replace with proper zig-http3-client checks when its done
-    test.skip("unknown flow_id handling", async () => {
-        // This is primarily tested through the server implementation
-        // The processH3Datagram method should drop datagrams with unknown flow_ids
-        // and increment the h3_dgrams_unknown_flow counter
-
-        const server = await spawnServer({ env: { H3_DGRAM_ECHO: "1" } });
-
-        try {
-            // Just verify the endpoint is available for this integration test
-            const response = await get(`https://127.0.0.1:${server.port}/h3dgram/echo`);
-            expect(response.status).toBe(200);
-
-            // The unknown flow_id behavior is tested at the server level
-            // when DATAGRAMs arrive with flow_ids that don't match any active requests
-        } finally {
-            await server.cleanup();
-        }
-    });
-
-    // TODO: replace with proper zig-http3-client checks when its done
-    test.skip("varint encoding/decoding boundary cases", async () => {
-        // This tests the h3/datagram.zig module functionality
-        // which is already covered by unit tests in that module
-
-        const server = await spawnServer({ env: { H3_DGRAM_ECHO: "1" } });
-
-        try {
-            // Verify server starts correctly with H3 DATAGRAM support
-            const response = await get(`https://127.0.0.1:${server.port}/`);
-            expect(response.status).toBe(200);
-
-            // The varint boundary cases are tested in the Zig unit tests
-            // This E2E test just confirms the server integration works
-        } finally {
-            await server.cleanup();
-        }
-    });
 });

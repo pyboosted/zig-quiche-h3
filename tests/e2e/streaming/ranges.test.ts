@@ -332,7 +332,7 @@ describeStatic("HTTP/3 Range Requests", (binaryType: ServerBinaryType) => {
     });
 
     describe("HEAD Requests with Ranges", () => {
-        it.skip("returns correct headers for HEAD with range (curl HTTP/3 limitation - exit code 18)", async () => {
+        it("returns correct headers for HEAD with range", async () => {
             const testFile = await mkfile(1024, new Uint8Array([0x01]));
             const relativePath = testFile.path.split("/tests/").pop() || testFile.path;
 
