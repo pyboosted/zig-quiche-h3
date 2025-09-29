@@ -1,9 +1,9 @@
 const std = @import("std");
-const config_mod = @import("../quic/config.zig");
-const server_pkg = @import("../quic/server.zig");
-const routing_dynamic = @import("../routing/dynamic.zig");
-const http = @import("../http/mod.zig");
-const errors = @import("../errors.zig");
+const config_mod = @import("config");
+const server_pkg = @import("server");
+const routing_dynamic = @import("routing_dynamic");
+const http = @import("http");
+const errors = @import("errors");
 
 const Allocator = std.mem.Allocator;
 const QuicServer = server_pkg.QuicServer;

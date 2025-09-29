@@ -578,6 +578,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     lib_mod.addIncludePath(b.path(quiche_include_dir));
+    lib_mod.addImport("quiche", quiche_ffi_mod);
+    lib_mod.addImport("h3", h3_mod);
+    lib_mod.addImport("http", http_mod);
+    lib_mod.addImport("errors", errors_mod);
+    lib_mod.addImport("routing", routing_mod);
+    lib_mod.addImport("routing_dynamic", routing_dyn_mod);
+    lib_mod.addImport("event_loop", event_loop_mod);
+    lib_mod.addImport("udp", udp_mod);
+    lib_mod.addImport("connection", connection_mod);
+    lib_mod.addImport("client", client_mod);
+    lib_mod.addImport("config", config_mod);
+    lib_mod.addImport("server", server_mod);
     const lib = b.addLibrary(.{ .name = "zigquicheh3", .root_module = lib_mod, .linkage = .dynamic });
     addQuicheLink(b, lib, use_system_quiche, quiche_lib_path, cargo_step);
     linkCommon(target, lib, link_ssl, with_libev, libev_lib_dir, true);

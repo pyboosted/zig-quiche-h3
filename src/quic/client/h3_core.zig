@@ -280,6 +280,7 @@ pub fn Impl(comptime ClientType: type) type {
             state.collect_body = options.on_event == null;
             state.response_callback = options.on_event;
             state.response_ctx = options.event_ctx;
+            state.timeout_override_ms = options.timeout_override_ms;
 
             if (options.body_provider) |provider| {
                 state.body_provider = provider;

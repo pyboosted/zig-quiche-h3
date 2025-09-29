@@ -51,7 +51,8 @@ Deliver first-class Bun bindings for the zig-quiche-h3 server and client so Bun 
 ### M2 — Client FFI Surface
 - [x] Expose `zig_h3_client_new/free/connect` plus configuration ingestion for basic clients.
 - [x] Implement fetch issuance with callback results and DATAGRAM send/receive hooks.
-- [ ] Add streaming/event callbacks (collect_body = 0), cancellation, and request timeouts.
+- [x] Add streaming/event callbacks (collect_body = 0) with per-event hooks.
+- [x] Expose cancellation controls and request timeout overrides via the FFI surface.
 - [ ] Provide WebTransport session APIs mirroring the server façade.
 - [ ] Deliver connection pooling helpers or document reuse strategy.
 

@@ -74,6 +74,39 @@ typedef struct zig_h3_client_config {
     uint32_t request_timeout_ms;
 } zig_h3_client_config;
 
+typedef void (*zig_h3_fetch_cb)(
+    void *user,
+    uint16_t status,
+    const zig_h3_header *headers,
+    size_t headers_len,
+    const uint8_t *body,
+    size_t body_len,
+    const zig_h3_header *trailers,
+    size_t trailers_len);
+
+typedef enum zig_h3_fetch_event_type {
+    ZIG_H3_FETCH_EVENT_HEADERS = 0,
+    ZIG_H3_FETCH_EVENT_DATA = 1,
+    ZIG_H3_FETCH_EVENT_TRAILERS = 2,
+    ZIG_H3_FETCH_EVENT_FINISHED = 3,
+    ZIG_H3_FETCH_EVENT_DATAGRAM = 4,
+    ZIG_H3_FETCH_EVENT_STARTED = 5,
+} zig_h3_fetch_event_type;
+
+typedef struct zig_h3_fetch_event {
+    zig_h3_fetch_event_type type;
+    uint16_t status;
+    uint16_t reserved;
+    const zig_h3_header *headers;
+    size_t headers_len;
+    const uint8_t *data;
+    size_t data_len;
+    uint64_t flow_id;
+    uint64_t stream_id;
+} zig_h3_fetch_event;
+
+typedef void (*zig_h3_fetch_event_cb)(void *user, const zig_h3_fetch_event *event);
+
 typedef struct zig_h3_fetch_options {
     const char *method;
     size_t method_len;
@@ -85,17 +118,11 @@ typedef struct zig_h3_fetch_options {
     size_t body_len;
     uint8_t stream_body;
     uint8_t collect_body;
+    zig_h3_fetch_event_cb event_cb;
+    void *event_user;
+    uint32_t request_timeout_ms;
+    uint32_t reserved2;
 } zig_h3_fetch_options;
-
-typedef void (*zig_h3_fetch_cb)(
-    void *user,
-    uint16_t status,
-    const zig_h3_header *headers,
-    size_t headers_len,
-    const uint8_t *body,
-    size_t body_len,
-    const zig_h3_header *trailers,
-    size_t trailers_len);
 
 typedef void (*zig_h3_client_datagram_cb)(void *user, uint64_t flow_id, const uint8_t *data, size_t data_len);
 
@@ -154,8 +181,29 @@ int zig_h3_client_set_datagram_callback(zig_h3_client *client, zig_h3_client_dat
 int zig_h3_client_fetch(
     zig_h3_client *client,
     const zig_h3_fetch_options *options,
+    uint64_t *stream_id_out,
     zig_h3_fetch_cb callback,
     void *user_data);
+int zig_h3_client_fetch_simple(
+    zig_h3_client *client,
+    const char *method,
+    const char *path,
+    uint8_t collect_body,
+    uint8_t stream_body,
+    uint32_t request_timeout_ms,
+    zig_h3_fetch_event_cb event_cb,
+    void *event_user,
+    zig_h3_fetch_cb callback,
+    void *user_data,
+    uint64_t *stream_id_out);
+int zig_h3_client_cancel_fetch(zig_h3_client *client, uint64_t stream_id, int32_t error_code);
+size_t zig_h3_fetch_event_size(void);
+size_t zig_h3_header_size(void);
+int zig_h3_fetch_event_copy(const zig_h3_fetch_event *src, zig_h3_fetch_event *dst);
+int zig_h3_header_copy(const zig_h3_header *src, zig_h3_header *dst);
+int zig_h3_header_copy_at(const zig_h3_header *base, size_t len, size_t index, zig_h3_header *dst);
+int zig_h3_headers_copy(const zig_h3_header *base, size_t len, zig_h3_header *dst, size_t dst_len);
+int zig_h3_copy_bytes(const unsigned char *src, size_t len, unsigned char *dst);
 int zig_h3_client_send_h3_datagram(zig_h3_client *client, uint64_t stream_id, const uint8_t *data, size_t data_len);
 int zig_h3_client_send_datagram(zig_h3_client *client, const uint8_t *data, size_t data_len);
 

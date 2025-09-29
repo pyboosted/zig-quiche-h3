@@ -1,14 +1,14 @@
 const std = @import("std");
-const client_cfg = @import("../quic/client/config.zig");
-const client_mod = @import("../quic/client/mod.zig");
-const http = @import("../http/mod.zig");
-const errors = @import("../errors.zig");
+const client_mod = @import("client");
+const http = @import("http");
+const errors = @import("errors");
 
 const Allocator = std.mem.Allocator;
 const QuicClient = client_mod.QuicClient;
-const ClientConfig = client_cfg.ClientConfig;
-const ServerEndpoint = client_cfg.ServerEndpoint;
+const ClientConfig = client_mod.ClientConfig;
+const ServerEndpoint = client_mod.ServerEndpoint;
 const Method = http.Method;
+const ClientError = client_mod.ClientError;
 
 pub const ZigClientConfig = extern struct {
     verify_peer: u8 = 1,
@@ -36,11 +36,15 @@ pub const ZigFetchOptions = extern struct {
     body_len: usize = 0,
     stream_body: u8 = 0,
     collect_body: u8 = 1,
+    event_cb: FetchEventCallback = null,
+    event_user: ?*anyopaque = null,
+    request_timeout_ms: u32 = 0,
+    _reserved: u32 = 0,
 };
 
 pub const ZigClient = opaque {};
 
-const FetchCallback = ?*const fn (
+pub const FetchCallback = ?*const fn (
     user: ?*anyopaque,
     status: u16,
     headers: ?[*]const ZigHeader,
@@ -49,9 +53,32 @@ const FetchCallback = ?*const fn (
     body_len: usize,
     trailers: ?[*]const ZigHeader,
     trailers_len: usize,
-) callconv(.C) void;
+) callconv(.c) void;
 
-const DatagramCallback = ?*const fn (user: ?*anyopaque, flow_id: u64, payload: ?[*]const u8, payload_len: usize) callconv(.C) void;
+const ZigFetchEventType = enum(u32) {
+    headers = 0,
+    data = 1,
+    trailers = 2,
+    finished = 3,
+    datagram = 4,
+    started = 5,
+};
+
+pub const ZigFetchEvent = extern struct {
+    kind: ZigFetchEventType = ZigFetchEventType.headers,
+    status: u16 = 0,
+    reserved: u16 = 0,
+    headers: ?[*]const ZigHeader = null,
+    headers_len: usize = 0,
+    data: ?[*]const u8 = null,
+    data_len: usize = 0,
+    flow_id: u64 = 0,
+    stream_id: u64 = 0,
+};
+
+pub const FetchEventCallback = ?*const fn (user: ?*anyopaque, event: ?*const ZigFetchEvent) callconv(.c) void;
+
+pub const DatagramCallback = ?*const fn (user: ?*anyopaque, flow_id: u64, payload: ?[*]const u8, payload_len: usize) callconv(.c) void;
 
 const ClientHandle = struct {
     allocator: Allocator,
@@ -59,6 +86,15 @@ const ClientHandle = struct {
     config: ClientConfig,
     dgram_cb: DatagramCallback = null,
     dgram_user: ?*anyopaque = null,
+};
+
+const FetchEventContext = struct {
+    handle: *ClientHandle,
+    cb: FetchEventCallback,
+    user: ?*anyopaque,
+    last_status: u16 = 0,
+    stream_id: u64 = 0,
+    event_storage: ZigFetchEvent = .{},
 };
 
 fn asHandle(ptr: ?*ZigClient) ?*ClientHandle {
@@ -94,23 +130,30 @@ fn adoptHeaders(allocator: Allocator, headers: []const ZigHeader) ![]client_mod.
 }
 
 fn makeFetchOptions(handle: *ClientHandle, opts: *const ZigFetchOptions) !client_mod.FetchOptions {
-    var fetch_opts = client_mod.FetchOptions{};
-    if (opts.method_len > 0 and opts.method) |method_ptr| {
-        const method_slice = method_ptr[0..opts.method_len];
-        fetch_opts.method = Method.fromString(method_slice) orelse Method.GET;
+    var fetch_opts = client_mod.FetchOptions{ .path = "" };
+    if (opts.method_len > 0) {
+        if (opts.method) |method_ptr| {
+            const method_slice = method_ptr[0..opts.method_len];
+            fetch_opts.method = method_slice;
+        }
     }
-    if (opts.path_len > 0 and opts.path) |path_ptr| {
-        fetch_opts.path = path_ptr[0..opts.path_len];
+    if (opts.path_len > 0) {
+        if (opts.path) |path_ptr| {
+            fetch_opts.path = path_ptr[0..opts.path_len];
+        }
     }
-    if (opts.headers_len > 0 and opts.headers) |hdr_ptr| {
-        const hdrs = hdr_ptr[0..opts.headers_len];
-        fetch_opts.headers = try adoptHeaders(handle.allocator, hdrs);
+    if (opts.headers_len > 0) {
+        if (opts.headers) |hdr_ptr| {
+            const hdrs = hdr_ptr[0..opts.headers_len];
+            fetch_opts.headers = try adoptHeaders(handle.allocator, hdrs);
+        }
     }
-    if (opts.body_len > 0 and opts.body) |body_ptr| {
-        fetch_opts.body = body_ptr[0..opts.body_len];
+    if (opts.body_len > 0) {
+        if (opts.body) |body_ptr| {
+            fetch_opts.body = body_ptr[0..opts.body_len];
+        }
     }
-    fetch_opts.collect_body = opts.collect_body != 0;
-    fetch_opts.stream_request_body = opts.stream_body != 0;
+    fetch_opts.timeout_override_ms = if (opts.request_timeout_ms == 0) null else opts.request_timeout_ms;
     return fetch_opts;
 }
 
@@ -118,7 +161,7 @@ fn cleanupFetchOptions(handle: *ClientHandle, fo: *client_mod.FetchOptions) void
     if (fo.headers.len > 0) handle.allocator.free(fo.headers);
 }
 
-fn buildTempHeaders(allocator: Allocator, pairs: []client_mod.HeaderPair) ![]ZigHeader {
+fn buildTempHeaders(allocator: Allocator, pairs: []const client_mod.HeaderPair) ![]ZigHeader {
     if (pairs.len == 0) return &[_]ZigHeader{};
     const temp = try allocator.alloc(ZigHeader, pairs.len);
     errdefer allocator.free(temp);
@@ -150,6 +193,26 @@ fn mapClientError(err: anyerror) i32 {
     };
 }
 
+fn mapAllocError(err: anyerror) ClientError {
+    return switch (err) {
+        error.OutOfMemory => ClientError.OutOfMemory,
+        else => ClientError.H3Error,
+    };
+}
+
+fn errorFromCode(code: i32) ClientError {
+    return switch (code) {
+        -500 => ClientError.OutOfMemory,
+        -408 => ClientError.RequestTimeout,
+        -400 => ClientError.InvalidRequest,
+        -421 => ClientError.DatagramNotEnabled,
+        -431 => ClientError.DatagramTooLarge,
+        -502 => ClientError.SocketSetupFailed,
+        -503 => ClientError.ConnectionClosed,
+        else => ClientError.StreamReset,
+    };
+}
+
 fn deliverFetchResponse(
     handle: *ClientHandle,
     cb: FetchCallback,
@@ -170,6 +233,124 @@ fn deliverFetchResponse(
 
     cb.?(user, response.status, if (headers_temp.len == 0) null else headers_temp.ptr, headers_temp.len, body_ptr, response.body.len, if (trailers_temp.len == 0) null else trailers_temp.ptr, trailers_temp.len);
     return 0;
+}
+
+fn responseEventThunk(event: client_mod.ResponseEvent, ctx: ?*anyopaque) ClientError!void {
+    const raw_ctx = ctx orelse return;
+    const state = @as(*FetchEventContext, @ptrCast(@alignCast(raw_ctx)));
+    if (state.cb == null) return;
+
+    switch (event) {
+        .headers => |hdrs| {
+            const temp = buildTempHeaders(state.handle.allocator, hdrs) catch |err| {
+                return mapAllocError(err);
+            };
+            defer if (temp.len > 0) state.handle.allocator.free(temp);
+
+            var status = state.last_status;
+            for (hdrs) |hdr| {
+                if (std.mem.eql(u8, hdr.name, ":status")) {
+                    status = std.fmt.parseUnsigned(u16, hdr.value, 10) catch status;
+                    break;
+                }
+            }
+            if (status != 0) {
+                state.last_status = status;
+            }
+            state.event_storage = ZigFetchEvent{
+                .kind = ZigFetchEventType.headers,
+                .status = state.last_status,
+                .headers = if (temp.len == 0) null else temp.ptr,
+                .headers_len = temp.len,
+                .data = null,
+                .data_len = 0,
+                .flow_id = 0,
+                .stream_id = state.stream_id,
+            };
+            state.cb.?(state.user, &state.event_storage);
+        },
+        .trailers => |hdrs| {
+            const temp = buildTempHeaders(state.handle.allocator, hdrs) catch |err| {
+                return mapAllocError(err);
+            };
+            defer if (temp.len > 0) state.handle.allocator.free(temp);
+
+            state.event_storage = ZigFetchEvent{
+                .kind = ZigFetchEventType.trailers,
+                .status = state.last_status,
+                .headers = if (temp.len == 0) null else temp.ptr,
+                .headers_len = temp.len,
+                .data = null,
+                .data_len = 0,
+                .flow_id = 0,
+                .stream_id = state.stream_id,
+            };
+            state.cb.?(state.user, &state.event_storage);
+        },
+        .data => |chunk| {
+            state.event_storage = ZigFetchEvent{
+                .kind = ZigFetchEventType.data,
+                .status = state.last_status,
+                .headers = null,
+                .headers_len = 0,
+                .data = null,
+                .data_len = 0,
+                .flow_id = 0,
+                .stream_id = state.stream_id,
+            };
+            if (chunk.len > 0) {
+                const copy = state.handle.allocator.dupe(u8, chunk) catch |err| {
+                    return mapAllocError(err);
+                };
+                defer state.handle.allocator.free(copy);
+                state.event_storage.data = copy.ptr;
+                state.event_storage.data_len = copy.len;
+                state.cb.?(state.user, &state.event_storage);
+                state.event_storage.data = null;
+                state.event_storage.data_len = 0;
+            } else {
+                state.cb.?(state.user, &state.event_storage);
+            }
+        },
+        .finished => {
+            state.event_storage = ZigFetchEvent{
+                .kind = ZigFetchEventType.finished,
+                .status = state.last_status,
+                .headers = null,
+                .headers_len = 0,
+                .data = null,
+                .data_len = 0,
+                .flow_id = 0,
+                .stream_id = state.stream_id,
+            };
+            state.cb.?(state.user, &state.event_storage);
+        },
+        .datagram => |d| {
+            state.event_storage = ZigFetchEvent{
+                .kind = ZigFetchEventType.datagram,
+                .status = state.last_status,
+                .headers = null,
+                .headers_len = 0,
+                .data = null,
+                .data_len = 0,
+                .flow_id = d.flow_id,
+                .stream_id = state.stream_id,
+            };
+            if (d.payload.len > 0) {
+                const copy = state.handle.allocator.dupe(u8, d.payload) catch |err| {
+                    return mapAllocError(err);
+                };
+                defer state.handle.allocator.free(copy);
+                state.event_storage.data = copy.ptr;
+                state.event_storage.data_len = copy.len;
+                state.cb.?(state.user, &state.event_storage);
+                state.event_storage.data = null;
+                state.event_storage.data_len = 0;
+            } else {
+                state.cb.?(state.user, &state.event_storage);
+            }
+        },
+    }
 }
 
 fn applyClientConfig(base: *ClientConfig, cfg_ptr: ?*const ZigClientConfig) void {
@@ -196,7 +377,7 @@ comptime {
     std.debug.assert(@sizeOf(ZigHeader) == @sizeOf(client_mod.HeaderPair));
 }
 
-pub export fn zig_h3_client_new(cfg_ptr: ?*const ZigClientConfig) ?*ZigClient {
+pub fn clientNew(cfg_ptr: ?*const ZigClientConfig) ?*ZigClient {
     const allocator = std.heap.c_allocator;
     var cfg = ClientConfig{};
     applyClientConfig(&cfg, cfg_ptr);
@@ -213,7 +394,7 @@ pub export fn zig_h3_client_new(cfg_ptr: ?*const ZigClientConfig) ?*ZigClient {
     return @ptrCast(handle);
 }
 
-pub export fn zig_h3_client_free(client_ptr: ?*ZigClient) i32 {
+pub fn clientFree(client_ptr: ?*ZigClient) i32 {
     if (asHandle(client_ptr)) |handle| {
         handle.client.deinit();
         handle.allocator.destroy(handle);
@@ -222,7 +403,7 @@ pub export fn zig_h3_client_free(client_ptr: ?*ZigClient) i32 {
     return -1;
 }
 
-pub export fn zig_h3_client_connect(
+pub fn clientConnect(
     client_ptr: ?*ZigClient,
     host_ptr: ?[*:0]const u8,
     port: u16,
@@ -242,7 +423,7 @@ pub export fn zig_h3_client_connect(
     return 0;
 }
 
-pub export fn zig_h3_client_set_datagram_callback(
+pub fn clientSetDatagramCallback(
     client_ptr: ?*ZigClient,
     cb: DatagramCallback,
     user: ?*anyopaque,
@@ -258,27 +439,81 @@ pub export fn zig_h3_client_set_datagram_callback(
     return 0;
 }
 
-pub export fn zig_h3_client_fetch(
+pub fn clientFetch(
     client_ptr: ?*ZigClient,
     opts_ptr: ?*const ZigFetchOptions,
+    stream_id_out: ?*u64,
     cb: FetchCallback,
     user: ?*anyopaque,
 ) i32 {
     const handle = asHandle(client_ptr) orelse return -1;
     if (opts_ptr == null or cb == null) return -2;
-    const opts = opts_ptr.?;
+    const opts_ref = opts_ptr.?;
+    const opts = opts_ref.*;
     if (opts.path == null or opts.path_len == 0) return -3;
 
-    var fetch_opts = makeFetchOptions(handle, &opts) catch |err| {
+    var fetch_opts = makeFetchOptions(handle, opts_ref) catch |err| {
         return mapClientError(err);
     };
     defer cleanupFetchOptions(handle, &fetch_opts);
 
-    if (!fetch_opts.collect_body) {
-        return -4; // streaming not yet supported
+    const wants_stream = opts.collect_body == 0;
+    var event_ctx_ptr: ?*FetchEventContext = null;
+    defer if (event_ctx_ptr) |ctx_ptr| {
+        handle.allocator.destroy(ctx_ptr);
+    };
+
+    if (wants_stream) {
+        const event_cb = opts.event_cb orelse {
+            return -4;
+        };
+        const ctx = handle.allocator.create(FetchEventContext) catch {
+            return mapClientError(error.OutOfMemory);
+        };
+        ctx.* = .{
+            .handle = handle,
+            .cb = event_cb,
+            .user = opts.event_user,
+            .last_status = 0,
+            .stream_id = 0,
+        };
+        fetch_opts.on_event = responseEventThunk;
+        fetch_opts.event_ctx = @ptrCast(@alignCast(ctx));
+        event_ctx_ptr = ctx;
+    } else {
+        fetch_opts.on_event = null;
+        fetch_opts.event_ctx = null;
     }
 
-    var response = handle.client.fetchWithOptions(handle.allocator, fetch_opts) catch |err| {
+    var fetch_handle = handle.client.startRequest(handle.allocator, fetch_opts) catch |err| {
+        return mapClientError(err);
+    };
+
+    const stream_id = fetch_handle.stream_id;
+    if (event_ctx_ptr) |ctx| {
+        ctx.stream_id = stream_id;
+    }
+    if (stream_id_out) |out_ptr| {
+        out_ptr.* = stream_id;
+    }
+
+    if (event_ctx_ptr) |ctx| {
+        if (ctx.cb) |cb_fn| {
+            ctx.event_storage = ZigFetchEvent{
+                .kind = ZigFetchEventType.started,
+                .status = 0,
+                .headers = null,
+                .headers_len = 0,
+                .data = null,
+                .data_len = 0,
+                .flow_id = 0,
+                .stream_id = stream_id,
+            };
+            cb_fn(ctx.user, &ctx.event_storage);
+        }
+    }
+
+    var response = fetch_handle.await() catch |err| {
         return mapClientError(err);
     };
     defer response.deinit(handle.allocator);
@@ -287,7 +522,102 @@ pub export fn zig_h3_client_fetch(
     return rc;
 }
 
-pub export fn zig_h3_client_send_h3_datagram(
+pub fn clientCancelFetch(
+    client_ptr: ?*ZigClient,
+    stream_id: u64,
+    error_code: i32,
+) i32 {
+    const handle = asHandle(client_ptr) orelse return -1;
+    if (stream_id == 0) return -2;
+    const err = errorFromCode(error_code);
+    handle.client.cancelFetch(stream_id, err);
+    return 0;
+}
+
+pub fn clientFetchSimple(
+    client_ptr: ?*ZigClient,
+    method_ptr: ?[*:0]const u8,
+    path_ptr: ?[*:0]const u8,
+    collect_body: u8,
+    stream_body: u8,
+    request_timeout_ms: u32,
+    event_cb: FetchEventCallback,
+    event_user: ?*anyopaque,
+    cb: FetchCallback,
+    user: ?*anyopaque,
+    stream_id_out: ?*u64,
+) i32 {
+    if (path_ptr == null) return -3;
+    var opts = ZigFetchOptions{};
+    if (method_ptr) |m_ptr| {
+        const method = std.mem.span(m_ptr);
+        opts.method = method.ptr;
+        opts.method_len = method.len;
+    }
+    const path = std.mem.span(path_ptr.?);
+    opts.path = path.ptr;
+    opts.path_len = path.len;
+    opts.collect_body = collect_body;
+    opts.stream_body = stream_body;
+    opts.event_cb = event_cb;
+    opts.event_user = event_user;
+    opts.request_timeout_ms = request_timeout_ms;
+    return clientFetch(client_ptr, &opts, stream_id_out, cb, user);
+}
+
+pub fn fetchEventStructSize() usize {
+    return @sizeOf(ZigFetchEvent);
+}
+
+pub fn headerStructSize() usize {
+    return @sizeOf(ZigHeader);
+}
+
+pub fn fetchEventCopy(src: ?*const ZigFetchEvent, dst: ?*ZigFetchEvent) i32 {
+    if (src == null or dst == null) return -1;
+    dst.?.* = src.?.*;
+    return 0;
+}
+
+pub fn headerCopy(src: ?*const ZigHeader, dst: ?*ZigHeader) i32 {
+    if (src == null or dst == null) return -1;
+    dst.?.* = src.?.*;
+    return 0;
+}
+
+pub fn headerCopyAt(base: ?*const ZigHeader, len: usize, index: usize, dst: ?*ZigHeader) i32 {
+    if (base == null or dst == null) return -1;
+    const base_many: ?[*]const ZigHeader = if (base) |b| @ptrCast(b) else null;
+    const slice = headersFromC(base_many, len);
+    if (index >= slice.len) return -2;
+    dst.?.* = slice[index];
+    return 0;
+}
+
+pub fn headersCopy(base: ?*const ZigHeader, len: usize, dst: ?*ZigHeader, dst_len: usize) i32 {
+    if (base == null or dst == null) return -1;
+    const base_many: ?[*]const ZigHeader = if (base) |b| @ptrCast(b) else null;
+    const slice = headersFromC(base_many, len);
+    if (slice.len == 0) return 0;
+    if (dst_len < slice.len) return -2;
+    const dst_many: [*]ZigHeader = @ptrCast(dst.?);
+    for (slice, 0..) |hdr, idx| {
+        dst_many[idx] = hdr;
+    }
+    return @as(i32, @intCast(slice.len));
+}
+
+pub fn copyBytes(src: ?[*]const u8, len: usize, dst: ?*u8) i32 {
+    if (src == null or dst == null) return -1;
+    if (len == 0) return 0;
+    const slice = src.?[0..len];
+    const dst_many: [*]u8 = @ptrCast(dst.?);
+    const dst_slice = dst_many[0..len];
+    std.mem.copyForwards(u8, dst_slice, slice);
+    return @as(i32, @intCast(len));
+}
+
+pub fn clientSendH3Datagram(
     client_ptr: ?*ZigClient,
     stream_id: u64,
     data_ptr: ?[*]const u8,
@@ -300,7 +630,7 @@ pub export fn zig_h3_client_send_h3_datagram(
     return 0;
 }
 
-pub export fn zig_h3_client_send_datagram(
+pub fn clientSendDatagram(
     client_ptr: ?*ZigClient,
     data_ptr: ?[*]const u8,
     data_len: usize,

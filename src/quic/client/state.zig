@@ -40,6 +40,7 @@ pub const FetchOptions = struct {
     body_provider: ?RequestBodyProvider = null,
     on_event: ?ResponseCallback = null,
     event_ctx: ?*anyopaque = null,
+    timeout_override_ms: ?u32 = null,
 };
 
 pub const FetchResponse = struct {

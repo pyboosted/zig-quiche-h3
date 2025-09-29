@@ -8,7 +8,6 @@ const udp = @import("udp");
 const connection = @import("connection");
 const server_pkg = if (builtin.is_test) @import("server") else struct {};
 const ServerConfig = @import("config").ServerConfig;
-const routing_gen = @import("routing_gen");
 const routing_api = @import("routing");
 const logging = @import("logging.zig");
 const http = @import("http");
@@ -52,6 +51,7 @@ const State = enum { idle, connecting, established, closed };
 pub const FetchState = struct {
     allocator: std.mem.Allocator,
     stream_id: u64 = 0,
+    timeout_override_ms: ?u32 = null,
     status: ?u16 = null,
     body_chunks: std.array_list.Managed(u8),
     finished: bool = false,
@@ -82,6 +82,7 @@ pub const FetchState = struct {
         self.* = .{
             .allocator = allocator,
             .stream_id = 0,
+            .timeout_override_ms = null,
             .status = null,
             .body_chunks = std.array_list.Managed(u8).init(allocator),
             .finished = false,
@@ -152,6 +153,7 @@ pub const FetchHandle = struct {
         // Add timeout tracking
         const start_time = std.time.milliTimestamp();
         const timeout_ms = client.config.request_timeout_ms;
+        const effective_timeout = state.timeout_override_ms orelse timeout_ms;
 
         const debug_enabled = client.config.enable_debug_logging;
 
@@ -163,9 +165,9 @@ pub const FetchHandle = struct {
             }
             // Check timeout
             const elapsed = std.time.milliTimestamp() - start_time;
-            if (elapsed > timeout_ms) {
+            if (elapsed > effective_timeout) {
                 if (debug_enabled) {
-                    std.debug.print("[await] timeout hit (elapsed={d}ms, timeout={d}ms)\n", .{ elapsed, timeout_ms });
+                    std.debug.print("[await] timeout hit (elapsed={d}ms, timeout={d}ms)\n", .{ elapsed, effective_timeout });
                 }
                 client.cancelFetch(self.stream_id, ClientError.RequestTimeout);
                 return ClientError.RequestTimeout;
@@ -350,7 +352,7 @@ pub const QuicClient = struct {
         return H3Core.finalizeFetch(self, stream_id);
     }
 
-    fn prepareRequestHeaders(self: *QuicClient, options: FetchOptions) ClientError![]quiche.h3.Header {
+    pub fn prepareRequestHeaders(self: *QuicClient, options: FetchOptions) ClientError![]quiche.h3.Header {
         return H3Core.prepareRequestHeaders(self, options);
     }
 
