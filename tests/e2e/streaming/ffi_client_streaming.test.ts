@@ -6,6 +6,7 @@ import {
   connectClient,
   fetchStreaming,
   freeClient,
+  cancelFetch,
   type FetchEventRecord,
 } from "@helpers/ffiClient";
 
@@ -81,6 +82,69 @@ describe("FFI client streaming callbacks", () => {
       expect(datagramEvents.length).toBeGreaterThan(0);
       const echoed = datagramEvents[0]!.data!;
       expect(Buffer.from(echoed).equals(Buffer.from(payload))).toBe(true);
+    } finally {
+      freeClient(client);
+    }
+  });
+
+  it("allows canceling an in-flight streaming fetch", () => {
+    const client = createClient({ enableDatagram: true, verifyPeer: false });
+    try {
+      connectClient(client, "127.0.0.1", server.port, "127.0.0.1");
+      const events: FetchEventRecord[] = [];
+      let cancelCalls = 0;
+      let caught: unknown;
+
+      try {
+        fetchStreaming(client, {
+          path: `/slow?delay=250`,
+          collectBody: false,
+          onEvent(record) {
+            events.push(record);
+            if (record.type === DATA_EVENT && cancelCalls === 0) {
+              cancelCalls += 1;
+              cancelFetch(client, record.streamId);
+            }
+          },
+        });
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(cancelCalls).toBeGreaterThan(0);
+      expect(events.some((ev) => ev.type === DATA_EVENT)).toBe(true);
+      expect(events[events.length - 1]?.type).toBe(FINISHED_EVENT);
+      expect(caught).toBeInstanceOf(Error);
+      expect(String(caught)).toContain("code -503");
+    } finally {
+      freeClient(client);
+    }
+  });
+
+  it("respects per-request timeout overrides", () => {
+    const client = createClient({ verifyPeer: false });
+    try {
+      connectClient(client, "127.0.0.1", server.port, "127.0.0.1");
+      const events: FetchEventRecord[] = [];
+      let caught: unknown;
+
+      try {
+        fetchStreaming(client, {
+          path: `/slow?delay=250`,
+          collectBody: false,
+          requestTimeoutMs: 40,
+          onEvent(record) {
+            events.push(record);
+          },
+        });
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      expect(String(caught)).toContain("code -408");
+      expect(events[0]?.type).toBe(STARTED_EVENT);
+      expect(events[events.length - 1]?.type).toBe(FINISHED_EVENT);
     } finally {
       freeClient(client);
     }

@@ -70,8 +70,10 @@ typedef struct zig_h3_client_config {
     uint8_t verify_peer;
     uint8_t enable_dgram;
     uint8_t enable_webtransport;
+    uint8_t enable_debug_logging;
     uint32_t idle_timeout_ms;
     uint32_t request_timeout_ms;
+    uint32_t connect_timeout_ms;
 } zig_h3_client_config;
 
 typedef void (*zig_h3_fetch_cb)(

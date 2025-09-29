@@ -179,6 +179,20 @@ pub const FetchHandle = struct {
             // Run event loop once with a short internal timeout to check conditions
             client.event_loop.runOnce();
 
+            if (state.err == null) {
+                const post_elapsed = std.time.milliTimestamp() - start_time;
+                if (post_elapsed > effective_timeout) {
+                    if (debug_enabled) {
+                        std.debug.print(
+                            "[await] post loop timeout hit (elapsed={d}ms, timeout={d}ms)\n",
+                            .{ post_elapsed, effective_timeout },
+                        );
+                    }
+                    client.cancelFetch(self.stream_id, ClientError.RequestTimeout);
+                    return ClientError.RequestTimeout;
+                }
+            }
+
             if (debug_enabled) {
                 std.debug.print(
                     "[await] loop stream={d} finished={s} have_headers={s} err={s} bytes={d}\n",

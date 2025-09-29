@@ -53,6 +53,7 @@ Deliver first-class Bun bindings for the zig-quiche-h3 server and client so Bun 
 - [x] Implement fetch issuance with callback results and DATAGRAM send/receive hooks.
 - [x] Add streaming/event callbacks (collect_body = 0) with per-event hooks.
 - [x] Expose cancellation controls and request timeout overrides via the FFI surface.
+- [x] Add Bun streaming tests covering client-side cancellation and request timeout overrides.
 - [ ] Provide WebTransport session APIs mirroring the server façade.
 - [ ] Deliver connection pooling helpers or document reuse strategy.
 

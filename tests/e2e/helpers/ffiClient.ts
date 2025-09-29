@@ -240,18 +240,27 @@ export interface ClientHandle {
   ptr: number;
 }
 
-export function createClient(config?: {
+export interface ClientConfigOptions {
   enableDatagram?: boolean;
+  enableWebTransport?: boolean;
+  enableDebugLogging?: boolean;
   verifyPeer?: boolean;
-}): ClientHandle {
+  idleTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  connectTimeoutMs?: number;
+}
+
+export function createClient(config?: ClientConfigOptions): ClientHandle {
   const symbols = requireLib();
   const cfgBuffer = new ArrayBuffer(16);
   const view = new DataView(cfgBuffer);
   view.setUint8(0, config?.verifyPeer === false ? 0 : 1);
   view.setUint8(1, config?.enableDatagram ? 1 : 0);
-  view.setUint8(2, 0); // enable_webtransport default
-  view.setUint32(4, 30_000, true);
-  view.setUint32(8, 30_000, true);
+  view.setUint8(2, config?.enableWebTransport ? 1 : 0);
+  view.setUint8(3, config?.enableDebugLogging ? 1 : 0);
+  view.setUint32(4, config?.idleTimeoutMs ?? 30_000, true);
+  view.setUint32(8, config?.requestTimeoutMs ?? 30_000, true);
+  view.setUint32(12, config?.connectTimeoutMs ?? 10_000, true);
   const clientPtr = Number(symbols.zig_h3_client_new(ptr(cfgBuffer)));
   if (clientPtr === 0) {
     throw new Error("Failed to create client");

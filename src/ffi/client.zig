@@ -14,8 +14,10 @@ pub const ZigClientConfig = extern struct {
     verify_peer: u8 = 1,
     enable_dgram: u8 = 0,
     enable_webtransport: u8 = 0,
+    enable_debug_logging: u8 = 0,
     idle_timeout_ms: u32 = 30000,
     request_timeout_ms: u32 = 30000,
+    connect_timeout_ms: u32 = 10000,
 };
 
 pub const ZigHeader = extern struct {
@@ -358,9 +360,10 @@ fn applyClientConfig(base: *ClientConfig, cfg_ptr: ?*const ZigClientConfig) void
         base.verify_peer = cfg.verify_peer != 0;
         base.enable_dgram = cfg.enable_dgram != 0;
         base.enable_webtransport = cfg.enable_webtransport != 0;
+        base.enable_debug_logging = cfg.enable_debug_logging != 0;
         base.idle_timeout_ms = cfg.idle_timeout_ms;
         base.request_timeout_ms = cfg.request_timeout_ms;
-        base.connect_timeout_ms = cfg.request_timeout_ms;
+        base.connect_timeout_ms = cfg.connect_timeout_ms;
     }
 }
 
@@ -528,7 +531,6 @@ pub fn clientCancelFetch(
     error_code: i32,
 ) i32 {
     const handle = asHandle(client_ptr) orelse return -1;
-    if (stream_id == 0) return -2;
     const err = errorFromCode(error_code);
     handle.client.cancelFetch(stream_id, err);
     return 0;
