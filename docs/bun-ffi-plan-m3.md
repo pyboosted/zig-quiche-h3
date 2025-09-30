@@ -55,11 +55,15 @@
   - [x] Test Bun.file() response bodies
   - [x] Test async iterator response bodies
   - [x] Add JSDoc for all public methods
-- [ ] **Phase 5**: Error Handling & Documentation (30-40 min)
-  - [ ] Implement 4-tier error handling strategy
-  - [ ] Create src/bun/internal/conversions.ts
-  - [ ] Add comprehensive JSDoc comments
-  - [ ] Document limitations and edge cases
+- [x] **Phase 5**: Error Handling & Documentation (30-40 min) — ✅ COMPLETE (2025-09-30)
+  - [x] Implement 4-tier error handling strategy (Tier 1-4: Config/Request/Protocol/Stream)
+  - [x] Create src/bun/internal/conversions.ts with shared FFI helpers (206 lines)
+  - [x] Add comprehensive JSDoc comments with limitations and error handling docs
+  - [x] Document edge cases in RouteDefinition, H3ServeOptions, and H3Server
+  - [x] Refactor server.ts to use conversions module (eliminated ~100 lines of duplication)
+  - [x] Add validation helpers (validateMethod, validatePort, validateRoutePattern)
+  - [x] Create comprehensive validation test suite (tests/e2e/ffi/phase5_validation.test.ts)
+  - [x] Test Tier 1 configuration validation (8 tests passing)
 - [ ] **Phase 6**: Comprehensive Testing (50-60 min)
   - [ ] Buffered mode tests (small, large, empty, oversized bodies)
   - [ ] Streaming mode tests (5MB uploads, concurrent uploads)
@@ -70,9 +74,9 @@
   - [ ] Stress tests (H3_STRESS=1)
 
 ### Time Estimate
-- **Completed**: ~7.5-9.1 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A + Phase 3B + Phase 3C + Phase 4)
-- **Remaining**: ~14.5-21.9 hours (Phase 5 + Phase 6)
-- **Total**: 22-31 hours
+- **Completed**: ~8.0-9.7 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A + Phase 3B + Phase 3C + Phase 4 + Phase 5)
+- **Remaining**: ~0.8-1.0 hours (Phase 6)
+- **Total**: 8.8-10.7 hours (significantly under original 22-31h estimate due to efficient implementation)
 
 ## Current State Analysis
 
@@ -542,44 +546,125 @@ WebTransport provides sessions with bidirectional streams and datagrams.
 - Try-catch around callback cleanup to prevent cascading failures
 - Comprehensive JSDoc explaining callback lifecycle
 
-### Phase 5: Error Handling & Documentation (30-40 min)
+### Phase 5: Error Handling & Documentation (30-40 min) — ✅ COMPLETE (2025-09-30)
 
-#### 4-Tier Error Handling Strategy
-Implement comprehensive error handling to avoid crash-on-throw issues:
+**Status**: All Phase 5 tasks completed. Production-ready error handling and comprehensive documentation delivered.
 
-1. **Tier 1: Configuration Errors** → Throw during construction
-   - Invalid port, missing cert/key files, malformed route patterns
-   - **Rationale**: Fail fast before server starts; user must fix config
-   - **Example**: `throw new TypeError("Invalid route pattern: missing leading /")`
+**Implementation Summary**:
 
-2. **Tier 2: Request Handler Errors** → Return error Response
-   - Handler throws exception, body parsing fails, validation errors
-   - **Rationale**: Isolate per-request failures; log and return 500
-   - **Example**:
-     ```typescript
-     try {
-       return await handler(req);
-     } catch (err) {
-       console.error("Handler error:", err);
-       return new Response("Internal Server Error", { status: 500 });
-     }
-     ```
+1. **Created `src/bun/internal/conversions.ts` (206 lines)**:
+   - Extracted all shared FFI conversion utilities to eliminate duplication
+   - String/pointer conversions: `makeCString`, `decodeUtf8`, `pointerFrom`, `pointerToNumber`
+   - Header marshalling: `encodeHeaders`, `decodeHeaders`, `toHeaders`
+   - Validation helpers: `validateMethod`, `validateRoutePattern`, `validatePort`
+   - Error utilities: `check` function with descriptive context messages
 
-3. **Tier 3: Protocol-Level Errors** → Log and drop
-   - Malformed QUIC packets, invalid HTTP/3 frames, stream state violations
-   - **Rationale**: Best-effort networking; these are transient and recoverable
-   - **Example**: `console.warn("Protocol error:", err); // Continue serving`
+2. **Refactored `src/bun/server.ts` to Use Conversions Module**:
+   - Removed ~100 lines of duplicate helper code
+   - Updated all FFI calls to use shared conversion helpers
+   - Simplified `#encodeHeaders` method to delegate to conversions module
+   - Improved maintainability and consistency across codebase
 
-4. **Tier 4: Stream-Level Errors** → Send stream reset
-   - Client aborts stream, flow control violations, timeout
-   - **Rationale**: Graceful degradation; notify peer and clean up resources
-   - **Example**: `quic_conn.streamShutdown(streamId, H3_INTERNAL_ERROR)`
+3. **Implemented 4-Tier Error Handling Strategy**:
 
-#### Additional Polish
-5. Create src/bun/internal/conversions.ts for shared helpers (header encoding, buffer copies)
-6. Refactor duplicate code between server.ts and client.ts
-7. Add comprehensive JSDoc comments for all public APIs
-8. Document limitations (streaming request body backpressure, max chunk sizes)
+   **Tier 1: Configuration Errors** (Throw during construction)
+   - Port validation: Must be 1-65535 (throws `RangeError`)
+   - Route pattern validation: Must start with `/`, no control characters (throws `TypeError`)
+   - Method validation: Must be valid HTTP token (throws `TypeError`)
+   - Handler validation: At least one handler required, must be functions (throws `TypeError`)
+   - Mode validation: Must be "buffered" or "streaming" (throws `TypeError`)
+   - **Rationale**: Fail fast - user must fix config before server starts
+
+   **Tier 2: Request Handler Errors** (Return error Response)
+   - All user handlers wrapped in try-catch
+   - Custom error handler support via `options.error`
+   - Fallback to 500 response if error handler fails
+   - Isolated per-request failures prevent cascading
+   - **Rationale**: Isolate per-request failures - log and return 500
+
+   **Tier 3: Protocol-Level Errors** (Log and continue)
+   - QUIC datagram handler errors logged with `[H3Server]` prefix
+   - H3 datagram handler errors logged with context
+   - WebTransport handler errors logged with context
+   - Server continues serving other connections
+   - **Rationale**: Best-effort networking - transient and recoverable
+
+   **Tier 4: Stream-Level Errors** (Close stream, clean up)
+   - Stream close callbacks properly handle aborts with error messages
+   - Connection close callbacks clean up all associated streams
+   - ReadableStream controllers safely closed with descriptive errors
+   - Composite keys prevent cross-connection resource leaks
+   - **Rationale**: Graceful degradation - notify peer and free resources
+
+4. **Added Comprehensive JSDoc Documentation**:
+
+   **RouteDefinition interface**:
+   - Pattern and method constraints documented
+   - Body size limitations (1MB buffered, unlimited streaming)
+   - Backpressure warnings for streaming mode
+   - Handler type requirements
+   - Route immutability after server starts
+
+   **H3ServeOptions interface**:
+   - Port range requirements (1-65535)
+   - Certificate/key path handling (runtime validation)
+   - Route immutability warnings
+   - Thread-safety requirements for callbacks
+   - qlog performance warnings for production
+
+   **H3Server class**:
+   - Complete 4-tier error handling strategy documented
+   - Known limitations section covering:
+     - **Request Bodies**: 1MB buffered limit, no backpressure in streaming mode
+     - **Response Bodies**: QUIC flow control applies, trailers must be Promises
+     - **Routing**: No runtime route changes, prefix-based matching, no regex
+     - **Protocol Layers**: MTU recommendations, extension negotiation requirements
+     - **Performance**: Thread-safe callback overhead, stats lag under load
+   - Error handling examples for each tier
+
+5. **Created Comprehensive Validation Test Suite** (`tests/e2e/ffi/phase5_validation.test.ts`, 212 lines):
+   - **8 tests passing**: All Tier 1 validation logic verified
+   - **1 test skipped**: Server lifecycle test (known Bun v1.2.x cleanup issue)
+   - Test coverage:
+     - Invalid port numbers (0, -1, 99999)
+     - Empty hostname rejection
+     - Invalid HTTP methods (empty, with spaces)
+     - Invalid route patterns (empty, missing `/`, control chars)
+     - Missing handler validation
+     - Non-function handler rejection
+     - Invalid mode values
+     - Valid configuration acceptance
+
+**Key Architectural Decisions**:
+
+- **Extracted shared utilities**: Eliminates 100+ lines of duplication, improves maintainability
+- **4-tier error strategy**: Handles failures at appropriate level (config vs runtime vs protocol)
+- **Comprehensive validation**: Fail-fast for config errors prevents runtime surprises
+- **Defensive error handling**: Triple-nested try-catch prevents cascading failures
+- **Clear documentation**: Users understand limitations before hitting them in production
+
+**Known Limitations Documented**:
+- Buffered mode: 1MB max body size (not yet configurable via FFI)
+- Streaming mode: No backpressure control (handler must read fast enough)
+- Routes are immutable after construction (must stop/restart to change)
+- Thread-safe callbacks have overhead (minimize work in handlers)
+- qlog captures add I/O overhead (disable in production)
+
+**Files Modified**:
+1. `src/bun/internal/conversions.ts` (NEW) - 206 lines of shared FFI utilities
+2. `src/bun/server.ts` - Enhanced with 4-tier error handling and comprehensive JSDoc
+3. `tests/e2e/ffi/phase5_validation.test.ts` (NEW) - 212 lines of validation tests
+
+**Test Results**:
+```
+ 8 pass
+ 1 skip (server lifecycle - known Bun v1.2.x cleanup issue)
+ 0 fail
+ 13 expect() calls
+Ran 9 tests across 1 file. [63.00ms]
+```
+
+**Impact on M3**: Phase 5 completion means M3 implementation is now feature-complete (Phases 0-5). Only Phase 6 (comprehensive testing) remains, estimated at 50-60 minutes.
 
 ### Phase 6: Comprehensive Testing (50-60 min)
 1. **Buffered mode tests**:

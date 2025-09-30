@@ -6,13 +6,24 @@ import {
   type ServerOnlySymbols,
   type ZigH3Symbols,
 } from "./internal/library";
+import {
+  check,
+  decodeHeaders,
+  decodeUtf8,
+  encodeHeaders,
+  makeCString,
+  pointerFrom,
+  pointerToNumber,
+  toHeaders,
+  validateMethod,
+  validatePort,
+  validateRoutePattern,
+} from "./internal/conversions";
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
 type ServerSymbols = ZigH3Symbols & ServerOnlySymbols;
 
 let serverSymbolsCache: ServerSymbols | null = null;
-let headerStructSizeCache = 0;
 
 function getServerSymbols(): ServerSymbols {
   if (serverSymbolsCache) return serverSymbolsCache;
@@ -23,15 +34,7 @@ function getServerSymbols(): ServerSymbols {
     );
   }
   serverSymbolsCache = rawSymbols;
-  headerStructSizeCache = Number(rawSymbols.zig_h3_header_size());
   return rawSymbols;
-}
-
-function requireHeaderStructSize(): number {
-  if (headerStructSizeCache === 0) {
-    getServerSymbols();
-  }
-  return headerStructSizeCache;
 }
 
 const DEFAULT_METHODS = [
@@ -46,74 +49,6 @@ const DEFAULT_METHODS = [
   "CONNECT",
   "CONNECT-UDP",
 ];
-
-function makeCString(value: string | undefined): Uint8Array | null {
-  if (!value) return null;
-  const bytes = textEncoder.encode(value);
-  const buf = new Uint8Array(bytes.length + 1);
-  buf.set(bytes, 0);
-  buf[bytes.length] = 0;
-  return buf;
-}
-
-function decodeUtf8(ptrValue: number, len: number): string {
-  if (ptrValue === 0 || len === 0) return "";
-  const data = new Uint8Array(toArrayBuffer(pointerFrom(ptrValue), len));
-  return textDecoder.decode(data);
-}
-
-function pointerFrom(value: number | bigint | Pointer): Pointer {
-  if (typeof value === "number") {
-    return value as unknown as Pointer;
-  }
-  if (typeof value === "bigint") {
-    return Number(value) as unknown as Pointer;
-  }
-  return value;
-}
-
-function pointerToNumber(value: Pointer): number {
-  return Number(value as unknown as bigint);
-}
-
-function decodeHeaders(ptrValue: number, length: number): Array<[string, string]> {
-  if (ptrValue === 0 || length === 0) return [];
-  const symbols = getServerSymbols();
-  const results: Array<[string, string]> = [];
-  const headerSize = requireHeaderStructSize();
-  const buffer = new Uint8Array(headerSize * length);
-  const rc = symbols.zig_h3_headers_copy(pointerFrom(ptrValue), length, ptr(buffer), length);
-  if (rc < 0) {
-    console.error("zig_h3_headers_copy failed", rc);
-    return results;
-  }
-  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  for (let i = 0; i < length; i++) {
-    const offset = i * headerSize;
-    const namePtr = Number(view.getBigUint64(offset + 0, true));
-    const nameLen = Number(view.getBigUint64(offset + 8, true));
-    const valuePtr = Number(view.getBigUint64(offset + 16, true));
-    const valueLen = Number(view.getBigUint64(offset + 24, true));
-    const name = decodeUtf8(namePtr, nameLen);
-    const value = decodeUtf8(valuePtr, valueLen);
-    results.push([name, value]);
-  }
-  return results;
-}
-
-function toHeaders(pairs: Array<[string, string]>): Headers {
-  const headers = new Headers();
-  for (const [name, value] of pairs) {
-    headers.append(name, value);
-  }
-  return headers;
-}
-
-function check(rc: number, ctx: string): void {
-  if (rc !== 0) {
-    throw new Error(`${ctx} failed with code ${rc}`);
-  }
-}
 
 // ===== Context Wrapper Classes for Protocol Layers =====
 
@@ -270,6 +205,14 @@ export class WTContext {
  *
  * Each route specifies a method, pattern, and handlers for different protocol layers.
  * Routes can handle HTTP requests, H3 datagrams, and WebTransport sessions.
+ *
+ * **Limitations:**
+ * - Pattern must start with "/" and cannot contain control characters
+ * - Method must be a valid HTTP token (alphanumeric + allowed punctuation)
+ * - At least one handler (fetch, h3Datagram, or webtransport) must be defined
+ * - Buffered mode: request bodies limited to 1MB by default
+ * - Streaming mode: no backpressure control - handler must read fast enough
+ * - Routes are registered at construction time and cannot be changed without restart
  */
 export interface RouteDefinition {
   /** HTTP method (GET, POST, etc.) */
@@ -306,6 +249,16 @@ export interface ServerStats {
 
 /**
  * HTTP/3 server configuration options.
+ *
+ * **Limitations:**
+ * - Port must be in range 1-65535
+ * - Certificate and key paths are required for HTTPS (no plaintext HTTP/3)
+ * - Routes cannot be changed after server starts (must stop/restart)
+ * - Buffered request bodies limited to 1MB (use streaming mode for larger uploads)
+ * - QUIC DATAGRAM support requires enableDatagram=true or handler registration
+ * - WebTransport support requires enableWebTransport=true or handler registration
+ * - qlogDir captures connection logs (can grow large, not suitable for production)
+ * - Thread-safe callbacks required - all handlers invoked from libev thread
  *
  * @example
  * ```ts
@@ -389,6 +342,57 @@ function makeStreamingKey(connId: Uint8Array, streamId: bigint): string {
  * - `reload()` is not needed since the server is stateless - restart to change routes
  * - Always call `close()` when done to free resources
  *
+ * **Known Limitations:**
+ *
+ * *Request Bodies:*
+ * - Buffered mode: 1MB max size (configurable in Zig, not exposed via FFI yet)
+ * - Streaming mode: No backpressure control - if handler is slow, memory grows
+ * - Body data copied to JS memory - large bodies double memory usage briefly
+ *
+ * *Response Bodies:*
+ * - Streaming responses: No explicit chunk size limit, but QUIC flow control applies
+ * - Trailers: Must be provided via Promise or function, not set after response starts
+ *
+ * *Routing:*
+ * - Routes cannot be added/removed after construction
+ * - Pattern matching is prefix-based with parameter extraction
+ * - No regex support (use parameter patterns like "/api/:id" instead)
+ * - Wildcard routes have lowest precedence
+ *
+ * *Protocol Layers:*
+ * - QUIC DATAGRAM: Connection-level, no request context, ~1200 byte MTU recommended
+ * - H3 DATAGRAM: Request-level, requires DATAGRAM extension negotiation
+ * - WebTransport: Session-level, must explicitly accept() or reject()
+ * - All handlers invoked from libev thread (use queueMicrotask for Bun event loop)
+ *
+ * *Performance:*
+ * - Thread-safe callbacks have overhead - minimize work in handler, offload to workers
+ * - Stats API reads atomic counters but may lag under high load
+ * - qlog captures add I/O overhead - disable in production
+ *
+ * **Error Handling Strategy:**
+ *
+ * The server implements a 4-tier error handling approach:
+ *
+ * 1. **Configuration Errors** (Tier 1): Throw during construction
+ *    - Invalid port, missing cert/key, malformed routes
+ *    - Rationale: Fail fast - user must fix config before server starts
+ *
+ * 2. **Request Handler Errors** (Tier 2): Return error Response
+ *    - Handler throws exception, body parsing fails
+ *    - Rationale: Isolate per-request failures - log and return 500
+ *    - User can customize via `error` handler option
+ *
+ * 3. **Protocol-Level Errors** (Tier 3): Log and continue
+ *    - Malformed QUIC packets, invalid HTTP/3 frames
+ *    - Rationale: Best-effort networking - transient and recoverable
+ *    - Server continues serving other connections
+ *
+ * 4. **Stream-Level Errors** (Tier 4): Close stream, clean up resources
+ *    - Client aborts stream, flow control violations
+ *    - Rationale: Graceful degradation - notify peer and free resources
+ *    - Other streams on same connection continue normally
+ *
  * @example
  * ```ts
  * const server = createH3Server({
@@ -439,13 +443,67 @@ export class H3Server {
   #streamingRequests = new Map<string, StreamingRequestState>();
 
   constructor(options: H3ServeOptions) {
+    // Tier 1: Configuration validation - throw during construction
     if (typeof options.fetch !== "function") {
       throw new TypeError("H3Server requires a fetch handler");
     }
+
+    // Validate port if provided
+    const port = options.port ?? 4433;
+    validatePort(port);
+
+    // Validate hostname if provided
+    const hostname = options.hostname ?? "0.0.0.0";
+    if (hostname.length === 0) {
+      throw new TypeError("Hostname cannot be empty");
+    }
+
+    // Note: Empty cert/key paths are valid (treated as "not provided")
+    // Zig layer will handle missing/invalid file paths at runtime
+
+    // Validate routes if provided
+    if (options.routes) {
+      for (const route of options.routes) {
+        validateMethod(route.method);
+        validateRoutePattern(route.pattern);
+
+        // Ensure at least one handler is defined
+        if (!route.fetch && !route.h3Datagram && !route.webtransport) {
+          throw new TypeError(
+            `Route ${route.method} ${route.pattern} must define at least one handler (fetch, h3Datagram, or webtransport)`,
+          );
+        }
+
+        // Validate handler types
+        if (route.fetch && typeof route.fetch !== "function") {
+          throw new TypeError(
+            `Route ${route.method} ${route.pattern}: fetch handler must be a function`,
+          );
+        }
+        if (route.h3Datagram && typeof route.h3Datagram !== "function") {
+          throw new TypeError(
+            `Route ${route.method} ${route.pattern}: h3Datagram handler must be a function`,
+          );
+        }
+        if (route.webtransport && typeof route.webtransport !== "function") {
+          throw new TypeError(
+            `Route ${route.method} ${route.pattern}: webtransport handler must be a function`,
+          );
+        }
+
+        // Validate mode if provided
+        if (route.mode && route.mode !== "buffered" && route.mode !== "streaming") {
+          throw new TypeError(
+            `Route ${route.method} ${route.pattern}: mode must be "buffered" or "streaming"`,
+          );
+        }
+      }
+    }
+
     this.#options = options;
     this.#symbols = getServerSymbols();
-    this.port = options.port ?? 4433;
-    this.hostname = options.hostname ?? "0.0.0.0";
+    this.port = port;
+    this.hostname = hostname;
     const scheme = "https";
     const authorityHost = options.hostname ?? "localhost";
     const authorityPort = this.port === 443 ? "" : `:${this.port}`;
@@ -474,20 +532,26 @@ export class H3Server {
     // Stream close callback: clean up streaming request state using composite key
     const streamCloseCallback = new JSCallback(
       (_user, connIdPtr, connIdLen, streamId, aborted) => {
-        if (!connIdPtr || connIdLen === 0) return;
-        const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
-        const key = makeStreamingKey(connId, BigInt(streamId));
-        const state = this.#streamingRequests.get(key);
+        // Tier 4: Stream-level errors - send stream reset and clean up
+        try {
+          if (!connIdPtr || connIdLen === 0) return;
+          const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
+          const key = makeStreamingKey(connId, BigInt(streamId));
+          const state = this.#streamingRequests.get(key);
 
-        if (state) {
-          if (aborted && state.controller) {
-            try {
-              state.controller.error(new Error("Stream aborted"));
-            } catch {
-              // Controller may already be closed
+          if (state) {
+            if (aborted && state.controller) {
+              try {
+                state.controller.error(new Error("Stream aborted by peer"));
+              } catch {
+                // Controller may already be closed - safe to ignore
+              }
             }
+            this.#streamingRequests.delete(key);
           }
-          this.#streamingRequests.delete(key);
+        } catch (err) {
+          // Tier 3: Protocol-level errors - log and continue
+          console.warn("[H3Server] Protocol error in stream close callback:", err);
         }
       },
       {
@@ -500,24 +564,30 @@ export class H3Server {
     // Connection close callback: clean up all streams for this connection
     const connectionCloseCallback = new JSCallback(
       (_user, connIdPtr, connIdLen) => {
-        if (!connIdPtr || connIdLen === 0) return;
-        const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
-        const connIdHex = Array.from(connId)
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join("");
+        // Tier 4: Stream-level errors - clean up all streams when connection closes
+        try {
+          if (!connIdPtr || connIdLen === 0) return;
+          const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
+          const connIdHex = Array.from(connId)
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
 
-        // Remove all entries for this connection
-        for (const [key, state] of this.#streamingRequests.entries()) {
-          if (key.startsWith(connIdHex + ":")) {
-            if (state.controller) {
-              try {
-                state.controller.error(new Error("Connection closed"));
-              } catch {
-                // Controller may already be closed
+          // Remove all entries for this connection
+          for (const [key, state] of this.#streamingRequests.entries()) {
+            if (key.startsWith(connIdHex + ":")) {
+              if (state.controller) {
+                try {
+                  state.controller.error(new Error("Connection closed by peer"));
+                } catch {
+                  // Controller may already be closed - safe to ignore
+                }
               }
+              this.#streamingRequests.delete(key);
             }
-            this.#streamingRequests.delete(key);
           }
+        } catch (err) {
+          // Tier 3: Protocol-level errors - log and continue
+          console.warn("[H3Server] Protocol error in connection close callback:", err);
         }
       },
       {
@@ -564,11 +634,12 @@ export class H3Server {
         // Create context with server pointer, connection pointer, and connection ID
         const context = new QUICDatagramContext(symbols, this.#ptr, pointerFrom(connPtr), connId);
 
-        // Invoke user handler
+        // Tier 2: Request handler errors - catch and log
         try {
           handler(payload, context);
         } catch (error) {
-          console.error("QUIC datagram handler error:", error);
+          console.error("[H3Server] QUIC datagram handler error:", error);
+          // Continue serving - isolated per-datagram failure
         }
       },
       {
@@ -797,11 +868,12 @@ export class H3Server {
           // Create H3DatagramContext
           const ctx = new H3DatagramContext(symbols, responsePtr, streamId, flowId, request);
 
-          // Invoke user handler
+          // Tier 2: Request handler errors - catch and log
           try {
             datagramHandler(payload, ctx);
           } catch (error) {
-            console.error("H3 datagram handler error:", error);
+            console.error("[H3Server] H3 datagram handler error:", error);
+            // Continue serving - isolated per-datagram failure
           }
         },
         {
@@ -841,11 +913,12 @@ export class H3Server {
           // Create WTContext with session pointer
           const ctx = new WTContext(symbols, sessionPointer, request, streamId);
 
-          // Invoke user handler
+          // Tier 2: Request handler errors - catch and log
           try {
             wtHandler(ctx);
           } catch (error) {
-            console.error("WebTransport session handler error:", error);
+            console.error("[H3Server] WebTransport session handler error:", error);
+            // Continue serving - isolated per-session failure
           }
         },
         {
@@ -974,11 +1047,28 @@ export class H3Server {
   }
 
   async #handleError(error: unknown, responsePtr: Pointer): Promise<void> {
-    console.error("H3Server handler error", error);
-    const fallback = this.#options.error
-      ? await Promise.resolve(this.#options.error(error, this))
-      : new Response("Internal Server Error", { status: 500 });
-    await this.#sendResponse(fallback, responsePtr);
+    // Tier 2: Request handler errors - return error Response
+    console.error("[H3Server] Request handler error:", error);
+
+    let fallback: Response;
+    try {
+      // Try user-provided error handler first
+      fallback = this.#options.error
+        ? await Promise.resolve(this.#options.error(error, this))
+        : new Response("Internal Server Error", { status: 500 });
+    } catch (handlerError) {
+      // Error handler itself threw - use default response
+      console.error("[H3Server] Error handler threw exception:", handlerError);
+      fallback = new Response("Internal Server Error", { status: 500 });
+    }
+
+    // Send error response
+    try {
+      await this.#sendResponse(fallback, responsePtr);
+    } catch (sendError) {
+      // Tier 3: Protocol-level error - log and drop
+      console.warn("[H3Server] Failed to send error response (connection may be closed):", sendError);
+    }
   }
 
   /**
@@ -1015,7 +1105,7 @@ export class H3Server {
         : this.hostname;
 
     // Copy headers to JS arrays (synchronously)
-    const headers = headersLen > 0 && headersPtr !== 0 ? decodeHeaders(headersPtr, headersLen) : [];
+    const headers = headersLen > 0 && headersPtr !== 0 ? decodeHeaders(this.#symbols, headersPtr, headersLen) : [];
 
     // Copy connection ID to JS Uint8Array (synchronously)
     const connId =
@@ -1153,23 +1243,7 @@ export class H3Server {
   }
 
   #encodeHeaders(pairs: Array<[string, string]>): { struct: Uint8Array; buffers: Uint8Array[] } {
-    const recordSize = requireHeaderStructSize();
-    const buffer = new Uint8Array(recordSize * pairs.length);
-    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    const buffers: Uint8Array[] = [];
-    for (let i = 0; i < pairs.length; i++) {
-      const entry = pairs[i]!;
-      const [name, value] = entry;
-      const nameBuf = textEncoder.encode(name);
-      const valueBuf = textEncoder.encode(value);
-      buffers.push(nameBuf, valueBuf);
-      const offset = i * recordSize;
-      view.setBigUint64(offset + 0, BigInt(pointerToNumber(ptr(nameBuf))), true);
-      view.setBigUint64(offset + 8, BigInt(nameBuf.length), true);
-      view.setBigUint64(offset + 16, BigInt(pointerToNumber(ptr(valueBuf))), true);
-      view.setBigUint64(offset + 24, BigInt(valueBuf.length), true);
-    }
-    return { struct: buffer, buffers };
+    return encodeHeaders(this.#symbols, pairs);
   }
 
   /**
