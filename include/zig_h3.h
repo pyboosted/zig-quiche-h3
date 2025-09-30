@@ -169,6 +169,35 @@ int zig_h3_server_route(
     zig_h3_datagram_cb datagram_cb,
     zig_h3_wt_session_cb wt_session_cb,
     void *user_data);
+
+// Streaming request body callback (NO finished flag - Zig uses separate on_body_complete)
+typedef void (*zig_h3_body_chunk_cb)(
+    void *user,
+    const uint8_t *conn_id,
+    size_t conn_id_len,
+    uint64_t stream_id,
+    const uint8_t *chunk,
+    size_t len);
+
+// Cleanup hooks for resource management
+typedef void (*zig_h3_stream_close_cb)(void *user, uint64_t stream_id, uint8_t aborted);
+typedef void (*zig_h3_connection_close_cb)(void *user, const uint8_t *conn_id, size_t conn_id_len);
+
+// Register streaming route with body chunk callback
+int zig_h3_server_route_streaming(
+    zig_h3_server *server,
+    const char *method,
+    const char *pattern,
+    zig_h3_request_cb request_cb,
+    zig_h3_body_chunk_cb body_chunk_cb,
+    zig_h3_datagram_cb datagram_cb,
+    zig_h3_wt_session_cb wt_session_cb,
+    void *user_data);
+
+// Register cleanup hooks
+int zig_h3_server_set_stream_close_cb(zig_h3_server *server, zig_h3_stream_close_cb callback, void *user_data);
+int zig_h3_server_set_connection_close_cb(zig_h3_server *server, zig_h3_connection_close_cb callback, void *user_data);
+
 int zig_h3_server_start(zig_h3_server *server);
 int zig_h3_server_stop(zig_h3_server *server);
 int zig_h3_server_set_log(zig_h3_server *server, zig_h3_log_cb callback, void *user_data);

@@ -55,12 +55,16 @@ pub const ZigWebTransportSession = opaque {};
 pub const RequestCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, resp: *ZigResponse) callconv(.c) void;
 pub const DatagramCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, resp: *ZigResponse, data: ?[*]const u8, data_len: usize) callconv(.c) void;
 pub const WTSessionCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, session: *ZigWebTransportSession) callconv(.c) void;
+pub const BodyChunkCallback = ?*const fn (user: ?*anyopaque, conn_id: ?[*]const u8, conn_id_len: usize, stream_id: u64, chunk: ?[*]const u8, chunk_len: usize) callconv(.c) void;
+pub const StreamCloseCallback = ?*const fn (user: ?*anyopaque, stream_id: u64, aborted: u8) callconv(.c) void;
+pub const ConnectionCloseCallback = ?*const fn (user: ?*anyopaque, conn_id: ?[*]const u8, conn_id_len: usize) callconv(.c) void;
 
 const RouteContext = struct {
     server: *ServerHandle,
     callback: RequestCallback,
     datagram_callback: DatagramCallback,
     wt_session_callback: WTSessionCallback,
+    body_chunk_callback: BodyChunkCallback = null,
     user_data: ?*anyopaque,
 };
 
@@ -80,6 +84,10 @@ const ServerHandle = struct {
     force_webtransport: bool = false,
     log_callback: LogCallback = null,
     log_user: ?*anyopaque = null,
+    stream_close_callback: StreamCloseCallback = null,
+    stream_close_user: ?*anyopaque = null,
+    connection_close_callback: ConnectionCloseCallback = null,
+    connection_close_user: ?*anyopaque = null,
 
     fn deinit(self: *ServerHandle) void {
         if (self.thread) |t| {
@@ -335,6 +343,17 @@ fn wtSessionHandler(req: *http.Request, session_ptr: *anyopaque) errors.WebTrans
     callback(ctx.user_data, &request_view, handle.asOpaque());
 }
 
+fn bodyChunkHandler(req: *http.Request, chunk: []const u8) void {
+    const ctx_ptr = req.user_data orelse return;
+    const ctx = @as(*RouteContext, @ptrCast(@alignCast(ctx_ptr)));
+    if (ctx.body_chunk_callback) |callback| {
+        // Get connection ID from request
+        const conn_id = req.conn_id orelse &[_]u8{};
+        const chunk_ptr: ?[*]const u8 = if (chunk.len == 0) null else chunk.ptr;
+        callback(ctx.user_data, conn_id.ptr, conn_id.len, req.stream_id, chunk_ptr, chunk.len);
+    }
+}
+
 fn registerRoute(
     handle: *ServerHandle,
     method_str: []const u8,
@@ -360,6 +379,49 @@ fn registerRoute(
         .pattern = pattern,
         .method = method,
         .handler = requestHandler,
+        .on_h3_dgram = if (dgram_cb != null) datagramHandler else null,
+        .on_wt_session = if (wt_cb != null) wtSessionHandler else null,
+        .user_data = ctx,
+    });
+
+    if (dgram_cb != null) {
+        handle.config.enable_dgram = true;
+    }
+    if (wt_cb != null) {
+        handle.config.enable_dgram = true;
+        handle.force_webtransport = true;
+    }
+}
+
+fn registerRouteStreaming(
+    handle: *ServerHandle,
+    method_str: []const u8,
+    pattern: []const u8,
+    cb: RequestCallback,
+    body_chunk_cb: BodyChunkCallback,
+    dgram_cb: DatagramCallback,
+    wt_cb: WTSessionCallback,
+    user: ?*anyopaque,
+) !void {
+    const method = Method.fromString(method_str) orelse return FfiError.InvalidMethod;
+    const ctx = try handle.allocator.create(RouteContext);
+    ctx.* = .{
+        .server = handle,
+        .callback = cb,
+        .datagram_callback = dgram_cb,
+        .wt_session_callback = wt_cb,
+        .body_chunk_callback = body_chunk_cb,
+        .user_data = user,
+    };
+    try handle.route_contexts.append(handle.allocator, ctx);
+    logMessage(handle, "register streaming route {s} {s}", .{ method_str, pattern });
+
+    try handle.builder.add(.{
+        .pattern = pattern,
+        .method = method,
+        .handler = requestHandler,
+        .streaming = true,  // Enable streaming mode
+        .on_body_chunk = if (body_chunk_cb != null) bodyChunkHandler else null,
         .on_h3_dgram = if (dgram_cb != null) datagramHandler else null,
         .on_wt_session = if (wt_cb != null) wtSessionHandler else null,
         .user_data = ctx,
@@ -498,6 +560,51 @@ pub fn zig_h3_server_route(
         logError(handle, "zig_h3_server_route failed: {s}", .{@errorName(err)});
         return -5;
     };
+    return 0;
+}
+
+pub fn zig_h3_server_route_streaming(
+    server_ptr: ?*ZigServer,
+    method_c: ?[*:0]const u8,
+    pattern_c: ?[*:0]const u8,
+    cb: RequestCallback,
+    body_chunk_cb: BodyChunkCallback,
+    dgram_cb: DatagramCallback,
+    wt_cb: WTSessionCallback,
+    user: ?*anyopaque,
+) i32 {
+    const handle = asHandle(server_ptr) orelse return -1;
+    if (handle.state != .created) return -2;
+    if (method_c == null or pattern_c == null) return -3;
+    if (cb == null) return -4;
+    const method = std.mem.span(method_c.?);
+    const pattern = std.mem.span(pattern_c.?);
+    registerRouteStreaming(handle, method, pattern, cb, body_chunk_cb, dgram_cb, wt_cb, user) catch |err| {
+        logError(handle, "zig_h3_server_route_streaming failed: {s}", .{@errorName(err)});
+        return -5;
+    };
+    return 0;
+}
+
+pub fn zig_h3_server_set_stream_close_cb(
+    server_ptr: ?*ZigServer,
+    callback: StreamCloseCallback,
+    user_data: ?*anyopaque,
+) i32 {
+    const handle = asHandle(server_ptr) orelse return -1;
+    handle.stream_close_callback = callback;
+    handle.stream_close_user = user_data;
+    return 0;
+}
+
+pub fn zig_h3_server_set_connection_close_cb(
+    server_ptr: ?*ZigServer,
+    callback: ConnectionCloseCallback,
+    user_data: ?*anyopaque,
+) i32 {
+    const handle = asHandle(server_ptr) orelse return -1;
+    handle.connection_close_callback = callback;
+    handle.connection_close_user = user_data;
     return 0;
 }
 
