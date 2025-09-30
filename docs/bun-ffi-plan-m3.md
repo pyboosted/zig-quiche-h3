@@ -37,10 +37,12 @@
   - [x] Auto-enable QUIC DATAGRAM support when callback is registered (bug fix)
   - [x] Test with standalone server demo (test_quic_dgram.ts)
   - [x] Add comprehensive documentation (PHASE_3A_SUMMARY.md)
-- [ ] **Phase 3B**: H3 DATAGRAM Per-Route Handlers (30-40 min)
-  - [ ] Implement H3DatagramContext TypeScript wrapper
-  - [ ] Wire H3 DATAGRAM callback in route registration
-  - [ ] Test route with h3Datagram handler
+- [x] **Phase 3B**: H3 DATAGRAM Per-Route Handlers (30-40 min) — ✅ COMPLETE (2025-09-30)
+  - [x] H3DatagramContext TypeScript wrapper (already existed)
+  - [x] Wire H3 DATAGRAM callback in route registration
+  - [x] Auto-enable H3 DATAGRAM when h3Datagram handler defined
+  - [x] Test route with h3Datagram handler
+  - [x] Add comprehensive documentation (PHASE_3B_SUMMARY.md)
 - [ ] **Phase 3C**: WebTransport Session API (40-50 min)
   - [ ] Implement WTContext TypeScript wrapper
   - [ ] Wire WebTransport callback in route registration
@@ -65,8 +67,8 @@
   - [ ] Stress tests (H3_STRESS=1)
 
 ### Time Estimate
-- **Completed**: ~6.0-7.5 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A)
-- **Remaining**: ~16.0-23.5 hours (Phase 3B through Phase 6)
+- **Completed**: ~6.5-8.0 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A + Phase 3B)
+- **Remaining**: ~15.5-23.0 hours (Phase 3C through Phase 6)
 - **Total**: 22-31 hours
 
 ## Current State Analysis

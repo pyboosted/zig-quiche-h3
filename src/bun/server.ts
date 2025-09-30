@@ -467,8 +467,12 @@ export class H3Server {
     view.setBigUint64(8, BigInt(key ? pointerToNumber(ptr(key)) : 0), true);
     view.setBigUint64(16, BigInt(bindAddr ? pointerToNumber(ptr(bindAddr)) : 0), true);
     view.setUint16(24, this.port, true);
-    // Auto-enable QUIC DATAGRAM if quicDatagram handler is provided
-    view.setUint8(26, (this.#options.enableDatagram || this.#options.quicDatagram) ? 1 : 0);
+    // Auto-enable QUIC/H3 DATAGRAM if handler is provided
+    const hasH3DatagramRoute = this.#options.routes?.some((r) => r.h3Datagram != null) ?? false;
+    view.setUint8(
+      26,
+      this.#options.enableDatagram || this.#options.quicDatagram || hasH3DatagramRoute ? 1 : 0,
+    );
     view.setUint8(27, this.#options.enableWebTransport ? 1 : 0);
     // padding for pointer alignment: bytes 28-31 remain zero.
     view.setBigUint64(32, BigInt(qlog ? pointerToNumber(ptr(qlog)) : 0), true);
@@ -624,6 +628,56 @@ export class H3Server {
       this.#callbacks.push(bodyChunkCallback, bodyCompleteCallback);
     }
 
+    // Create H3 datagram callback if h3Datagram handler is provided
+    let h3DatagramCallback: JSCallback | null = null;
+    if (route.h3Datagram) {
+      const datagramHandler = route.h3Datagram;
+
+      h3DatagramCallback = new JSCallback(
+        (_user, reqPtr, respPtr, dataPtr, dataLen) => {
+          if (!reqPtr || !respPtr || !dataPtr || dataLen === 0) return;
+
+          const requestPtr = reqPtr as Pointer;
+          const responsePtr = respPtr as Pointer;
+
+          // Copy datagram payload to JavaScript memory
+          const payload = new Uint8Array(toArrayBuffer(pointerFrom(dataPtr), dataLen));
+
+          // Build Request snapshot for context (extracts stream_id at correct offset 64)
+          const snapshot = this.#buildRequestSnapshot(requestPtr);
+          const { request, streamId } = this.#decodeRequestFromSnapshot(snapshot);
+
+          // Flow ID defaults to stream_id (1:1 mapping per flowIdForStream)
+          const flowId = streamId;
+
+          // Create H3DatagramContext
+          const ctx = new H3DatagramContext(symbols, responsePtr, streamId, flowId, request);
+
+          // Invoke user handler
+          try {
+            datagramHandler(payload, ctx);
+          } catch (error) {
+            console.error("H3 datagram handler error:", error);
+          }
+        },
+        {
+          returns: FFIType.void,
+          args: [FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.usize],
+          threadsafe: true,
+        },
+      );
+
+      if (!h3DatagramCallback.ptr) {
+        callback.close();
+        bodyChunkCallback?.close();
+        bodyCompleteCallback?.close();
+        h3DatagramCallback.close();
+        throw new Error("JSCallback.ptr unavailable for H3 datagram callback");
+      }
+
+      this.#callbacks.push(h3DatagramCallback);
+    }
+
     // Register route with appropriate function
     if (isStreaming && bodyChunkCallback && bodyCompleteCallback) {
       check(
@@ -634,7 +688,7 @@ export class H3Server {
           callback.ptr,
           bodyChunkCallback.ptr,
           bodyCompleteCallback.ptr,
-          null,
+          h3DatagramCallback?.ptr ?? null,
           null,
           null,
         ),
@@ -647,7 +701,7 @@ export class H3Server {
           ptr(methodBuf),
           ptr(patternBuf),
           callback.ptr,
-          null,
+          h3DatagramCallback?.ptr ?? null,
           null,
           null,
         ),
