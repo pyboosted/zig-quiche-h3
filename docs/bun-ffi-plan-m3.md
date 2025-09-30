@@ -29,12 +29,14 @@
   - [x] Add getStats() method to TypeScript H3Server
   - [x] Test stats accuracy with multiple requests
   - [x] Fix type safety with @as(u64, @intCast()) for usize→u64 conversion
-- [ ] **Phase 3A**: Raw QUIC Datagram FFI Bridge (60-75 min)
-  - [ ] Add zig_h3_server_set_quic_datagram_cb() FFI export
-  - [ ] Add zig_h3_server_send_quic_datagram() FFI export
-  - [ ] Implement QUICDatagramContext TypeScript wrapper
-  - [ ] Wire server-level quicDatagram callback in constructor
-  - [ ] Test with native quic_dgram_echo client
+- [x] **Phase 3A**: Raw QUIC Datagram FFI Bridge (60-75 min) — ✅ COMPLETE (2025-09-30)
+  - [x] Add zig_h3_server_set_quic_datagram_cb() FFI export
+  - [x] Add zig_h3_server_send_quic_datagram() FFI export
+  - [x] Implement QUICDatagramContext TypeScript wrapper
+  - [x] Wire server-level quicDatagram callback in constructor
+  - [x] Auto-enable QUIC DATAGRAM support when callback is registered (bug fix)
+  - [x] Test with standalone server demo (test_quic_dgram.ts)
+  - [x] Add comprehensive documentation (PHASE_3A_SUMMARY.md)
 - [ ] **Phase 3B**: H3 DATAGRAM Per-Route Handlers (30-40 min)
   - [ ] Implement H3DatagramContext TypeScript wrapper
   - [ ] Wire H3 DATAGRAM callback in route registration
@@ -63,8 +65,8 @@
   - [ ] Stress tests (H3_STRESS=1)
 
 ### Time Estimate
-- **Completed**: ~5.0-6.0 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2)
-- **Remaining**: ~17.0-25.0 hours (Phase 3A through Phase 6)
+- **Completed**: ~6.0-7.5 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A)
+- **Remaining**: ~16.0-23.5 hours (Phase 3B through Phase 6)
 - **Total**: 22-31 hours
 
 ## Current State Analysis

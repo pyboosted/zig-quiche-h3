@@ -261,6 +261,23 @@ pub export fn zig_h3_server_set_connection_close_cb(
     return server.zig_h3_server_set_connection_close_cb(server_ptr, cb, user);
 }
 
+pub export fn zig_h3_server_set_quic_datagram_cb(
+    server_ptr: ?*server.ZigServer,
+    cb: server.QUICDatagramCallback,
+    user: ?*anyopaque,
+) i32 {
+    return server.zig_h3_server_set_quic_datagram_cb(server_ptr, cb, user);
+}
+
+pub export fn zig_h3_server_send_quic_datagram(
+    server_ptr: ?*server.ZigServer,
+    conn_ptr: ?*anyopaque,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    return server.zig_h3_server_send_quic_datagram(server_ptr, conn_ptr, data_ptr, data_len);
+}
+
 pub export fn zig_h3_server_start(server_ptr: ?*server.ZigServer) i32 {
     return server.zig_h3_server_start(server_ptr);
 }

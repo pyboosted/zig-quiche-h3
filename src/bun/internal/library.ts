@@ -220,6 +220,14 @@ const SERVER_SYMBOL_DEFINITIONS = {
     returns: FFIType.i32,
     args: [FFIType.pointer, FFIType.pointer, FFIType.pointer],
   },
+  zig_h3_server_set_quic_datagram_cb: {
+    returns: FFIType.i32,
+    args: [FFIType.pointer, FFIType.pointer, FFIType.pointer],
+  },
+  zig_h3_server_send_quic_datagram: {
+    returns: FFIType.i32,
+    args: [FFIType.pointer, FFIType.pointer, FFIType.pointer, "usize"],
+  },
   zig_h3_server_start: {
     returns: FFIType.i32,
     args: [FFIType.pointer],

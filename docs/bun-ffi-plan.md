@@ -83,7 +83,7 @@ _Notes_: Current Bun-side coverage exercises synchronous + streaming fetches, ca
 #### Phase 1b–6: Remaining Work
 - [x] Phase 1b: Fix buffered mode memory safety with request snapshot
 - [x] Phase 2: Add stats API (requests_total, server_start_time_ms)
-- [ ] Phase 3A: Implement QUIC datagram handler with cleanup hooks
+- [x] Phase 3A: Implement QUIC datagram handler with auto-enable feature (2025-09-30)
 - [ ] Phase 3B: Implement H3 datagram per-route handlers
 - [ ] Phase 3C: Implement WebTransport session API
 - [ ] Phase 4: Add lifecycle extensions (stop with force flag)

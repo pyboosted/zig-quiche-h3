@@ -4,6 +4,7 @@ const server_pkg = @import("server");
 const routing_dynamic = @import("routing_dynamic");
 const http = @import("http");
 const errors = @import("errors");
+const connection = @import("connection");
 
 const Allocator = std.mem.Allocator;
 const QuicServer = server_pkg.QuicServer;
@@ -70,6 +71,7 @@ pub const BodyChunkCallback = ?*const fn (user: ?*anyopaque, conn_id: ?[*]const 
 pub const BodyCompleteCallback = ?*const fn (user: ?*anyopaque, conn_id: ?[*]const u8, conn_id_len: usize, stream_id: u64) callconv(.c) void;
 pub const StreamCloseCallback = ?*const fn (user: ?*anyopaque, conn_id: ?[*]const u8, conn_id_len: usize, stream_id: u64, aborted: u8) callconv(.c) void;
 pub const ConnectionCloseCallback = ?*const fn (user: ?*anyopaque, conn_id: ?[*]const u8, conn_id_len: usize) callconv(.c) void;
+pub const QUICDatagramCallback = ?*const fn (user: ?*anyopaque, conn_ptr: ?*anyopaque, conn_id: ?[*]const u8, conn_id_len: usize, data: ?[*]const u8, data_len: usize) callconv(.c) void;
 
 const RouteContext = struct {
     server: *ServerHandle,
@@ -101,6 +103,8 @@ const ServerHandle = struct {
     stream_close_user: ?*anyopaque = null,
     connection_close_callback: ConnectionCloseCallback = null,
     connection_close_user: ?*anyopaque = null,
+    quic_datagram_callback: QUICDatagramCallback = null,
+    quic_datagram_user: ?*anyopaque = null,
 
     fn deinit(self: *ServerHandle) void {
         if (self.thread) |t| {
@@ -488,6 +492,18 @@ fn connectionCloseAdapter(conn_id: []const u8, user: ?*anyopaque) void {
     }
 }
 
+// Adapter for QUIC datagram callback: Zig → C FFI
+fn quicDatagramAdapter(server: *QuicServer, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) errors.DatagramError!void {
+    if (user) |u| {
+        const handle: *ServerHandle = @ptrCast(@alignCast(u));
+        if (handle.quic_datagram_callback) |cb| {
+            const conn_id = conn.dcid[0..conn.dcid_len];
+            cb(handle.quic_datagram_user, conn, conn_id.ptr, conn_id.len, payload.ptr, payload.len);
+        }
+    }
+    _ = server; // unused in adapter
+}
+
 fn startServer(handle: *ServerHandle) !void {
     if (handle.state == .running) return FfiError.InvalidState;
     applyForcedWebTransportConfig(handle);
@@ -506,6 +522,11 @@ fn startServer(handle: *ServerHandle) !void {
     server.on_stream_close_user = handle;
     server.on_connection_close = connectionCloseAdapter;
     server.on_connection_close_user = handle;
+
+    // Wire QUIC datagram callback if registered
+    if (handle.quic_datagram_callback != null) {
+        server.onDatagram(quicDatagramAdapter, handle);
+    }
 
     applyForcedWebTransport(handle, server);
 
@@ -664,6 +685,34 @@ pub fn zig_h3_server_set_connection_close_cb(
     const handle = asHandle(server_ptr) orelse return -1;
     handle.connection_close_callback = callback;
     handle.connection_close_user = user_data;
+    return 0;
+}
+
+pub fn zig_h3_server_set_quic_datagram_cb(
+    server_ptr: ?*ZigServer,
+    callback: QUICDatagramCallback,
+    user_data: ?*anyopaque,
+) i32 {
+    const handle = asHandle(server_ptr) orelse return -1;
+    handle.quic_datagram_callback = callback;
+    handle.quic_datagram_user = user_data;
+    // Enable QUIC DATAGRAM support in config when callback is registered
+    handle.config.enable_dgram = true;
+    return 0;
+}
+
+pub fn zig_h3_server_send_quic_datagram(
+    server_ptr: ?*ZigServer,
+    conn_ptr: ?*anyopaque,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    const handle = asHandle(server_ptr) orelse return -1;
+    const server = handle.server orelse return -2;
+    const conn = @as(?*connection.Connection, @ptrCast(@alignCast(conn_ptr))) orelse return -3;
+    if (data_len == 0 or data_ptr == null) return 0;
+    const data = sliceFromC(data_ptr, data_len);
+    server.sendDatagram(conn, data) catch |err| return mapHandlerError(err);
     return 0;
 }
 

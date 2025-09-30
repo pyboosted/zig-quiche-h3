@@ -70,6 +70,17 @@ typedef void (*zig_h3_datagram_cb)(void *user, const zig_h3_request *req, zig_h3
 typedef void (*zig_h3_wt_session_cb)(void *user, const zig_h3_request *req, zig_h3_wt_session *session);
 typedef void (*zig_h3_log_cb)(void *user, const char *line);
 
+// QUIC datagram callback: connection-scoped, arrives before HTTP exchange
+// conn_ptr: opaque connection pointer (use with zig_h3_server_send_quic_datagram)
+// conn_id: binary connection ID for logging/discrimination
+typedef void (*zig_h3_quic_datagram_cb)(
+    void *user,
+    void *conn_ptr,
+    const uint8_t *conn_id,
+    size_t conn_id_len,
+    const uint8_t *data,
+    size_t data_len);
+
 typedef struct zig_h3_server_stats {
     uint64_t connections_total;
     uint64_t connections_active;
@@ -216,6 +227,10 @@ int zig_h3_server_route_streaming(
 // Register cleanup hooks
 int zig_h3_server_set_stream_close_cb(zig_h3_server *server, zig_h3_stream_close_cb callback, void *user_data);
 int zig_h3_server_set_connection_close_cb(zig_h3_server *server, zig_h3_connection_close_cb callback, void *user_data);
+
+// QUIC datagram handlers (connection-scoped, not route-specific)
+int zig_h3_server_set_quic_datagram_cb(zig_h3_server *server, zig_h3_quic_datagram_cb callback, void *user_data);
+int zig_h3_server_send_quic_datagram(zig_h3_server *server, void *conn_ptr, const uint8_t *data, size_t data_len);
 
 int zig_h3_server_start(zig_h3_server *server);
 int zig_h3_server_stop(zig_h3_server *server);

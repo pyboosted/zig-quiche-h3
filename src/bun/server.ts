@@ -123,12 +123,14 @@ function check(rc: number, ctx: string): void {
  */
 export class QUICDatagramContext {
   readonly #symbols: ServerSymbols;
+  readonly #serverPtr: Pointer;
   readonly #connPtr: Pointer;
   readonly connectionId: Uint8Array;
   readonly connectionIdHex: string;
 
-  constructor(symbols: ServerSymbols, connPtr: Pointer, connectionId: Uint8Array) {
+  constructor(symbols: ServerSymbols, serverPtr: Pointer, connPtr: Pointer, connectionId: Uint8Array) {
     this.#symbols = symbols;
+    this.#serverPtr = serverPtr;
     this.#connPtr = connPtr;
     this.connectionId = connectionId;
     // Convert to hex for logging/comparison (binary-safe)
@@ -139,7 +141,7 @@ export class QUICDatagramContext {
 
   sendReply(data: Uint8Array): void {
     check(
-      this.#symbols.zig_h3_server_send_quic_datagram(this.#connPtr, ptr(data), data.length),
+      this.#symbols.zig_h3_server_send_quic_datagram(this.#serverPtr, this.#connPtr, ptr(data), data.length),
       "QUICDatagramContext.sendReply",
     );
   }
@@ -315,6 +317,7 @@ export class H3Server {
     this.#ptr = serverPtr;
 
     this.#registerCleanupHooks();
+    this.#registerQuicDatagramHandler();
     this.#registerRoutes();
     this.start();
   }
@@ -401,6 +404,51 @@ export class H3Server {
     );
   }
 
+  #registerQuicDatagramHandler(): void {
+    if (!this.#options.quicDatagram) return;
+
+    const symbols = this.#symbols;
+    const handler = this.#options.quicDatagram;
+
+    // Create thread-safe callback for raw QUIC datagrams
+    const quicDatagramCallback = new JSCallback(
+      (_user, connPtr, connIdPtr, connIdLen, dataPtr, dataLen) => {
+        if (!connIdPtr || connIdLen === 0 || !dataPtr || dataLen === 0) return;
+
+        // Copy connection ID and payload to JavaScript memory
+        const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
+        const payload = new Uint8Array(toArrayBuffer(pointerFrom(dataPtr), dataLen));
+
+        // Create context with server pointer, connection pointer, and connection ID
+        const context = new QUICDatagramContext(symbols, this.#ptr, pointerFrom(connPtr), connId);
+
+        // Invoke user handler
+        try {
+          handler(payload, context);
+        } catch (error) {
+          console.error("QUIC datagram handler error:", error);
+        }
+      },
+      {
+        returns: FFIType.void,
+        args: [FFIType.pointer, FFIType.pointer, FFIType.pointer, FFIType.usize, FFIType.pointer, FFIType.usize],
+        threadsafe: true,
+      },
+    );
+
+    if (!quicDatagramCallback.ptr) {
+      quicDatagramCallback.close();
+      throw new Error("JSCallback.ptr unavailable for QUIC datagram handler");
+    }
+
+    this.#callbacks.push(quicDatagramCallback);
+
+    check(
+      symbols.zig_h3_server_set_quic_datagram_cb(this.#ptr, quicDatagramCallback.ptr, null),
+      "zig_h3_server_set_quic_datagram_cb",
+    );
+  }
+
   #buildConfigBuffer(): ArrayBuffer {
     const cfg = new ArrayBuffer(48);
     const view = new DataView(cfg);
@@ -419,7 +467,8 @@ export class H3Server {
     view.setBigUint64(8, BigInt(key ? pointerToNumber(ptr(key)) : 0), true);
     view.setBigUint64(16, BigInt(bindAddr ? pointerToNumber(ptr(bindAddr)) : 0), true);
     view.setUint16(24, this.port, true);
-    view.setUint8(26, this.#options.enableDatagram ? 1 : 0);
+    // Auto-enable QUIC DATAGRAM if quicDatagram handler is provided
+    view.setUint8(26, (this.#options.enableDatagram || this.#options.quicDatagram) ? 1 : 0);
     view.setUint8(27, this.#options.enableWebTransport ? 1 : 0);
     // padding for pointer alignment: bytes 28-31 remain zero.
     view.setBigUint64(32, BigInt(qlog ? pointerToNumber(ptr(qlog)) : 0), true);
