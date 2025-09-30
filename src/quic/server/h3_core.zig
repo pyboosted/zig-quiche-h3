@@ -216,6 +216,7 @@ pub fn Impl(comptime S: type) type {
 
                                     if (f.route.user_data) |ptr| {
                                         state.user_data = ptr;
+                                        state.request.user_data = ptr; // Update request.user_data directly
                                     }
 
                                     // Install handler/callbacks

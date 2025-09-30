@@ -42,6 +42,8 @@ pub const ZigRequest = extern struct {
     stream_id: u64 = 0,
     conn_id: ?[*]const u8 = null,
     conn_id_len: usize = 0,
+    body: ?[*]const u8 = null,
+    body_len: usize = 0,
 };
 
 comptime {
@@ -224,6 +226,7 @@ fn buildRequestView(req: *http.Request) ZigRequest {
     const authority_slice = req.authority orelse &[_]u8{};
     const headers_slice = toZigHeaderSlice(req.headers);
     const conn_id_slice = req.conn_id orelse &[_]u8{};
+    const body_slice = req.body_buffer.items;
 
     return ZigRequest{
         .method = toOptionalPtr(method_slice),
@@ -237,6 +240,8 @@ fn buildRequestView(req: *http.Request) ZigRequest {
         .stream_id = req.stream_id,
         .conn_id = toOptionalPtr(conn_id_slice),
         .conn_id_len = conn_id_slice.len,
+        .body = toOptionalPtr(body_slice),
+        .body_len = body_slice.len,
     };
 }
 
@@ -311,7 +316,6 @@ fn mapHandlerError(err: anyerror) i32 {
 }
 
 fn requestHandler(req: *http.Request, res: *http.Response) errors.HandlerError!void {
-    std.debug.print("requestHandler invoked? user_data={any}\n", .{req.user_data});
     const ctx_ptr = req.user_data orelse {
         logError(null, "requestHandler missing user_data", .{});
         return errors.HandlerError.InternalServerError;

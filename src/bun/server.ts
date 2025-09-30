@@ -241,6 +241,23 @@ export interface H3ServeOptions {
   quicDatagram?: (payload: Uint8Array, ctx: QUICDatagramContext) => void;
 }
 
+// ===== Request Snapshot for Memory Safety =====
+
+/**
+ * Complete snapshot of request data copied from Zig memory.
+ * All strings, headers, and body are copied to JavaScript memory
+ * before the FFI callback returns, preventing use-after-free.
+ */
+interface RequestSnapshot {
+  method: string;
+  path: string;
+  authority: string;
+  headers: Array<[string, string]>;
+  streamId: bigint;
+  connId: Uint8Array;
+  body: Uint8Array | null;
+}
+
 // ===== Streaming Request State Management =====
 
 interface StreamingRequestState {
@@ -447,6 +464,13 @@ export class H3Server {
         }
         const requestPtr = reqPtr as Pointer;
         const responsePtr = respPtr as Pointer;
+
+        // CRITICAL: Build complete snapshot SYNCHRONOUSLY before callback returns
+        // This copies all request data (method, path, headers, body, conn_id) to JS memory
+        // and prevents use-after-free when Zig frees the arena
+        const snapshot = this.#buildRequestSnapshot(requestPtr);
+
+        // Defer response end to allow async completion
         try {
           check(symbols.zig_h3_response_defer_end(responsePtr), "zig_h3_response_defer_end");
         } catch (err) {
@@ -454,13 +478,18 @@ export class H3Server {
           return;
         }
 
+        // Queue async handler with snapshot using queueMicrotask
+        // The snapshot contains copied data, so Zig can safely free the arena when callback returns
+        // We use queueMicrotask to maintain thread safety with Bun's event loop
         queueMicrotask(() => {
-          this.#handleRequest(requestPtr, responsePtr, fetchHandler, isStreaming).catch((error) => {
+          this.#handleRequest(snapshot, responsePtr, fetchHandler, isStreaming).catch((error) => {
             this.#handleError(error, responsePtr).catch((fallbackErr) => {
               console.error("Unable to emit error response", fallbackErr);
             });
           });
         });
+
+        // Return immediately - Zig arena can now be freed safely because snapshot is complete
       },
       {
         returns: FFIType.void,
@@ -572,13 +601,13 @@ export class H3Server {
   }
 
   async #handleRequest(
-    requestPtr: Pointer,
+    snapshot: RequestSnapshot,
     responsePtr: Pointer,
     fetchHandler: (req: Request, server: H3Server) => Response | Promise<Response>,
     isStreaming: boolean = false,
   ): Promise<void> {
     try {
-      const { request: baseRequest, streamId, connId } = this.#decodeRequest(requestPtr);
+      const { request: baseRequest, streamId, connId } = this.#decodeRequestFromSnapshot(snapshot);
 
       let request = baseRequest;
 
@@ -640,11 +669,17 @@ export class H3Server {
     await this.#sendResponse(fallback, responsePtr);
   }
 
-  #decodeRequest(requestPtr: Pointer): { request: Request; streamId: bigint; connId: Uint8Array } {
-    const structSize = 88; // sizeof(zig_h3_request) on 64-bit (now includes conn_id fields)
+  /**
+   * Build complete request snapshot synchronously from ZigRequest pointer.
+   * CRITICAL: All data must be copied before this method returns to prevent
+   * use-after-free when Zig frees the arena.
+   */
+  #buildRequestSnapshot(requestPtr: Pointer): RequestSnapshot {
+    const structSize = 104; // sizeof(zig_h3_request) on 64-bit with body fields
     const buffer = new Uint8Array(toArrayBuffer(requestPtr, structSize));
     const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
+    // Read all pointers and lengths from struct
     const methodPtr = Number(view.getBigUint64(0, true));
     const methodLen = Number(view.getBigUint64(8, true));
     const pathPtr = Number(view.getBigUint64(16, true));
@@ -656,26 +691,82 @@ export class H3Server {
     const streamId = view.getBigUint64(64, true);
     const connIdPtr = Number(view.getBigUint64(72, true));
     const connIdLen = Number(view.getBigUint64(80, true));
+    const bodyPtr = Number(view.getBigUint64(88, true));
+    const bodyLen = Number(view.getBigUint64(96, true));
 
-    const method = decodeUtf8(methodPtr, methodLen) || "GET";
-    const path = decodeUtf8(pathPtr, pathLen) || "/";
-    const authority = decodeUtf8(authorityPtr, authorityLen) || this.hostname;
-    const headers = toHeaders(decodeHeaders(headersPtr, headersLen));
+    // Copy all strings to JS memory (synchronously) with defensive null checks
+    const method = methodLen > 0 && methodPtr !== 0 ? decodeUtf8(methodPtr, methodLen) || "GET" : "GET";
+    const path = pathLen > 0 && pathPtr !== 0 ? decodeUtf8(pathPtr, pathLen) || "/" : "/";
+    const authority =
+      authorityLen > 0 && authorityPtr !== 0
+        ? decodeUtf8(authorityPtr, authorityLen) || this.hostname
+        : this.hostname;
 
+    // Copy headers to JS arrays (synchronously)
+    const headers = headersLen > 0 && headersPtr !== 0 ? decodeHeaders(headersPtr, headersLen) : [];
+
+    // Copy connection ID to JS Uint8Array (synchronously)
     const connId =
-      connIdPtr && connIdLen > 0
+      connIdLen > 0 && connIdPtr !== 0
         ? new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen))
         : new Uint8Array(0);
 
-    const url = new URL(path, `${this.#baseUrl}`);
+    // Copy body to JS Uint8Array (synchronously)
+    // DEFENSIVE: Only read body if both pointer and length are valid
+    let body: Uint8Array | null = null;
+    if (bodyLen > 0 && bodyPtr !== 0) {
+      try {
+        body = new Uint8Array(toArrayBuffer(pointerFrom(bodyPtr), bodyLen));
+      } catch (err) {
+        console.error("Failed to read body from FFI:", err);
+        body = null;
+      }
+    }
+
+    return {
+      method,
+      path,
+      authority,
+      headers,
+      streamId,
+      connId,
+      body,
+    };
+  }
+
+  /**
+   * Build Bun Request from pre-copied snapshot data.
+   * This method receives data already copied to JS memory, so no pointer dereferencing occurs.
+   */
+  #decodeRequestFromSnapshot(snapshot: RequestSnapshot): {
+    request: Request;
+    streamId: bigint;
+    connId: Uint8Array;
+  } {
+    const { method, path, authority, headers: headerPairs, streamId, connId, body } = snapshot;
+
+    // Build URL
+    const url = new URL(path, this.#baseUrl);
+
+    // Build Headers object
+    const headers = toHeaders(headerPairs);
     if (!headers.has("host")) {
       headers.set("host", authority);
     }
 
-    const request = new Request(url.toString(), {
+    // Build Request
+    // For buffered mode with body, include the body in the Request
+    const requestInit: RequestInit = {
       method,
       headers,
-    });
+    };
+
+    // Include body if present (buffered mode)
+    if (body && body.length > 0) {
+      requestInit.body = body;
+    }
+
+    const request = new Request(url.toString(), requestInit);
 
     return { request, streamId, connId };
   }

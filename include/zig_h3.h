@@ -60,6 +60,8 @@ typedef struct zig_h3_request {
     uint64_t stream_id;
     const uint8_t *conn_id;
     size_t conn_id_len;
+    const uint8_t *body;
+    size_t body_len;
 } zig_h3_request;
 
 /** Request callback signature. */
