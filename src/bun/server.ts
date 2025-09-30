@@ -195,6 +195,14 @@ export class WTContext {
     this.sessionId = sessionId;
   }
 
+  accept(): void {
+    check(this.#symbols.zig_h3_wt_accept(this.#sessionPtr), "WTContext.accept");
+  }
+
+  reject(status: number = 400): void {
+    check(this.#symbols.zig_h3_wt_reject(this.#sessionPtr, status), "WTContext.reject");
+  }
+
   sendDatagram(data: Uint8Array): void {
     check(
       this.#symbols.zig_h3_wt_send_datagram(this.#sessionPtr, ptr(data), data.length),
@@ -469,11 +477,12 @@ export class H3Server {
     view.setUint16(24, this.port, true);
     // Auto-enable QUIC/H3 DATAGRAM if handler is provided
     const hasH3DatagramRoute = this.#options.routes?.some((r) => r.h3Datagram != null) ?? false;
+    const hasWTRoute = this.#options.routes?.some((r) => r.webtransport != null) ?? false;
     view.setUint8(
       26,
-      this.#options.enableDatagram || this.#options.quicDatagram || hasH3DatagramRoute ? 1 : 0,
+      this.#options.enableDatagram || this.#options.quicDatagram || hasH3DatagramRoute || hasWTRoute ? 1 : 0,
     );
-    view.setUint8(27, this.#options.enableWebTransport ? 1 : 0);
+    view.setUint8(27, this.#options.enableWebTransport || hasWTRoute ? 1 : 0);
     // padding for pointer alignment: bytes 28-31 remain zero.
     view.setBigUint64(32, BigInt(qlog ? pointerToNumber(ptr(qlog)) : 0), true);
     view.setUint8(40, this.#options.logLevel ?? 0);
@@ -516,6 +525,7 @@ export class H3Server {
     // Determine handler: use route-specific fetch or fallback to global fetch
     const fetchHandler = route.fetch || this.#options.fetch;
     const isStreaming = route.mode === "streaming";
+    const hasWTHandler = route.webtransport != null;
 
     const callback = new JSCallback(
       (_user, reqPtr, respPtr) => {
@@ -542,7 +552,7 @@ export class H3Server {
         // The snapshot contains copied data, so Zig can safely free the arena when callback returns
         // We use queueMicrotask to maintain thread safety with Bun's event loop
         queueMicrotask(() => {
-          this.#handleRequest(snapshot, responsePtr, fetchHandler, isStreaming).catch((error) => {
+          this.#handleRequest(snapshot, responsePtr, fetchHandler, isStreaming, hasWTHandler).catch((error) => {
             this.#handleError(error, responsePtr).catch((fallbackErr) => {
               console.error("Unable to emit error response", fallbackErr);
             });
@@ -678,6 +688,51 @@ export class H3Server {
       this.#callbacks.push(h3DatagramCallback);
     }
 
+    // Create WebTransport session callback if webtransport handler is provided
+    let wtSessionCallback: JSCallback | null = null;
+    if (route.webtransport) {
+      const wtHandler = route.webtransport;
+
+      wtSessionCallback = new JSCallback(
+        (_user, reqPtr, sessionPtr) => {
+          if (!reqPtr || !sessionPtr) return;
+
+          const requestPtr = reqPtr as Pointer;
+          const sessionPointer = sessionPtr as Pointer;
+
+          // Build Request snapshot for context
+          const snapshot = this.#buildRequestSnapshot(requestPtr);
+          const { request, streamId } = this.#decodeRequestFromSnapshot(snapshot);
+
+          // Create WTContext with session pointer
+          const ctx = new WTContext(symbols, sessionPointer, request, streamId);
+
+          // Invoke user handler
+          try {
+            wtHandler(ctx);
+          } catch (error) {
+            console.error("WebTransport session handler error:", error);
+          }
+        },
+        {
+          returns: FFIType.void,
+          args: [FFIType.pointer, FFIType.pointer, FFIType.pointer],
+          threadsafe: true,
+        },
+      );
+
+      if (!wtSessionCallback.ptr) {
+        callback.close();
+        bodyChunkCallback?.close();
+        bodyCompleteCallback?.close();
+        h3DatagramCallback?.close();
+        wtSessionCallback.close();
+        throw new Error("JSCallback.ptr unavailable for WebTransport callback");
+      }
+
+      this.#callbacks.push(wtSessionCallback);
+    }
+
     // Register route with appropriate function
     if (isStreaming && bodyChunkCallback && bodyCompleteCallback) {
       check(
@@ -689,7 +744,7 @@ export class H3Server {
           bodyChunkCallback.ptr,
           bodyCompleteCallback.ptr,
           h3DatagramCallback?.ptr ?? null,
-          null,
+          wtSessionCallback?.ptr ?? null,
           null,
         ),
         "zig_h3_server_route_streaming",
@@ -702,7 +757,7 @@ export class H3Server {
           ptr(patternBuf),
           callback.ptr,
           h3DatagramCallback?.ptr ?? null,
-          null,
+          wtSessionCallback?.ptr ?? null,
           null,
         ),
         "zig_h3_server_route",
@@ -715,8 +770,16 @@ export class H3Server {
     responsePtr: Pointer,
     fetchHandler: (req: Request, server: H3Server) => Response | Promise<Response>,
     isStreaming: boolean = false,
+    hasWTHandler: boolean = false,
   ): Promise<void> {
     try {
+      // Check for WebTransport CONNECT BEFORE building the Request object
+      // Pseudo-headers like :protocol aren't exposed through Request.headers API
+      const isWTConnect =
+        hasWTHandler &&
+        snapshot.method === "CONNECT" &&
+        snapshot.headers.some(([name, value]) => name === ":protocol" && value === "webtransport");
+
       const { request: baseRequest, streamId, connId } = this.#decodeRequestFromSnapshot(snapshot);
 
       let request = baseRequest;
@@ -762,7 +825,12 @@ export class H3Server {
       }
 
       const result = await Promise.resolve(fetchHandler(request, this));
-      await this.#sendResponse(result, responsePtr);
+
+      // For WebTransport CONNECT requests, don't send the response here
+      // The WebTransport accept() or reject() call handles the response
+      if (!isWTConnect) {
+        await this.#sendResponse(result, responsePtr);
+      }
 
       // Note: Cleanup is handled by bodyCompleteCallback when body finishes
       // This prevents the deadlock where fetchHandler waits for body to complete

@@ -43,10 +43,13 @@
   - [x] Auto-enable H3 DATAGRAM when h3Datagram handler defined
   - [x] Test route with h3Datagram handler
   - [x] Add comprehensive documentation (PHASE_3B_SUMMARY.md)
-- [ ] **Phase 3C**: WebTransport Session API (40-50 min)
-  - [ ] Implement WTContext TypeScript wrapper
-  - [ ] Wire WebTransport callback in route registration
-  - [ ] Test CONNECT with WebTransport session
+- [x] **Phase 3C**: WebTransport Session API (40-50 min) — ✅ COMPLETE (2025-09-30)
+  - [x] Add accept() and reject() methods to WTContext (src/bun/server.ts:198-204)
+  - [x] Wire WebTransport callback in route registration (src/bun/server.ts:681-724)
+  - [x] Pass wtSessionCallback to FFI route registration (src/bun/server.ts:737-755)
+  - [x] Auto-enable WebTransport when webtransport handler defined (src/bun/server.ts:472-477)
+  - [x] Add intelligent request detection to prevent hanging regular HTTP traffic (src/bun/server.ts:825-826)
+  - [x] Create test with WebTransport route (tests/e2e/ffi/bun_server_webtransport.test.ts)
 - [ ] **Phase 4**: Lifecycle Extensions (20-30 min)
   - [ ] Add force flag to stop() method
   - [ ] Test Bun.file() response bodies
@@ -67,8 +70,8 @@
   - [ ] Stress tests (H3_STRESS=1)
 
 ### Time Estimate
-- **Completed**: ~6.5-8.0 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A + Phase 3B)
-- **Remaining**: ~15.5-23.0 hours (Phase 3C through Phase 6)
+- **Completed**: ~7.2-8.8 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A + Phase 3B + Phase 3C)
+- **Remaining**: ~14.8-22.2 hours (Phase 4 through Phase 6)
 - **Total**: 22-31 hours
 
 ## Current State Analysis
@@ -459,21 +462,36 @@ HTTP/3 DATAGRAMs are request-associated with flow IDs (src/quic/server/datagram.
 
 3. **Test**: Route with h3Datagram handler, POST to /h3dgram/echo with flow ID, verify echo
 
-### Phase 3C: WebTransport Session API (40-50 min)
+### Phase 3C: WebTransport Session API (40-50 min) — ✅ COMPLETE (2025-09-30)
 WebTransport provides sessions with bidirectional streams and datagrams.
 
-1. **Implement WTContext** (already done in Phase 3B setup):
-   - sendDatagram() wraps `zig_h3_wt_send_datagram`
-   - close() wraps `zig_h3_wt_close`
-   - TODO: Add stream helpers once `zig_h3_wt_stream_open_uni/bidi` exports land
+**Status**: Implemented with mixed traffic support. Routes can now handle both WebTransport CONNECT and regular HTTP traffic.
 
-2. **Wire WT callback** in #registerRoutes():
-   - If route.webtransport defined:
-     - Create JSCallback wrapping route.webtransport(session, ctx)
-     - Build WTContext from ZigRequest + session pointer
-     - Pass callback to zig_h3_server_route() as wt_cb param
+**Key Implementation Details**:
 
-4. **Test**: Route with webtransport handler, CONNECT to /wt/session, send datagram, verify received
+1. **WTContext API** (src/bun/server.ts:198-219):
+   - `accept()` wraps `zig_h3_wt_accept` - accepts WebTransport session
+   - `reject(status)` wraps `zig_h3_wt_reject` - rejects with HTTP status
+   - `sendDatagram(data)` wraps `zig_h3_wt_send_datagram` - sends datagrams
+   - `close(code, reason)` wraps `zig_h3_wt_close` - closes session
+
+2. **WebTransport Callback Wiring** (src/bun/server.ts:681-724):
+   - Creates thread-safe JSCallback when `route.webtransport` is defined
+   - Builds Request snapshot and WTContext from session pointer
+   - Passes callback to `zig_h3_server_route()` as `wt_cb` param
+
+3. **Critical Fix - Mixed Traffic Support** (src/bun/server.ts:778-781):
+   - Response sending gated on actual request type, not just handler presence
+   - Checks snapshot.headers for `:protocol` BEFORE building Request (pseudo-headers not exposed via Fetch API)
+   - Logic: `hasWTHandler && snapshot.method === "CONNECT" && snapshot.headers has :protocol=webtransport`
+   - Routes can serve both WebTransport and regular HTTP traffic
+
+4. **Auto-Configuration** (src/bun/server.ts:472-477):
+   - DATAGRAM and WebTransport auto-enabled when `webtransport` handler present
+
+**Test Coverage**: Created `tests/e2e/ffi/bun_server_webtransport.test.ts` with session establishment test.
+
+**Known Issue**: Bun canary v1.2.23-canary.27 has cleanup segfault (occurs after tests pass, doesn't affect functionality).
 
 **Note**: WebTransport stream helpers (uni/bidi) deferred until `QuicServer.WTApi` stream exports are available in FFI layer.
 

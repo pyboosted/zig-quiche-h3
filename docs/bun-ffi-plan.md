@@ -85,7 +85,7 @@ _Notes_: Current Bun-side coverage exercises synchronous + streaming fetches, ca
 - [x] Phase 2: Add stats API (requests_total, server_start_time_ms)
 - [x] Phase 3A: Implement QUIC datagram handler with auto-enable feature (2025-09-30)
 - [x] Phase 3B: Implement H3 datagram per-route handlers (2025-09-30)
-- [ ] Phase 3C: Implement WebTransport session API
+- [x] Phase 3C: Implement WebTransport session API with mixed traffic support (2025-09-30)
 - [ ] Phase 4: Add lifecycle extensions (stop with force flag)
 - [ ] Phase 5: Implement 4-tier error handling strategy and JSDoc
 - [ ] Phase 6: Add comprehensive tests for all protocol layers
@@ -98,13 +98,20 @@ _Notes_: Current Bun-side coverage exercises synchronous + streaming fetches, ca
 - [ ] Provide shared utilities for translating Bun `Headers`, `Request`, `Response`, `ReadableStream`, and `ArrayBuffer` payloads into the ABI without unnecessary copies, documenting when data is copied vs. borrowed.citeturn0search0turn0search2
 - [ ] Layer structured logging/metrics hooks that forward to user-provided `JSCallback` instances and integrate with Bun’s diagnostics conventions.
 
-_Notes_: Phase 0–1 deliver production-ready streaming support with proper connection discrimination, deadlock prevention, and resource cleanup. The server now supports both buffered and streaming modes with composite keys preventing cross-connection collisions. Critical fixes ensure:
-1. Connection IDs are populated in Request structs for accurate composite keys
-2. ReadableStream closes when Zig signals body complete, preventing deadlock
-3. Cleanup hooks fire with connection-discriminated keys, preventing cross-connection resource leaks
-4. Error sets are narrowed to StreamingError for type-safe propagation through FFI/routing boundary
+_Notes_: Phase 0–3C deliver production-ready server implementation with all three protocol layers:
+1. **Streaming support** (Phase 0-1): Buffered and streaming request bodies with composite key discrimination
+2. **Stats API** (Phase 2): Runtime metrics (connections, requests, uptime)
+3. **QUIC DATAGRAM** (Phase 3A): Server-level, connection-scoped datagram handling
+4. **H3 DATAGRAM** (Phase 3B): Per-route, request-associated datagrams with flow IDs
+5. **WebTransport** (Phase 3C): Session-based API with accept/reject/sendDatagram/close methods
 
-Remaining M3 work focuses on protocol-layer handlers (datagrams, WebTransport), lifecycle extensions, and comprehensive documentation. Existing `tests/e2e/helpers/ffiClient.ts` offers low-level bindings; the final M3 deliverable will formalize Bun-style ergonomics on top of these primitives.
+Critical architectural decisions:
+- Connection IDs are populated in Request structs for accurate composite keys
+- ReadableStream closes when Zig signals body complete, preventing deadlock
+- Cleanup hooks fire with connection-discriminated keys, preventing cross-connection resource leaks
+- Response sending gated on snapshot.headers check for `:protocol=webtransport` (pseudo-headers not exposed via Fetch API)
+
+Remaining M3 work focuses on lifecycle extensions (force shutdown), error handling strategy, and comprehensive testing. Existing `tests/e2e/helpers/ffiClient.ts` offers low-level bindings; the final M3 deliverable will formalize Bun-style ergonomics on top of these primitives.
 
 ### M4 — End-to-End & Stress Tests
 - [ ] Add Bun test suites that:
