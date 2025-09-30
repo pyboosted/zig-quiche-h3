@@ -48,6 +48,12 @@ pub fn WTState(
     comptime UniPrefaceT: type,
 ) type {
     return struct {
+        pub const SessionHandle = struct {
+            conn: *connection.Connection,
+            session_id: u64,
+            state: SessionStatePtr,
+        };
+
         sessions: std.hash_map.HashMap(SessionKey, SessionStatePtr, SessionKeyContext, 80),
         dgram_map: std.hash_map.HashMap(FlowKey, SessionStatePtr, FlowKeyContext, 80),
         sessions_created: usize = 0,
@@ -67,12 +73,15 @@ pub fn WTState(
         streams: std.hash_map.HashMap(StreamKey, StreamStatePtr, StreamKeyContext, 80),
         uni_preface: std.hash_map.HashMap(StreamKey, UniPrefaceT, StreamKeyContext, 80),
 
+        session_handles: std.ArrayListUnmanaged(SessionHandle) = .{},
+
         pub fn init(allocator: std.mem.Allocator) !@This() {
             return .{
                 .sessions = std.hash_map.HashMap(SessionKey, SessionStatePtr, SessionKeyContext, 80).init(allocator),
                 .dgram_map = std.hash_map.HashMap(FlowKey, SessionStatePtr, FlowKeyContext, 80).init(allocator),
                 .streams = std.hash_map.HashMap(StreamKey, StreamStatePtr, StreamKeyContext, 80).init(allocator),
                 .uni_preface = std.hash_map.HashMap(StreamKey, UniPrefaceT, StreamKeyContext, 80).init(allocator),
+                .session_handles = .{},
             };
         }
     };

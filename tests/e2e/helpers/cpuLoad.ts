@@ -1,3 +1,5 @@
+import { verboseLog } from "./logCapture";
+
 /**
  * CPU load simulation utilities for testing race conditions
  */

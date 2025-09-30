@@ -77,6 +77,17 @@ pub export fn zig_h3_fetch_event_size() usize {
     return client.fetchEventStructSize();
 }
 
+pub export fn zig_h3_wt_event_size() usize {
+    return client.wtEventStructSize();
+}
+
+pub export fn zig_h3_wt_event_copy(
+    src_ptr: ?*const client.ZigWebTransportEvent,
+    dst_ptr: ?*client.ZigWebTransportEvent,
+) i32 {
+    return client.wtEventCopy(src_ptr, dst_ptr);
+}
+
 pub export fn zig_h3_header_size() usize {
     return client.headerStructSize();
 }
@@ -136,6 +147,191 @@ pub export fn zig_h3_client_send_datagram(
     data_len: usize,
 ) i32 {
     return client.clientSendDatagram(client_ptr, data_ptr, data_len);
+}
+
+pub export fn zig_h3_client_run_once(client_ptr: ?*client.ZigClient) i32 {
+    return client.clientRunOnce(client_ptr);
+}
+
+pub export fn zig_h3_client_poll(client_ptr: ?*client.ZigClient) i32 {
+    return client.clientPoll(client_ptr);
+}
+
+pub export fn zig_h3_client_open_webtransport(
+    client_ptr: ?*client.ZigClient,
+    path_ptr: ?[*]const u8,
+    path_len: usize,
+    cb: client.WebTransportEventCallback,
+    user: ?*anyopaque,
+) ?*client.ZigWebTransportSession {
+    return client.clientOpenWebTransport(client_ptr, path_ptr, path_len, cb, user);
+}
+
+pub export fn zig_h3_wt_session_close(
+    session_ptr: ?*client.ZigWebTransportSession,
+    error_code: u32,
+    reason_ptr: ?[*]const u8,
+    reason_len: usize,
+) i32 {
+    return client.wtSessionClose(session_ptr, error_code, reason_ptr, reason_len);
+}
+
+pub export fn zig_h3_wt_session_send_datagram(
+    session_ptr: ?*client.ZigWebTransportSession,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    return client.wtSessionSendDatagram(session_ptr, data_ptr, data_len);
+}
+
+pub export fn zig_h3_wt_session_receive_datagram(
+    session_ptr: ?*client.ZigWebTransportSession,
+    out_ptr: ?*client.ZigBytes,
+) i32 {
+    return client.wtSessionReceiveDatagram(session_ptr, out_ptr);
+}
+
+pub export fn zig_h3_wt_session_free_datagram(
+    session_ptr: ?*client.ZigWebTransportSession,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    return client.wtSessionFreeDatagram(session_ptr, data_ptr, data_len);
+}
+
+pub export fn zig_h3_wt_session_is_established(session_ptr: ?*client.ZigWebTransportSession) i32 {
+    return client.wtSessionIsEstablished(session_ptr);
+}
+
+pub export fn zig_h3_wt_session_stream_id(session_ptr: ?*client.ZigWebTransportSession) u64 {
+    return client.wtSessionStreamId(session_ptr);
+}
+
+pub export fn zig_h3_wt_session_free(session_ptr: ?*client.ZigWebTransportSession) i32 {
+    return client.wtSessionFree(session_ptr);
+}
+
+pub export fn zig_h3_server_new(cfg_ptr: ?*const server.ZigServerConfig) ?*server.ZigServer {
+    return server.zig_h3_server_new(cfg_ptr);
+}
+
+pub export fn zig_h3_server_free(server_ptr: ?*server.ZigServer) i32 {
+    return server.zig_h3_server_free(server_ptr);
+}
+
+pub export fn zig_h3_server_route(
+    server_ptr: ?*server.ZigServer,
+    method_c: ?[*:0]const u8,
+    pattern_c: ?[*:0]const u8,
+    cb: server.RequestCallback,
+    dgram_cb: server.DatagramCallback,
+    wt_cb: server.WTSessionCallback,
+    user: ?*anyopaque,
+) i32 {
+    return server.zig_h3_server_route(server_ptr, method_c, pattern_c, cb, dgram_cb, wt_cb, user);
+}
+
+pub export fn zig_h3_server_start(server_ptr: ?*server.ZigServer) i32 {
+    return server.zig_h3_server_start(server_ptr);
+}
+
+pub export fn zig_h3_server_stop(server_ptr: ?*server.ZigServer) i32 {
+    return server.zig_h3_server_stop(server_ptr);
+}
+
+pub export fn zig_h3_server_set_log(server_ptr: ?*server.ZigServer, cb: server.LogCallback, user: ?*anyopaque) i32 {
+    return server.zig_h3_server_set_log(server_ptr, cb, user);
+}
+
+pub export fn zig_h3_response_status(resp_ptr: ?*server.ZigResponse, status: u16) i32 {
+    return server.zig_h3_response_status(resp_ptr, status);
+}
+
+pub export fn zig_h3_response_header(
+    resp_ptr: ?*server.ZigResponse,
+    name_ptr: ?[*]const u8,
+    name_len: usize,
+    value_ptr: ?[*]const u8,
+    value_len: usize,
+) i32 {
+    return server.zig_h3_response_header(resp_ptr, name_ptr, name_len, value_ptr, value_len);
+}
+
+pub export fn zig_h3_response_write(
+    resp_ptr: ?*server.ZigResponse,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    return server.zig_h3_response_write(resp_ptr, data_ptr, data_len);
+}
+
+pub export fn zig_h3_response_end(
+    resp_ptr: ?*server.ZigResponse,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    return server.zig_h3_response_end(resp_ptr, data_ptr, data_len);
+}
+
+pub export fn zig_h3_response_send_h3_datagram(
+    resp_ptr: ?*server.ZigResponse,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    return server.zig_h3_response_send_h3_datagram(resp_ptr, data_ptr, data_len);
+}
+
+pub export fn zig_h3_response_send_trailers(
+    resp_ptr: ?*server.ZigResponse,
+    trailers_ptr: ?[*]const server.ZigHeader,
+    trailers_len: usize,
+) i32 {
+    return server.zig_h3_response_send_trailers(resp_ptr, trailers_ptr, trailers_len);
+}
+
+pub export fn zig_h3_response_defer_end(resp_ptr: ?*server.ZigResponse) i32 {
+    return server.zig_h3_response_defer_end(resp_ptr);
+}
+
+pub export fn zig_h3_response_set_auto_end(resp_ptr: ?*server.ZigResponse, enable: u8) i32 {
+    return server.zig_h3_response_set_auto_end(resp_ptr, enable);
+}
+
+pub export fn zig_h3_response_should_auto_end(resp_ptr: ?*server.ZigResponse) i32 {
+    return server.zig_h3_response_should_auto_end(resp_ptr);
+}
+
+pub export fn zig_h3_response_process_partial(resp_ptr: ?*server.ZigResponse) i32 {
+    return server.zig_h3_response_process_partial(resp_ptr);
+}
+
+pub export fn zig_h3_wt_accept(session_ptr: ?*server.ZigWebTransportSession) i32 {
+    return server.zig_h3_wt_accept(session_ptr);
+}
+
+pub export fn zig_h3_wt_reject(session_ptr: ?*server.ZigWebTransportSession, status: u16) i32 {
+    return server.zig_h3_wt_reject(session_ptr, status);
+}
+
+pub export fn zig_h3_wt_close(
+    session_ptr: ?*server.ZigWebTransportSession,
+    error_code: u32,
+    reason_ptr: ?[*]const u8,
+    reason_len: usize,
+) i32 {
+    return server.zig_h3_wt_close(session_ptr, error_code, reason_ptr, reason_len);
+}
+
+pub export fn zig_h3_wt_send_datagram(
+    session_ptr: ?*server.ZigWebTransportSession,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    return server.zig_h3_wt_send_datagram(session_ptr, data_ptr, data_len);
+}
+
+pub export fn zig_h3_wt_release(session_ptr: ?*server.ZigWebTransportSession) i32 {
+    return server.zig_h3_wt_release(session_ptr);
 }
 
 extern fn quiche_version() [*:0]const u8;

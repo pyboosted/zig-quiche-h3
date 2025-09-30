@@ -83,6 +83,7 @@ describeStatic("WebTransport Session Tests", (_binaryType: ServerBinaryType) => 
             env: {
                 // Don't enable WebTransport - omit the variable entirely
             },
+            skipConcurrencyGuard: true,
         });
 
         try {

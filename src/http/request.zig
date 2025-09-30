@@ -23,6 +23,7 @@ pub const Request = struct {
     body_complete: bool,
     body_received_bytes: usize, // Track bytes in streaming mode
     user_data: ?*anyopaque = null, // User context for streaming handlers
+    state_ptr: ?*anyopaque = null, // internal pointer to server request state
 
     /// Initialize a new request with an arena allocator
     pub fn init(
@@ -59,6 +60,7 @@ pub const Request = struct {
             .body_complete = false,
             .body_received_bytes = 0,
             .user_data = null,
+            .state_ptr = null,
         };
     }
 

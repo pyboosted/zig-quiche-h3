@@ -5,17 +5,19 @@ import { withServer } from "../helpers/spawnServer";
 import { getProjectRoot } from "../helpers/testUtils";
 import path from "path";
 import { spawn } from "child_process";
-import { promisify } from "util";
-
-const execAsync = promisify(require("child_process").exec);
 const projectRoot = getProjectRoot();
 const wtClientPath = path.join(projectRoot, "zig-out", "bin", "wt-client");
 
-let wtClientBuilt = false;
+let wtClientChecked = false;
 async function ensureWtClientBuilt(): Promise<void> {
-    if (wtClientBuilt) return;
-    await execAsync(`cd ${projectRoot} && zig build wt-client`);
-    wtClientBuilt = true;
+    if (wtClientChecked) return;
+    const exists = await Bun.file(wtClientPath).exists();
+    if (!exists) {
+        throw new Error(
+            `wt-client binary missing at ${wtClientPath}. Run "zig build -Dwith-libev=true" before executing tests.`,
+        );
+    }
+    wtClientChecked = true;
 }
 
 type WtClientResult = {
@@ -64,66 +66,58 @@ describeStatic("WebTransport datagram echo", (binaryType: ServerBinaryType) => {
         await ensureWtClientBuilt();
     });
 
-    test(
-        "echoes multiple datagrams",
-        async () => {
-            await withServer(
-                async ({ port }) => {
-                    const url = `https://127.0.0.1:${port}/wt/echo`;
-                    const result = await runWtClient(["--url", url, "--count", "5"]);
+    test("echoes multiple datagrams", async () => {
+        await withServer(
+            async ({ port }) => {
+                const url = `https://127.0.0.1:${port}/wt/echo`;
+                const result = await runWtClient(["--url", url, "--count", "5"]);
 
-                    expect(result.exitCode).toBe(0);
-                    const matches = result.stderr.match(
-                        /Received echo: WebTransport datagram #\d+ \(len=\d+\)/g,
-                    );
-                    expect(matches).toBeTruthy();
-                    expect(matches!.length).toBeGreaterThanOrEqual(5);
+                expect(result.exitCode).toBe(0);
+                const matches = result.stderr.match(
+                    /Received echo: WebTransport datagram #\d+ \(len=\d+\)/g,
+                );
+                expect(matches).toBeTruthy();
+                expect(matches!.length).toBeGreaterThanOrEqual(5);
+            },
+            {
+                env: {
+                    H3_WEBTRANSPORT: "1",
+                    H3_WT_STREAMS: "1",
+                    H3_WT_BIDI: "1",
                 },
-                {
-                    env: {
-                        H3_WEBTRANSPORT: "1",
-                        H3_WT_STREAMS: "1",
-                        H3_WT_BIDI: "1",
-                    },
-                    binaryType,
-                },
-            );
-        },
-        20_000,
-    );
+                binaryType,
+            },
+        );
+    }, 20_000);
 
-    test(
-        "handles large datagram payloads",
-        async () => {
-            await withServer(
-                async ({ port }) => {
-                    const url = `https://127.0.0.1:${port}/wt/echo`;
-                    const payloadLen = 1200;
-                    const result = await runWtClient([
-                        "--url",
-                        url,
-                        "--payload-size",
-                        payloadLen.toString(),
-                    ]);
+    test("handles large datagram payloads", async () => {
+        await withServer(
+            async ({ port }) => {
+                const url = `https://127.0.0.1:${port}/wt/echo`;
+                const payloadLen = 1200;
+                const result = await runWtClient([
+                    "--url",
+                    url,
+                    "--payload-size",
+                    payloadLen.toString(),
+                ]);
 
-                    expect(result.exitCode).toBe(0);
-                    expect(result.stderr).toContain(`len=${payloadLen}`);
-                    const matches = result.stderr.match(
-                        /Received echo: WebTransport datagram #\d+ \(len=\d+\)/g,
-                    );
-                    expect(matches).toBeTruthy();
-                    expect(matches![0]).toContain(`len=${payloadLen}`);
+                expect(result.exitCode).toBe(0);
+                expect(result.stderr).toContain(`len=${payloadLen}`);
+                const matches = result.stderr.match(
+                    /Received echo: WebTransport datagram #\d+ \(len=\d+\)/g,
+                );
+                expect(matches).toBeTruthy();
+                expect(matches![0]).toContain(`len=${payloadLen}`);
+            },
+            {
+                env: {
+                    H3_WEBTRANSPORT: "1",
+                    H3_WT_STREAMS: "1",
+                    H3_WT_BIDI: "1",
                 },
-                {
-                    env: {
-                        H3_WEBTRANSPORT: "1",
-                        H3_WT_STREAMS: "1",
-                        H3_WT_BIDI: "1",
-                    },
-                    binaryType,
-                },
-            );
-        },
-        20_000,
-    );
+                binaryType,
+            },
+        );
+    }, 20_000);
 });

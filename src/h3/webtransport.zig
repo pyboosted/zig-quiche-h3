@@ -224,6 +224,15 @@ pub const WebTransportSessionState = struct {
 
     /// Clean up session state
     pub fn deinit(self: *WebTransportSessionState, allocator: std.mem.Allocator) void {
+        for (self.request_headers) |hdr| {
+            if (hdr.name_len > 0) {
+                allocator.free(@constCast(hdr.name[0..hdr.name_len]));
+            }
+            if (hdr.value_len > 0) {
+                allocator.free(@constCast(hdr.value[0..hdr.value_len]));
+            }
+        }
+        allocator.free(self.request_headers);
         self.session.deinit();
         self.arena.deinit();
         allocator.destroy(self);

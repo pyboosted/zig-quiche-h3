@@ -32,3 +32,26 @@ pub const ClientError = error{
     ConnectionPoolExhausted,
     OutOfMemory,
 };
+
+pub fn toWireError(err: ClientError) i32 {
+    return switch (err) {
+        ClientError.OutOfMemory => -500,
+        ClientError.RequestTimeout => -408,
+        ClientError.HandshakeTimeout => -408,
+        ClientError.InvalidRequest => -400,
+        ClientError.DatagramNotEnabled => -421,
+        ClientError.DatagramTooLarge => -431,
+        ClientError.SocketSetupFailed => -502,
+        ClientError.NoSocket => -502,
+        ClientError.ConnectionClosed => -503,
+        ClientError.HandshakeFailed => -503,
+        ClientError.AlreadyClosed => -503,
+        ClientError.NoConnection => -503,
+        ClientError.StreamReset => -503,
+        ClientError.DatagramSendFailed => -503,
+        ClientError.GoAwayReceived => -503,
+        ClientError.ConnectionGoingAway => -503,
+        ClientError.H3Error => -503,
+        else => -1,
+    };
+}

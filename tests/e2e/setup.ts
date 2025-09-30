@@ -1,5 +1,6 @@
 import { afterAll, beforeAll } from "bun:test";
 import { cleanupOldFiles } from "./helpers/testUtils";
+import { prebuildAllArtifacts } from "./helpers/prebuild";
 import { isVerboseMode, verboseLog } from "./helpers/logCapture";
 // import { setupFailureCapture } from "./helpers/failureCapture";
 
@@ -24,13 +25,17 @@ verboseLog(`[E2E] setup.ts loaded at ${new Date().toISOString()}`);
 beforeAll(async () => {
     verboseLog(`[E2E] beforeAll starting at ${new Date().toISOString()}`);
 
+    verboseLog(`[E2E] Prebuilding Zig artifacts at ${new Date().toISOString()}`);
+    await prebuildAllArtifacts();
+    verboseLog(`[E2E] Prebuild completed at ${new Date().toISOString()}`);
+
     // Clean up old test files (older than 30 minutes)
     // This prevents infinite accumulation while preserving recent files for debugging
     verboseLog(`[E2E] Calling cleanupOldFiles(30) at ${new Date().toISOString()}`);
     await cleanupOldFiles(30);
     verboseLog(`[E2E] cleanupOldFiles(30) completed at ${new Date().toISOString()}`);
 
-    verboseLog("Test environment initialized - old tmp files cleaned");
+    verboseLog("Test environment initialized - binaries ready and tmp files cleaned");
     verboseLog(`[E2E] beforeAll completed at ${new Date().toISOString()}`);
 });
 

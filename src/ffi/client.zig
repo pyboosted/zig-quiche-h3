@@ -1,5 +1,6 @@
 const std = @import("std");
 const client_mod = @import("client");
+const client_errors_mod = client_mod.errors;
 const http = @import("http");
 const errors = @import("errors");
 
@@ -9,6 +10,7 @@ const ClientConfig = client_mod.ClientConfig;
 const ServerEndpoint = client_mod.ServerEndpoint;
 const Method = http.Method;
 const ClientError = client_mod.ClientError;
+const WebTransportSession = client_mod.WebTransportSession;
 
 pub const ZigClientConfig = extern struct {
     verify_peer: u8 = 1,
@@ -82,12 +84,45 @@ pub const FetchEventCallback = ?*const fn (user: ?*anyopaque, event: ?*const Zig
 
 pub const DatagramCallback = ?*const fn (user: ?*anyopaque, flow_id: u64, payload: ?[*]const u8, payload_len: usize) callconv(.c) void;
 
+pub const ZigWebTransportSession = opaque {};
+
+pub const ZigWebTransportEventType = enum(u32) {
+    connected = 0,
+    connect_failed = 1,
+    closed = 2,
+    datagram = 3,
+};
+
+pub const ZigWebTransportEvent = extern struct {
+    event_type: ZigWebTransportEventType = .connected,
+    status: u32 = 0,
+    error_code: i32 = 0,
+    flags: u32 = 0,
+    stream_id: u64 = 0,
+    reason_ptr: ?[*]const u8 = null,
+    reason_len: usize = 0,
+    datagram_ptr: ?[*]const u8 = null,
+    datagram_len: usize = 0,
+};
+
+pub const ZigBytes = extern struct {
+    ptr: ?[*]const u8 = null,
+    len: usize = 0,
+};
+
+pub const WebTransportEventCallback = ?*const fn (
+    user: ?*anyopaque,
+    session: ?*ZigWebTransportSession,
+    event: ?*const ZigWebTransportEvent,
+) callconv(.c) void;
+
 const ClientHandle = struct {
     allocator: Allocator,
     client: *QuicClient,
     config: ClientConfig,
     dgram_cb: DatagramCallback = null,
     dgram_user: ?*anyopaque = null,
+    wt_session_handles: std.ArrayListUnmanaged(*WtSessionHandle) = .{},
 };
 
 const FetchEventContext = struct {
@@ -98,6 +133,121 @@ const FetchEventContext = struct {
     stream_id: u64 = 0,
     event_storage: ZigFetchEvent = .{},
 };
+
+const WtSessionHandle = struct {
+    allocator: Allocator,
+    client_handle: *ClientHandle,
+    session: ?*WebTransportSession,
+    event_cb: WebTransportEventCallback,
+    user_data: ?*anyopaque,
+    active: bool = true,
+
+    fn asOpaque(self: *WtSessionHandle) *ZigWebTransportSession {
+        return @ptrCast(@alignCast(self));
+    }
+
+    fn onSessionDestroy(self: *WtSessionHandle) void {
+        self.session = null;
+        self.active = false;
+        self.event_cb = null;
+    }
+
+    fn detach(self: *WtSessionHandle) void {
+        self.event_cb = null;
+        self.user_data = null;
+        self.session = null;
+        self.active = false;
+    }
+};
+
+fn removeWtSessionHandle(client_handle: *ClientHandle, target: *WtSessionHandle) void {
+    var i: usize = 0;
+    while (i < client_handle.wt_session_handles.items.len) : (i += 1) {
+        if (client_handle.wt_session_handles.items[i] == target) {
+            _ = client_handle.wt_session_handles.swapRemove(i);
+            return;
+        }
+    }
+}
+
+fn wtSessionHandleFromOpaque(ptr: ?*ZigWebTransportSession) ?*WtSessionHandle {
+    if (ptr) |raw| return @ptrCast(@alignCast(raw));
+    return null;
+}
+
+const WT_EVENT_FLAG_REMOTE_CLOSE: u32 = 1;
+
+fn mapWebTransportError(err: anyerror) i32 {
+    return switch (err) {
+        error.SessionNotEstablished => -400,
+        error.GoAwayReceived => -503,
+        error.DatagramNotEnabled => -421,
+        error.DatagramTooLarge => -431,
+        error.WouldBlock => -425,
+        error.DatagramSendFailed => -503,
+        else => -1,
+    };
+}
+
+fn wtSessionEventThunk(
+    session: *WebTransportSession,
+    event: WebTransportSession.Event,
+    ctx: ?*anyopaque,
+) void {
+    const handle_ptr = ctx orelse return;
+    const handle = @as(*WtSessionHandle, @ptrCast(@alignCast(handle_ptr)));
+    if (handle.event_cb == null) return;
+
+    var event_storage = ZigWebTransportEvent{
+        .event_type = .connected,
+        .status = 0,
+        .error_code = 0,
+        .flags = 0,
+        .stream_id = session.session_id,
+        .reason_ptr = null,
+        .reason_len = 0,
+        .datagram_ptr = null,
+        .datagram_len = 0,
+    };
+
+    switch (event) {
+        .connected => |status| {
+            event_storage.event_type = .connected;
+            event_storage.status = status;
+        },
+        .connect_failed => |status| {
+            event_storage.event_type = .connect_failed;
+            event_storage.status = status;
+        },
+        .closed => |info| {
+            event_storage.event_type = .closed;
+            event_storage.error_code = info.error_code;
+            if (info.remote) {
+                event_storage.flags |= WT_EVENT_FLAG_REMOTE_CLOSE;
+            }
+            if (info.reason.len > 0) {
+                event_storage.reason_ptr = info.reason.ptr;
+                event_storage.reason_len = info.reason.len;
+            }
+        },
+        .datagram => |payload| {
+            event_storage.event_type = .datagram;
+            if (payload.len > 0) {
+                event_storage.datagram_ptr = payload.ptr;
+                event_storage.datagram_len = payload.len;
+            }
+        },
+    }
+
+    handle.event_cb.?(handle.user_data, if (handle.active) handle.asOpaque() else null, &event_storage);
+}
+
+fn wtSessionDestroyThunk(_: *WebTransportSession, ctx: ?*anyopaque) void {
+    const handle_ptr = ctx orelse return;
+    const handle = @as(*WtSessionHandle, @ptrCast(@alignCast(handle_ptr)));
+    handle.onSessionDestroy();
+    removeWtSessionHandle(handle.client_handle, handle);
+}
 
 fn asHandle(ptr: ?*ZigClient) ?*ClientHandle {
     if (ptr) |raw| return @ptrCast(@alignCast(raw));
@@ -179,20 +329,19 @@ fn buildTempHeaders(allocator: Allocator, pairs: []const client_mod.HeaderPair) 
 }
 
 fn mapClientError(err: anyerror) i32 {
-    return switch (err) {
-        error.OutOfMemory => -500,
-        client_mod.ClientError.RequestTimeout => -408,
-        client_mod.ClientError.InvalidRequest => -400,
-        client_mod.ClientError.DnsResolveFailed => -502,
-        client_mod.ClientError.SocketSetupFailed => -502,
-        client_mod.ClientError.NoConnection => -503,
-        client_mod.ClientError.ConnectionClosed => -503,
-        client_mod.ClientError.StreamReset => -503,
-        client_mod.ClientError.DatagramNotEnabled => -421,
-        client_mod.ClientError.DatagramTooLarge => -431,
-        client_mod.ClientError.DatagramSendFailed => -503,
-        else => -1,
-    };
+    if (err == error.OutOfMemory) return -500;
+    const name = @errorName(err);
+    const info = @typeInfo(ClientError);
+    if (info != .error_set) return -1;
+    if (info.error_set) |fields| {
+        inline for (fields) |field| {
+            if (std.mem.eql(u8, name, field.name)) {
+                const client_err = @field(ClientError, field.name);
+                return client_errors_mod.toWireError(client_err);
+            }
+        }
+    }
+    return -1;
 }
 
 fn mapAllocError(err: anyerror) ClientError {
@@ -399,6 +548,18 @@ pub fn clientNew(cfg_ptr: ?*const ZigClientConfig) ?*ZigClient {
 
 pub fn clientFree(client_ptr: ?*ZigClient) i32 {
     if (asHandle(client_ptr)) |handle| {
+        var i: usize = 0;
+        while (i < handle.wt_session_handles.items.len) : (i += 1) {
+            const wt_handle = handle.wt_session_handles.items[i];
+            if (wt_handle.session) |session| {
+                session.setEventCallback(null, null);
+                session.setDestroyCallback(null, null);
+                session.user_data = null;
+            }
+            wt_handle.detach();
+            handle.allocator.destroy(wt_handle);
+        }
+        handle.wt_session_handles.deinit(handle.allocator);
         handle.client.deinit();
         handle.allocator.destroy(handle);
         return 0;
@@ -609,6 +770,16 @@ pub fn headersCopy(base: ?*const ZigHeader, len: usize, dst: ?*ZigHeader, dst_le
     return @as(i32, @intCast(slice.len));
 }
 
+pub fn wtEventStructSize() usize {
+    return @sizeOf(ZigWebTransportEvent);
+}
+
+pub fn wtEventCopy(src: ?*const ZigWebTransportEvent, dst: ?*ZigWebTransportEvent) i32 {
+    if (src == null or dst == null) return -1;
+    dst.?.* = src.?.*;
+    return 0;
+}
+
 pub fn copyBytes(src: ?[*]const u8, len: usize, dst: ?*u8) i32 {
     if (src == null or dst == null) return -1;
     if (len == 0) return 0;
@@ -641,5 +812,142 @@ pub fn clientSendDatagram(
     if (data_len == 0 or data_ptr == null) return 0;
     const data = sliceFromC(data_ptr, data_len);
     handle.client.sendQuicDatagram(data) catch |err| return mapClientError(err);
+    return 0;
+}
+
+pub fn clientRunOnce(client_ptr: ?*ZigClient) i32 {
+    const handle = asHandle(client_ptr) orelse return -1;
+    handle.client.event_loop.runOnce();
+    return 0;
+}
+
+pub fn clientPoll(client_ptr: ?*ZigClient) i32 {
+    const handle = asHandle(client_ptr) orelse return -1;
+    handle.client.event_loop.poll();
+    return 0;
+}
+
+pub fn clientOpenWebTransport(
+    client_ptr: ?*ZigClient,
+    path_ptr: ?[*]const u8,
+    path_len: usize,
+    cb: WebTransportEventCallback,
+    user: ?*anyopaque,
+) ?*ZigWebTransportSession {
+    const handle = asHandle(client_ptr) orelse return null;
+    if (path_ptr == null or path_len == 0) return null;
+    const path = path_ptr.?[0..path_len];
+    const session = handle.client.openWebTransport(path) catch return null;
+
+    const wt_handle = handle.allocator.create(WtSessionHandle) catch {
+        session.closeWith(0, &.{}) catch {};
+        return null;
+    };
+
+    wt_handle.* = .{
+        .allocator = handle.allocator,
+        .client_handle = handle,
+        .session = session,
+        .event_cb = cb,
+        .user_data = user,
+        .active = true,
+    };
+
+    handle.wt_session_handles.append(handle.allocator, wt_handle) catch {
+        wt_handle.detach();
+        handle.allocator.destroy(wt_handle);
+        session.closeWith(0, &.{}) catch {};
+        return null;
+    };
+
+    session.user_data = wt_handle;
+    session.setEventCallback(wtSessionEventThunk, wt_handle);
+    session.setDestroyCallback(wtSessionDestroyThunk, wt_handle);
+    return wt_handle.asOpaque();
+}
+
+pub fn wtSessionClose(
+    session_ptr: ?*ZigWebTransportSession,
+    error_code: u32,
+    reason_ptr: ?[*]const u8,
+    reason_len: usize,
+) i32 {
+    const handle = wtSessionHandleFromOpaque(session_ptr) orelse return -1;
+    const session = handle.session orelse return -2;
+    const reason_slice: []const u8 = if (reason_ptr) |ptr| ptr[0..reason_len] else &[_]u8{};
+    session.closeWith(error_code, reason_slice) catch |err| return mapClientError(err);
+    return 0;
+}
+
+pub fn wtSessionSendDatagram(
+    session_ptr: ?*ZigWebTransportSession,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    const handle = wtSessionHandleFromOpaque(session_ptr) orelse return -1;
+    const session = handle.session orelse return -2;
+    if (data_len == 0) return 0;
+    if (data_ptr == null) return -3;
+    const payload = data_ptr.?[0..data_len];
+    session.sendDatagram(payload) catch |err| return mapWebTransportError(err);
+    return 0;
+}
+
+pub fn wtSessionReceiveDatagram(
+    session_ptr: ?*ZigWebTransportSession,
+    out_ptr: ?*ZigBytes,
+) i32 {
+    const handle = wtSessionHandleFromOpaque(session_ptr) orelse return -1;
+    const session = handle.session orelse return -2;
+    const out = out_ptr orelse return -3;
+    if (session.receiveDatagram()) |payload| {
+        out.* = .{
+            .ptr = if (payload.len == 0) null else payload.ptr,
+            .len = payload.len,
+        };
+        return 0;
+    }
+    out.* = .{ .ptr = null, .len = 0 };
+    return -404;
+}
+
+pub fn wtSessionFreeDatagram(
+    session_ptr: ?*ZigWebTransportSession,
+    data_ptr: ?[*]const u8,
+    data_len: usize,
+) i32 {
+    const handle = wtSessionHandleFromOpaque(session_ptr) orelse return -1;
+    if (data_ptr == null or data_len == 0) return 0;
+    const slice = @as([*]u8, @ptrCast(@constCast(data_ptr.?)))[0..data_len];
+    handle.client_handle.allocator.free(slice);
+    return 0;
+}
+
+pub fn wtSessionIsEstablished(session_ptr: ?*ZigWebTransportSession) i32 {
+    const handle = wtSessionHandleFromOpaque(session_ptr) orelse return 0;
+    const session = handle.session orelse return 0;
+    return if (session.state == WebTransportSession.State.established) 1 else 0;
+}
+
+pub fn wtSessionStreamId(session_ptr: ?*ZigWebTransportSession) u64 {
+    if (wtSessionHandleFromOpaque(session_ptr)) |handle| {
+        if (handle.session) |session| {
+            return session.session_id;
+        }
+    }
+    return 0;
+}
+
+pub fn wtSessionFree(session_ptr: ?*ZigWebTransportSession) i32 {
+    const handle = wtSessionHandleFromOpaque(session_ptr) orelse return -1;
+    removeWtSessionHandle(handle.client_handle, handle);
+    if (handle.session) |session| {
+        session.setEventCallback(null, null);
+        session.setDestroyCallback(null, null);
+        session.user_data = null;
+    }
+    handle.detach();
+    handle.session = null;
+    handle.allocator.destroy(handle);
     return 0;
 }

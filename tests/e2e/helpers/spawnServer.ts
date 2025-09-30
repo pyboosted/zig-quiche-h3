@@ -12,6 +12,76 @@ import {
 import { get } from "./zigClient";
 import { isVerboseMode, verboseLog } from "./logCapture";
 import { captureServerLogs } from "./failureCapture";
+import { prebuildAllArtifacts } from "./prebuild";
+
+type LockHandle = { release(): void };
+
+const MAX_CONCURRENT_SERVERS_RAW = process.env.H3_E2E_MAX_SERVERS;
+const MAX_CONCURRENT_SERVERS = (() => {
+    if (MAX_CONCURRENT_SERVERS_RAW === undefined) {
+        return Number.POSITIVE_INFINITY;
+    }
+    const parsed = Number.parseInt(MAX_CONCURRENT_SERVERS_RAW, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        return Number.POSITIVE_INFINITY;
+    }
+    return parsed;
+})();
+
+function createServerLock(limit: number) {
+    const globalAny = globalThis as unknown as {
+        __e2eServerLock?: {
+            acquire: () => Promise<LockHandle>;
+        };
+    };
+
+    if (!globalAny.__e2eServerLock) {
+        let available = Math.max(1, limit);
+        const waiters: Array<() => void> = [];
+
+        const acquire = async (): Promise<LockHandle> => {
+            if (available > 0) {
+                available -= 1;
+                let released = false;
+                const release = () => {
+                    if (released) return;
+                    released = true;
+                    available += 1;
+                    if (waiters.length > 0) {
+                        const next = waiters.shift()!;
+                        next();
+                    }
+                };
+                return { release };
+            }
+
+            await new Promise<void>((resolve) => {
+                waiters.push(resolve);
+            });
+
+            let released = false;
+            const release = () => {
+                if (released) return;
+                released = true;
+                available += 1;
+                if (waiters.length > 0) {
+                    const next = waiters.shift()!;
+                    next();
+                }
+            };
+            available -= 1;
+            return { release };
+        };
+
+        globalAny.__e2eServerLock = { acquire };
+    }
+
+    return globalAny.__e2eServerLock!;
+}
+
+const serverLock = Number.isFinite(MAX_CONCURRENT_SERVERS)
+    ? createServerLock(MAX_CONCURRENT_SERVERS)
+    : null;
 
 /**
  * Server instance with cleanup capability
@@ -33,12 +103,22 @@ export interface SpawnServerOptions {
     env?: Record<string, string>;
     timeoutMs?: number;
     binaryType?: ServerBinaryType;
+    skipConcurrencyGuard?: boolean;
 }
 
 /**
  * Spawn the zig-quiche-h3 server and wait for it to be ready
  */
 export async function spawnServer(opts: SpawnServerOptions = {}): Promise<ServerInstance> {
+    const shouldUseLock = !opts.skipConcurrencyGuard && serverLock !== null;
+    const lockHandle = shouldUseLock ? await serverLock!.acquire() : null;
+    let released = !shouldUseLock;
+    const releaseLock = () => {
+        if (released) return;
+        released = true;
+        lockHandle?.release();
+    };
+
     verboseLog(`[E2E] spawnServer() started at ${new Date().toISOString()}`);
     const port =
         opts.port ?? (process.env.H3_TEST_PORT ? Number(process.env.H3_TEST_PORT) : randPort());
@@ -200,6 +280,8 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
             }
         } catch (error) {
             verboseLog(`Error during cleanup: ${error}`);
+        } finally {
+            releaseLock();
         }
     };
 
@@ -233,6 +315,8 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
 
         verboseLog(`Server ready on port ${port}`);
 
+        await Bun.sleep(50);
+
         return {
             proc,
             port,
@@ -244,9 +328,7 @@ export async function spawnServer(opts: SpawnServerOptions = {}): Promise<Server
         await cleanup();
 
         // Include captured logs in error message
-        const errorLogs = serverLogs.length > 0
-            ? `\n\nServer logs:\n${serverLogs.join("\n")}`
-            : "";
+        const errorLogs = serverLogs.length > 0 ? `\n\nServer logs:\n${serverLogs.join("\n")}` : "";
 
         throw new Error(
             `Server failed to start within ${timeoutMs}ms. Error: ${error}${errorLogs}`,
@@ -266,6 +348,7 @@ export async function withServer<T>(
         return await testFn(server);
     } finally {
         await server.cleanup();
+        // server.cleanup() already releases the lock; nothing additional needed here.
     }
 }
 
@@ -302,50 +385,16 @@ export async function ensureServerBuilt(
 ): Promise<void> {
     verboseLog(`[E2E] ensureServerBuilt(${binaryType}) started at ${new Date().toISOString()}`);
 
+    // Prebuild happens during global setup, but guard against missing artifacts
+    await prebuildAllArtifacts();
+
     verboseLog(`[E2E] Checking if server binary exists...`);
     if (await checkServerBinary(binaryType)) {
-        verboseLog(`[E2E] Server binary (${binaryType}) already exists, skipping build`);
-        return; // Already built
+        verboseLog(`[E2E] Server binary (${binaryType}) is available`);
+        return;
     }
 
-    verboseLog("Building server...");
-    verboseLog(`[E2E] Server not found, starting build at ${new Date().toISOString()}`);
-
-    const optimize = process.env.H3_OPTIMIZE ?? "ReleaseFast"; // ReleaseFast by default for perf tests
-    const libevInclude =
-        process.env.H3_LIBEV_INCLUDE ??
-        (process.platform === "darwin" ? "/opt/homebrew/opt/libev/include" : undefined);
-    const libevLib =
-        process.env.H3_LIBEV_LIB ??
-        (process.platform === "darwin" ? "/opt/homebrew/opt/libev/lib" : undefined);
-
-    const args = ["zig", "build", "-Dwith-libev=true", `-Doptimize=${optimize}`];
-    if (libevInclude) args.push(`-Dlibev-include=${libevInclude}`);
-    if (libevLib) args.push(`-Dlibev-lib=${libevLib}`);
-
-    // Always run from project root
-    const projectRoot = getProjectRoot();
-
-    verboseLog(`[E2E] Build command: ${args.join(" ")}`);
-    verboseLog(`[E2E] Build directory: ${projectRoot}`);
-
-    const proc = spawn({
-        cmd: args,
-        stdout: "pipe",
-        stderr: "pipe",
-        cwd: projectRoot,
-    });
-    verboseLog(`[E2E] Build process spawned, waiting for completion...`);
-
-    await waitForProcessExit(proc, 60000); // 60s for build process
-    verboseLog(`[E2E] Build process exited with code: ${proc.exitCode}`);
-
-    if (proc.exitCode !== 0) {
-        const stderr = await new Response(proc.stderr).text();
-        verboseLog(`[E2E] Build failed with stderr: ${stderr}`);
-        throw new Error(`Server build failed: ${stderr}`);
-    }
-
-    verboseLog("Server built successfully");
-    verboseLog(`[E2E] ensureServerBuilt() completed at ${new Date().toISOString()}`);
+    throw new Error(
+        `Server binary (${binaryType}) missing after prebuild. Run "zig build -Dwith-libev=true" and retry.`,
+    );
 }

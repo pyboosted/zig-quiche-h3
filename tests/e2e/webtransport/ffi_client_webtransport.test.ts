@@ -3,13 +3,15 @@ import { spawn } from "bun";
 import { join } from "path";
 import { getProjectRoot, waitForProcessExit } from "@helpers/testUtils";
 
+const projectRoot = getProjectRoot();
+
 async function runWorker(timeoutMs = 60_000) {
     const workerPath = join(
-        getProjectRoot(),
+        projectRoot,
         "tests",
         "e2e",
-        "streaming",
-        "ffi_client_streaming.worker.test.ts",
+        "webtransport",
+        "ffi_client_webtransport.worker.test.ts",
     );
 
     const proc = spawn({
@@ -42,7 +44,7 @@ async function runWorker(timeoutMs = 60_000) {
     }
 }
 
-describe("FFI client streaming (subprocess)", () => {
+describe("FFI WebTransport client (subprocess)", () => {
     it("runs the worker suite via separate bun process", async () => {
         await runWorker();
     }, 60_000);

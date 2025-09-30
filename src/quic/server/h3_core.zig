@@ -192,6 +192,7 @@ pub fn Impl(comptime S: type) type {
                             result.stream_id,
                         );
                         state.request.user_data = state.user_data;
+                        state.request.state_ptr = @ptrCast(state);
                         const clen = state.request.contentLength() orelse 0;
                         server_logging.debugf(self, "  headers parsed: content-length={}, path-decoded={s}\n", .{ clen, state.request.path_decoded });
 
@@ -257,7 +258,7 @@ pub fn Impl(comptime S: type) type {
                             if (mr != .NotFound) {
                                 // Initialize Response (same as below) and proceed
                                 state.response = http.Response.init(
-                                    self.allocator,
+                                    state.arena.allocator(),
                                     h3_conn,
                                     &conn.conn,
                                     result.stream_id,
@@ -321,6 +322,21 @@ pub fn Impl(comptime S: type) type {
                                         null, // on_datagram callback will be set by route handler if needed
                                     );
                                     errdefer wt_state.deinit(self.allocator);
+
+                                    try self.wt.session_handles.append(self.allocator, .{
+                                        .conn = conn,
+                                        .session_id = result.stream_id,
+                                        .state = wt_state,
+                                    });
+                                    errdefer {
+                                        var idx: usize = 0;
+                                        while (idx < self.wt.session_handles.items.len) : (idx += 1) {
+                                            if (self.wt.session_handles.items[idx].state == wt_state) {
+                                                _ = self.wt.session_handles.swapRemove(idx);
+                                                break;
+                                            }
+                                        }
+                                    }
 
                                     // Store session in server maps
                                     try self.wt.sessions.put(.{ .conn = conn, .session_id = result.stream_id }, wt_state);
@@ -427,7 +443,7 @@ pub fn Impl(comptime S: type) type {
                             }
 
                             if (state.response.isEnded() and state.response.partial_response == null) {
-                                cleanupStreamState(self, conn, result.stream_id, state);
+                                cleanupStreamState(self, conn, result.stream_id, state, false);
                             } else {
                                 server_logging.tracef(self, "  Keeping stream {} alive for ongoing response\n", .{result.stream_id});
                             }
@@ -436,7 +452,7 @@ pub fn Impl(comptime S: type) type {
                     .GoAway, .Reset => {
                         std.debug.print("  Stream {} closed ({})\n", .{ result.stream_id, result.event_type });
                         if (self.stream_states.fetchRemove(.{ .conn = conn, .stream_id = result.stream_id })) |entry| {
-                            cleanupStreamState(self, conn, result.stream_id, entry.value);
+                            cleanupStreamState(self, conn, result.stream_id, entry.value, false);
                         }
                     },
                     .PriorityUpdate => {},
@@ -596,10 +612,11 @@ pub fn Impl(comptime S: type) type {
                                     const flow_id = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
                                     _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id });
                                 }
+                                state.pending_h3_datagrams.clearRetainingCapacity();
+                                state.pending_h3_datagrams.clearRetainingCapacity();
                                 state.response.deinit();
                                 state.arena.deinit();
                                 self.allocator.destroy(state);
-                                _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
                             }
                         };
 
@@ -615,6 +632,7 @@ pub fn Impl(comptime S: type) type {
                                     const flow_id2 = state.response.h3_flow_id orelse h3_datagram.flowIdForStream(stream_id);
                                     _ = self.h3.dgram_flows.remove(.{ .conn = conn, .flow_id = flow_id2 });
                                 }
+                                state.pending_h3_datagrams.clearRetainingCapacity();
                                 state.response.deinit();
                                 state.arena.deinit();
                                 self.allocator.destroy(state);
@@ -653,8 +671,9 @@ pub fn Impl(comptime S: type) type {
             try h3_conn.sendResponse(quic_conn, stream_id, headers[0..], true);
         }
 
-        pub fn cleanupStreamState(self: *Self, conn: *connection.Connection, stream_id: u64, state: *RequestState) void {
+        pub fn cleanupStreamState(self: *Self, conn: *connection.Connection, stream_id: u64, state: *RequestState, force_cleanup: bool) void {
             _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
+            state.request.state_ptr = null;
 
             // MILESTONE-1: Handle WebTransport session cleanup
             if (state.is_webtransport and Self.WithWT) {
@@ -667,13 +686,14 @@ pub fn Impl(comptime S: type) type {
                 // The CONNECT stream stays open for the session lifetime
                 conn.releaseRequest();
                 if (state.is_download) conn.releaseDownload();
+                state.pending_h3_datagrams.clearRetainingCapacity();
                 state.response.deinit();
                 state.arena.deinit();
                 self.allocator.destroy(state);
                 return;
             }
 
-            if (state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
+            if (!force_cleanup and state.on_h3_dgram != null and state.retain_for_datagram and !state.datagram_detached) {
                 state.datagram_detached = true;
                 state.retain_for_datagram = false;
                 conn.releaseRequest();

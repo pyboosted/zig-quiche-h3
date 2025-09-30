@@ -26,6 +26,14 @@ pub const WebTransportSession = struct {
     /// Session state tracking
     state: State = .connecting,
 
+    /// Event callback for FFI or other consumers
+    event_callback: ?EventCallback = null,
+    event_ctx: ?*anyopaque = null,
+
+    /// Destruction callback invoked before resources are reclaimed
+    destroy_callback: ?DestroyCallback = null,
+    destroy_ctx: ?*anyopaque = null,
+
     /// Path used in the CONNECT request
     path: []const u8,
 
@@ -51,6 +59,9 @@ pub const WebTransportSession = struct {
     /// Last close capsule information, if any
     close_info: ?CloseInfo = null,
 
+    /// Tracks whether a close event has been emitted
+    close_event_emitted: bool = false,
+
     /// Active WebTransport streams initiated by the client
     streams: AutoHashMap(u64, *Stream),
     outgoing_uni_count: u64 = 0,
@@ -61,6 +72,22 @@ pub const WebTransportSession = struct {
         established, // 200 response received
         closed, // Session terminated
     };
+
+    pub const Event = union(enum) {
+        connected: u16,
+        connect_failed: u16,
+        closed: CloseEvent,
+        datagram: []const u8,
+    };
+
+    pub const CloseEvent = struct {
+        error_code: i32,
+        reason: []const u8,
+        remote: bool,
+    };
+
+    pub const EventCallback = *const fn (session: *WebTransportSession, event: Event, ctx: ?*anyopaque) void;
+    pub const DestroyCallback = *const fn (session: *WebTransportSession, ctx: ?*anyopaque) void;
 
     pub const AcceptInfo = struct {
         legacy_accept: bool = false,
@@ -81,6 +108,16 @@ pub const WebTransportSession = struct {
 
     pub fn openBidiStream(self: *WebTransportSession) ClientError!*Stream {
         return self.openStream(h3.WebTransportSession.StreamDir.bidi);
+    }
+
+    pub fn setEventCallback(self: *WebTransportSession, cb: ?EventCallback, ctx: ?*anyopaque) void {
+        self.event_callback = cb;
+        self.event_ctx = ctx;
+    }
+
+    pub fn setDestroyCallback(self: *WebTransportSession, cb: ?DestroyCallback, ctx: ?*anyopaque) void {
+        self.destroy_callback = cb;
+        self.destroy_ctx = ctx;
     }
 
     fn openStream(self: *WebTransportSession, dir: h3.WebTransportSession.StreamDir) ClientError!*Stream {
@@ -259,6 +296,8 @@ pub const WebTransportSession = struct {
         errdefer self.client.allocator.free(copy);
         try self.datagram_queue.append(self.client.allocator, copy);
         self.datagrams_received += 1;
+
+        self.emitEvent(.{ .datagram = copy });
     }
 
     fn enqueuePendingDatagram(self: *WebTransportSession, buf: []u8) !void {
@@ -319,10 +358,12 @@ pub const WebTransportSession = struct {
         switch (status) {
             200 => {
                 self.state = .established;
+                self.emitEvent(.{ .connected = status });
                 // Session successfully established
             },
             else => {
                 self.state = .closed;
+                self.emitEvent(.{ .connect_failed = status });
                 // Session rejected by server
             },
         }
@@ -353,6 +394,11 @@ pub const WebTransportSession = struct {
 
         self.state = .closed;
         self.client.markWebTransportSessionClosed(self.session_id);
+        self.emitCloseEvent(.{
+            .error_code = @as(i32, @intCast(code)),
+            .reason = reason,
+            .remote = false,
+        });
         self.finalizeClose();
     }
 
@@ -458,6 +504,11 @@ pub const WebTransportSession = struct {
                 };
                 self.state = .closed;
                 self.client.markWebTransportSessionClosed(self.session_id);
+                self.emitCloseEvent(.{
+                    .error_code = @as(i32, @intCast(info.application_error_code)),
+                    .reason = reason_copy,
+                    .remote = true,
+                });
             },
             .drain_session => {
                 self.accept_info.drain_requested = true;
@@ -480,6 +531,18 @@ pub const WebTransportSession = struct {
         const session_id = self.session_id;
         const client_ref = self.client;
 
+        const destroy_cb = self.destroy_callback;
+        const destroy_ctx = self.destroy_ctx;
+        self.destroy_callback = null;
+        self.destroy_ctx = null;
+        self.user_data = null;
+        self.event_callback = null;
+        self.event_ctx = null;
+
+        if (destroy_cb) |cb| {
+            cb(self, destroy_ctx);
+        }
+
         if (client_ref.requests.get(session_id)) |state| {
             _ = client_ref.requests.remove(session_id);
             state.destroy();
@@ -487,23 +550,20 @@ pub const WebTransportSession = struct {
 
         if (client_ref.wt_sessions.contains(session_id)) {
             client_ref.cleanupWebTransportSession(session_id);
-        } else {
-            for (self.datagram_queue.items) |dgram| {
-                client_ref.allocator.free(dgram);
-            }
-            self.datagram_queue.deinit(client_ref.allocator);
-            for (self.pending_datagrams.items) |buf| {
-                client_ref.allocator.free(buf);
-            }
-            self.pending_datagrams.deinit(client_ref.allocator);
-            self.capsule_buffer.deinit(client_ref.allocator);
-            if (self.close_info) |info| {
-                client_ref.allocator.free(@constCast(info.reason));
-                self.close_info = null;
-            }
-            client_ref.allocator.free(self.path);
-            client_ref.allocator.destroy(self);
+            return;
         }
+    }
+
+    fn emitEvent(self: *WebTransportSession, event: Event) void {
+        if (self.event_callback) |cb| {
+            cb(self, event, self.event_ctx);
+        }
+    }
+
+    pub fn emitCloseEvent(self: *WebTransportSession, info: CloseEvent) void {
+        if (self.close_event_emitted) return;
+        self.close_event_emitted = true;
+        self.emitEvent(.{ .closed = info });
     }
 };
 

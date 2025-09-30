@@ -57,6 +57,8 @@ pub const RequestState = struct {
     retain_for_datagram: bool = false,
     // Flag set once the stream has been detached but DATAGRAM flow still active
     datagram_detached: bool = false,
+    pending_h3_datagrams: std.ArrayListUnmanaged([]const u8) = .{},
+    h3_datagram_retry_backoff: u8 = 0,
 
     // WebTransport session flag
     is_webtransport: bool = false,
@@ -348,13 +350,16 @@ pub const QuicServer = struct {
         }
         wt_state.session.user_data = null;
 
-        for (wt_state.request_headers) |hdr| {
-            self.allocator.free(hdr.name[0..hdr.name_len]);
-            self.allocator.free(hdr.value[0..hdr.value_len]);
-        }
-        self.allocator.free(wt_state.request_headers);
-
         wt_state.deinit(self.allocator);
+
+        var idx: usize = 0;
+        while (idx < self.wt.session_handles.items.len) : (idx += 1) {
+            const handle = self.wt.session_handles.items[idx];
+            if (handle.state == wt_state) {
+                _ = self.wt.session_handles.swapRemove(idx);
+                break;
+            }
+        }
         self.wt.sessions_closed += 1;
         server_logging.infof(self, "WebTransport session closed: id={d}\n", .{session_id});
     }
@@ -446,6 +451,8 @@ pub const QuicServer = struct {
     pub fn deinit(self: *QuicServer) void {
         self.stop();
 
+        self.shutdownActiveConnections();
+
         if (self.timeout_timer) |handle| {
             self.event_loop.destroyTimer(handle);
             self.timeout_timer = null;
@@ -469,21 +476,34 @@ pub const QuicServer = struct {
         // Clean up stream states
         var stream_iter = self.stream_states.iterator();
         while (stream_iter.next()) |entry| {
-            entry.value_ptr.*.response.deinit();
-            entry.value_ptr.*.arena.deinit();
-            self.allocator.destroy(entry.value_ptr.*);
+            const state = entry.value_ptr.*;
+            state.request.state_ptr = null;
+            state.pending_h3_datagrams.clearRetainingCapacity();
+            state.response.deinit();
+            state.arena.deinit();
+            self.allocator.destroy(state);
         }
         self.stream_states.deinit();
 
         // Clean up H3 DATAGRAM flows (no values to free - they point to RequestState already freed above)
         self.h3.dgram_flows.deinit();
 
-        // Clean up WebTransport sessions
-        var wt_it = self.wt.sessions.iterator();
-        while (wt_it.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
+        // Clean up WebTransport sessions via the shared teardown helper so
+        // header clones, session wrappers, and metrics counters stay coherent.
+        while (self.wt.sessions.count() > 0) {
+            var wt_it = self.wt.sessions.iterator();
+            if (wt_it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                self.destroyWtSessionState(key.conn, key.session_id, entry.value_ptr.*);
+            } else break;
         }
         self.wt.sessions.deinit();
+
+        while (self.wt.session_handles.items.len > 0) {
+            const handle = self.wt.session_handles.items[self.wt.session_handles.items.len - 1];
+            self.destroyWtSessionState(handle.conn, handle.session_id, handle.state);
+        }
+        self.wt.session_handles.deinit(self.allocator);
 
         // Clean up WebTransport datagram map (values already freed above)
         self.wt.dgram_map.deinit();
@@ -1190,7 +1210,7 @@ pub const QuicServer = struct {
         try std.testing.expect(server.h3.dgram_flows.get(.{ .conn = conn_ptr, .flow_id = flow_id }) != null);
 
         // Act: cleanup
-        H3.cleanupStreamState(&server, conn_ptr, test_stream_id, state);
+        H3.cleanupStreamState(&server, conn_ptr, test_stream_id, state, false);
 
         // Verify: both entries are removed
         try std.testing.expect(server.stream_states.get(.{ .conn = conn_ptr, .stream_id = test_stream_id }) == null);
@@ -1254,6 +1274,7 @@ pub const QuicServer = struct {
                 };
             }
 
+            self.flushPendingH3Datagrams(conn);
             self.drainEgress(conn) catch |err| {
                 std.debug.print("requestFlush: drain egress error {}\n", .{err});
             };
@@ -1268,6 +1289,42 @@ pub const QuicServer = struct {
         self.flushTimeoutReschedule() catch |err| {
             std.debug.print("requestFlush: timeout reschedule error {}\n", .{err});
         };
+    }
+
+    fn flushPendingH3Datagrams(self: *QuicServer, conn: *connection.Connection) void {
+        var iter = self.stream_states.iterator();
+        while (iter.next()) |entry| {
+            if (entry.key_ptr.conn != conn) continue;
+            const state = entry.value_ptr.*;
+            if (state.pending_h3_datagrams.items.len == 0) continue;
+
+            while (state.pending_h3_datagrams.items.len > 0) {
+                const last_index = state.pending_h3_datagrams.items.len - 1;
+                const payload = state.pending_h3_datagrams.items[last_index];
+                const result = state.response.sendH3Datagram(payload) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        state.h3_datagram_retry_backoff = @min(state.h3_datagram_retry_backoff + 1, 8);
+                        break;
+                    },
+                    else => {
+                        state.pending_h3_datagrams.items = state.pending_h3_datagrams.items[0..last_index];
+                        continue;
+                    },
+                };
+                _ = result;
+                state.h3_datagram_retry_backoff = 0;
+                state.pending_h3_datagrams.items = state.pending_h3_datagrams.items[0..last_index];
+                self.incrementH3DatagramSent();
+            }
+        }
+    }
+
+    pub fn queueH3Datagram(self: *QuicServer, state: *RequestState, payload: []const u8) !void {
+        _ = self;
+        const allocator = state.arena.allocator();
+        const copy = try allocator.dupe(u8, payload);
+        try state.pending_h3_datagrams.append(allocator, copy);
+        state.retain_for_datagram = true;
     }
 
     fn closeConnection(self: *QuicServer, conn: *connection.Connection) void {
@@ -1288,7 +1345,7 @@ pub const QuicServer = struct {
         }
         for (to_remove.items) |k| {
             if (self.stream_states.fetchRemove(k)) |kv| {
-                H3.cleanupStreamState(self, conn, k.stream_id, kv.value);
+                H3.cleanupStreamState(self, conn, k.stream_id, kv.value, true);
             }
         }
 
@@ -1306,6 +1363,8 @@ pub const QuicServer = struct {
             for (flow_keys_to_remove.items) |fk| {
                 if (self.h3.dgram_flows.fetchRemove(fk)) |kv| {
                     const retained = kv.value;
+                    retained.request.state_ptr = null;
+                    retained.pending_h3_datagrams.clearRetainingCapacity();
                     retained.response.deinit();
                     retained.arena.deinit();
                     self.allocator.destroy(retained);
@@ -1374,12 +1433,76 @@ pub const QuicServer = struct {
         }
     }
 
+    fn shutdownActiveConnections(self: *QuicServer) void {
+        const conn_count = self.connections.count();
+        while (self.wt.session_handles.items.len > 0) {
+            const handle = self.wt.session_handles.items[self.wt.session_handles.items.len - 1];
+            self.destroyWtSessionState(handle.conn, handle.session_id, handle.state);
+        }
+
+        var keys = std.ArrayListUnmanaged(connection.ConnectionKey){};
+        defer keys.deinit(self.allocator);
+        if (conn_count > 0) keys.ensureTotalCapacity(self.allocator, conn_count) catch {};
+
+        var it = self.connections.map.iterator();
+        while (it.next()) |entry| {
+            keys.append(self.allocator, entry.key_ptr.*) catch {};
+        }
+
+        for (keys.items) |key| {
+            if (self.connections.map.get(key)) |conn_ptr| {
+                self.closeConnection(conn_ptr);
+            }
+        }
+
+        var leftover_keys = std.ArrayListUnmanaged(conn_state.StreamKey){};
+        defer leftover_keys.deinit(self.allocator);
+        var state_iter = self.stream_states.iterator();
+        while (state_iter.next()) |entry| {
+            leftover_keys.append(self.allocator, entry.key_ptr.*) catch {};
+        }
+        for (leftover_keys.items) |sk| {
+            if (self.stream_states.fetchRemove(sk)) |kv| {
+                H3.cleanupStreamState(self, sk.conn, sk.stream_id, kv.value, true);
+            }
+        }
+
+        var leftover_flows = std.ArrayListUnmanaged(conn_state.FlowKey){};
+        defer leftover_flows.deinit(self.allocator);
+        var flow_iter = self.h3.dgram_flows.iterator();
+        while (flow_iter.next()) |entry| {
+            leftover_flows.append(self.allocator, entry.key_ptr.*) catch {};
+        }
+        for (leftover_flows.items) |fk| {
+            if (self.h3.dgram_flows.fetchRemove(fk)) |kv| {
+                const retained = kv.value;
+                retained.request.state_ptr = null;
+                retained.pending_h3_datagrams.clearRetainingCapacity();
+                retained.response.deinit();
+                retained.arena.deinit();
+                self.allocator.destroy(retained);
+            }
+        }
+
+        while (self.wt.sessions.count() > 0) {
+            var sess_iter = self.wt.sessions.iterator();
+            if (sess_iter.next()) |entry| {
+                const key = entry.key_ptr.*;
+                self.destroyWtSessionState(key.conn, key.session_id, entry.value_ptr.*);
+            } else break;
+        }
+
+        // session_handles list is cleared at the start of this function
+    }
+
     // expireIdleWtSessions lives in the WT facade
 
     fn onSignal(signum: c_int, user_data: *anyopaque) void {
         const self: *QuicServer = @ptrCast(@alignCast(user_data));
         const sig_name = if (signum == posix.SIG.INT) "SIGINT" else "SIGTERM";
         std.debug.print("\n{s} received, shutting down...\n", .{sig_name});
+
+        self.shutdownActiveConnections();
 
         // Print final stats
         std.debug.print("Stats: connections={d}, packets_in={d}, packets_out={d}\n", .{

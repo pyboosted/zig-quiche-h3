@@ -13,10 +13,12 @@ pub const DatagramEvent = M.DatagramEvent;
 pub const ResponseCallback = M.ResponseCallback;
 pub const RequestBodyProvider = M.RequestBodyProvider;
 pub const BodyChunkResult = M.BodyChunkResult;
+pub const errors = M.errors;
 
 // Export the helpers module for convenience
 pub const helpers = @import("client/helpers.zig");
 pub const webtransport = @import("client/webtransport.zig");
+pub const WebTransportSession = webtransport.WebTransportSession;
 
 // Export the connection pool
 pub const ConnectionPool = @import("client/pool.zig").ConnectionPool;

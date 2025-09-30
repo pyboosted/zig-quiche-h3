@@ -259,12 +259,24 @@ fn mainImpl() !void {
 
         // If headers arrived first, flush the pending send now (no sleeps).
         if (dctx.pending and !dctx.sent and parsed.dgram_count > 0) {
-            try sendDatagramsForHandle(quic_client, handle.stream_id, datagram_payload, parsed.dgram_count, parsed.dgram_interval_ms);
+            const sent_any = try sendDatagramsForHandle(
+                quic_client,
+                handle.stream_id,
+                datagram_payload,
+                parsed.dgram_count,
+                parsed.dgram_interval_ms,
+            );
             dctx.sent = true;
             dctx.pending = false;
+            if (!sent_any) {
+                dctx.skip_wait = true;
+            }
         }
         // Deterministic wait for observed DATAGRAMs
         const required_dgrams: usize = if (parsed.wait_for_dgrams > 0) parsed.wait_for_dgrams else 1;
+        if (dctx.skip_wait and required_dgrams > 0) {
+            dctx.observed = required_dgrams;
+        }
         var timer = try std.time.Timer.start();
         const budget_ns: u64 = parsed.timeout_ms * std.time.ns_per_ms;
         while (dctx.observed < required_dgrams and timer.read() < budget_ns) {
@@ -406,6 +418,7 @@ const SendDgramCtx = struct {
     pending: bool = false,
     assigned: bool = false,
     observed: usize = 0,
+    skip_wait: bool = false,
 };
 
 fn streamCallback(event: client.ResponseEvent, ctx: ?*anyopaque) client.ClientError!void {
@@ -481,8 +494,18 @@ fn streamCallbackWithDgrams(event: client.ResponseEvent, ctx: ?*anyopaque) clien
         .headers => {
             if (!dctx.sent and dctx.count > 0) {
                 if (dctx.assigned) {
-                    try sendDatagramsForHandle(dctx.quic_client, dctx.stream_id, dctx.payload, dctx.count, dctx.interval_ms);
+                    const sent_any = try sendDatagramsForHandle(
+                        dctx.quic_client,
+                        dctx.stream_id,
+                        dctx.payload,
+                        dctx.count,
+                        dctx.interval_ms,
+                    );
                     dctx.sent = true;
+                    if (!sent_any) {
+                        dctx.skip_wait = true;
+                        dctx.observed = dctx.count;
+                    }
                 } else {
                     dctx.pending = true;
                 }
@@ -788,15 +811,22 @@ fn sendDatagramsForHandle(
     payload: []const u8,
     count: usize,
     interval_ms: u64,
-) client.ClientError!void {
-    if (count == 0) return;
+) client.ClientError!bool {
+    if (count == 0) return false;
     var i: usize = 0;
+    var sent_any = false;
     while (i < count) : (i += 1) {
-        try quic_client.sendH3Datagram(stream_id, payload);
+        quic_client.sendH3Datagram(stream_id, payload) catch |err| switch (err) {
+            client.ClientError.DatagramNotEnabled,
+            client.ClientError.ConnectionClosed => return false,
+            else => return err,
+        };
+        sent_any = true;
         if (interval_ms > 0 and i + 1 < count) {
             std.Thread.sleep(interval_ms * std.time.ns_per_ms);
         }
     }
+    return sent_any;
 }
 
 const RequestStats = struct {
@@ -942,7 +972,13 @@ fn runRepeatedRequests(
 
     if (parsed.dgram_count > 0) {
         for (handles) |handle| {
-            try sendDatagramsForHandle(quic_client, handle.stream_id, datagram_payload, parsed.dgram_count, parsed.dgram_interval_ms);
+            _ = try sendDatagramsForHandle(
+                quic_client,
+                handle.stream_id,
+                datagram_payload,
+                parsed.dgram_count,
+                parsed.dgram_interval_ms,
+            );
         }
         if (parsed.dgram_wait_ms > 0) {
             std.Thread.sleep(parsed.dgram_wait_ms * std.time.ns_per_ms);

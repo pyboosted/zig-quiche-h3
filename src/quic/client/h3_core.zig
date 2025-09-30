@@ -198,7 +198,18 @@ pub fn Impl(comptime ClientType: type) type {
             }
 
             if (state.err) |fetch_err| {
-                return fetch_err;
+                if (fetch_err == ClientError.ConnectionClosed and state.status != null) {
+                    if (self.config.enable_debug_logging) {
+                        std.debug.print(
+                            "[finalizeFetch] ignoring ConnectionClosed; status={d} bytes={d}\n",
+                            .{ state.status.?, state.bytes_received },
+                        );
+                    }
+                    state.err = null;
+                    state.finished = true;
+                } else {
+                    return fetch_err;
+                }
             }
 
             if (!state.finished or state.status == null) {

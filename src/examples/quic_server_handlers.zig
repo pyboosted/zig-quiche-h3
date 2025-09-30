@@ -3,6 +3,7 @@ const std = @import("std");
 const http = @import("http");
 const event_loop = @import("event_loop");
 const QuicServer = @import("server").QuicServer;
+const RequestState = QuicServer.RequestStateType;
 
 // Global configuration for handlers
 pub var g_files_dir: []const u8 = ".";
@@ -132,7 +133,6 @@ pub fn uploadEchoOnComplete(_: *http.Request, res: *http.Response) http.Streamin
 
 pub fn h3dgramEchoHandler(_: *http.Request, res: *http.Response) http.HandlerError!void {
     res.status(200) catch return error.InvalidState;
-    res.header("content-type", "text/plain") catch return error.InternalServerError;
     res.writeAll(
         \\H3 DATAGRAM Echo Endpoint
         \\=========================
@@ -151,10 +151,27 @@ pub fn h3dgramEchoHandler(_: *http.Request, res: *http.Response) http.HandlerErr
     };
 }
 
-pub fn h3dgramEchoCallback(_: *http.Request, res: *http.Response, payload: []const u8) http.DatagramError!void {
-    res.sendH3Datagram(payload) catch {
-        return;
+pub fn h3dgramEchoCallback(req: *http.Request, res: *http.Response, payload: []const u8) http.DatagramError!void {
+    if (payload.len == 0) return;
+
+    res.sendH3Datagram(payload) catch |err| {
+        if (err == error.WouldBlock) {
+            if (g_quic_server) |server| {
+                if (req.state_ptr) |state_any| {
+                    const state = @as(*RequestState, @ptrCast(@alignCast(state_any)));
+                    server.queueH3Datagram(state, payload) catch return;
+                    server.requestFlush();
+                }
+            }
+            return;
+        }
+        if (err == error.DatagramTooLarge or err == error.H3DatagramNotEnabled) return;
+        return error.ConnectionClosed;
     };
+
+    if (g_quic_server) |server| {
+        server.requestFlush();
+    }
 }
 
 pub fn wtConnectInfoHandler(_: *http.Request, res: *http.Response) http.HandlerError!void {

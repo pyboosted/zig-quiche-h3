@@ -7,7 +7,7 @@ Deliver first-class Bun bindings for the zig-quiche-h3 server and client so Bun 
 - **In scope**: shared library exports for server + client, Bun-side TypeScript wrappers, lifecycle management, datagram / WebTransport bridging, metrics hooks, and Bun-driven end-to-end tests.
 - **Out of scope**: shipping Bun npm packages, Node-API parity, non-HTTP/3 transports.
 
-## Current State Snapshot (2025-09-28)
+## Current State Snapshot (2025-09-29)
 - Shared library target `libzigquicheh3` already exposes `zig_h3_version()` for smoke tests (see `docs/plan.md`, Pre-M1).
 - Server/client implementations are modularized (`src/quic/server/*`, `src/quic/client/*`), and the HTTP/3 client CLI powers Bun E2E tests.
 - No production-ready Bun bindings exist; prior experiments only returned version strings.
@@ -54,24 +54,33 @@ Deliver first-class Bun bindings for the zig-quiche-h3 server and client so Bun 
 - [x] Add streaming/event callbacks (collect_body = 0) with per-event hooks.
 - [x] Expose cancellation controls and request timeout overrides via the FFI surface.
 - [x] Add Bun streaming tests covering client-side cancellation and request timeout overrides.
-- [ ] Provide WebTransport session APIs mirroring the server façade.
+- [x] Provide WebTransport session APIs mirroring the server façade.
 - [ ] Deliver connection pooling helpers or document reuse strategy.
 
-### M3 — Bun TypeScript Bindings
-- [ ] Create `src/bun/server.ts` and `src/bun/client.ts` wrappers encapsulating the FFI map, pointer management, and error translation.
-- [ ] Implement automatic conversion between Bun `Headers`, `Request`, `Response` objects and native header lists.
-- [ ] Build utilities for converting Bun `ArrayBuffer`/`TypedArray` payloads to native memory buffers and zero-copy read views.
-- [ ] Establish structured logging + metrics callbacks with opt-in `JSCallback` wiring.
+_Notes_: Current Bun-side coverage exercises synchronous + streaming fetches, cancel/timeout paths, QUIC/H3 DATAGRAM echo, and WebTransport session open/close through the worker suites (`tests/e2e/streaming/ffi_client_streaming.worker.test.ts`, `tests/e2e/webtransport/ffi_client_webtransport.worker.test.ts`). Pooling helpers and richer error-path validation remain outstanding.
+
+- ### M3 — Bun TypeScript Bindings
+- [ ] Publish `src/bun/server.ts` with a `createH3Server()` helper that mirrors `Bun.serve` options (`fetch`, `routes`, `static`, `error` handlers) so Bun users can adopt the FFI server without relearning the API.citeturn0search1turn0search2
+- [ ] Ensure server handlers accept/return Bun-native `Request`/`Response` objects and support streaming bodies via `ReadableStream`, async iterators, and `Bun.file(...)` just as `Bun.serve` does.citeturn0search0turn0search5turn0search7
+- [ ] Offer lifecycle methods (`reload`, `stop(force?)`, stats) consistent with Bun’s server interface to ease migration.citeturn0search1
+- [ ] Publish `src/bun/client.ts` exposing an `h3Fetch()` that mirrors `fetch` semantics (headers, streaming bodies, abort signals, `Response` objects) while routing through the FFI client.citeturn0search2
+- [ ] Provide shared utilities for translating Bun `Headers`, `Request`, `Response`, `ReadableStream`, and `ArrayBuffer` payloads into the ABI without unnecessary copies, documenting when data is copied vs. borrowed.citeturn0search0turn0search2
+- [ ] Layer structured logging/metrics hooks that forward to user-provided `JSCallback` instances and integrate with Bun’s diagnostics conventions.
+
+_Notes_: Existing `tests/e2e/helpers/ffiClient.ts` offers low-level bindings for the test harness but does not yet expose Bun-style ergonomics; M3 formalizes the public surface on top of those primitives.
 
 ### M4 — End-to-End & Stress Tests
 - [ ] Add Bun test suites that:
   - [ ] Launch the Zig server through FFI, register basic + streaming + WebTransport routes.
   - [ ] Drive requests via the FFI client and verify HTTP status, headers, body integrity, and range handling.
   - [ ] Exchange QUIC and H3 DATAGRAMs, validating drop counters and flow IDs.
-  - [ ] Spin up concurrent clients to exercise connection pooling and backpressure.
+  - [ ] Spin up concurrent clients to exercise connection pooling and backpressure once pooling support lands.
   - [ ] Validate clean shutdown (`zig_h3_stop`) and resource release (calling `.close()` on callbacks).citeturn0search2
+- [ ] Extend FFI coverage with negative-path cases (callback throws, oversized datagrams, disabled H3 DATAGRAM/WT flags) and ensure errors propagate predictably.
 - [ ] Gate stress variants behind `H3_STRESS=1` (reuse existing convention) to exercise 100+ datagram bursts and concurrent streams.
 - [ ] Integrate tests into CI, ensuring shared library paths resolve on runners.
+
+_Current coverage_: Existing E2E suites run FFI client scenarios via subprocess workers, but still rely on the CLI server. No Bun test yet boots the server through FFI or covers WebTransport stream send/receive paths. Add new Bun suites once the M3 bindings land to validate the new surface as part of this milestone.
 
 ### M5 — Observability & Performance
 - [ ] Expose qlog controls and stats getters (`zig_h3_stats_snapshot`) for Bun consumption.

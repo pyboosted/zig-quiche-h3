@@ -16,6 +16,8 @@ const wt_capsules = http.webtransport_capsules;
 const client_state = @import("state.zig");
 const client_errors = @import("errors.zig");
 
+pub const errors = client_errors;
+
 const AutoHashMap = std.AutoHashMap;
 
 const h3 = @import("h3");
@@ -781,6 +783,10 @@ pub const QuicClient = struct {
 
     pub fn failFetch(self: *QuicClient, stream_id: u64, err: ClientError) void {
         if (self.requests.get(stream_id)) |state| {
+            if (state.finished and state.err == null) {
+                // Already completed successfully; ignore late failures (e.g. connection close).
+                return;
+            }
             if (state.err == null) state.err = err;
             state.finished = true;
             _ = self.emitEvent(state, ResponseEvent.finished);
@@ -795,6 +801,11 @@ pub const QuicClient = struct {
                     session.state = .closed;
                     // Note: We keep the session in wt_sessions so that when the user
                     // calls close() on their reference, it will properly free memory
+                    session.emitCloseEvent(.{
+                        .error_code = client_errors.toWireError(err),
+                        .reason = &[_]u8{},
+                        .remote = false,
+                    });
                 }
 
                 // Remove and destroy the FetchState for WebTransport

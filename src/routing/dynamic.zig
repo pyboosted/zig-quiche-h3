@@ -13,6 +13,7 @@ pub const RouteDef = struct {
     on_body_complete: ?http.handler.OnBodyComplete = null,
     on_wt_session: ?http.handler.OnWebTransportSession = null,
     on_wt_datagram: ?http.handler.OnWebTransportDatagram = null,
+    user_data: ?*anyopaque = null,
 };
 
 pub const Builder = struct {
@@ -49,6 +50,7 @@ pub const Builder = struct {
             .on_body_complete = def.on_body_complete,
             .on_wt_session = def.on_wt_session,
             .on_wt_datagram = def.on_wt_datagram,
+            .user_data = def.user_data,
         };
         if (core.isStaticPath(pat_copy)) {
             try self.lits.append(self.allocator, .{ .path = pat_copy, .method = def.method, .route = fr });
