@@ -59,7 +59,38 @@ Deliver first-class Bun bindings for the zig-quiche-h3 server and client so Bun 
 
 _Notes_: Current Bun-side coverage exercises synchronous + streaming fetches, cancel/timeout paths, QUIC/H3 DATAGRAM echo, and WebTransport session open/close through the worker suites (`tests/e2e/streaming/ffi_client_streaming.worker.test.ts`, `tests/e2e/webtransport/ffi_client_webtransport.worker.test.ts`). Pooling helpers and richer error-path validation remain outstanding.
 
-- ### M3 — Bun TypeScript Bindings
+### M3 — Bun TypeScript Bindings
+
+#### Phase 0: Route-First Architecture (Completed 2025-09-30)
+- [x] Refactor `src/bun/server.ts` to route-first architecture with `RouteDefinition[]` array
+- [x] Remove pattern/method duplication; routes defined once, registered once
+- [x] Preserve backward compatibility with existing `fetch` option for catch-all fallback
+
+#### Phase 1: Streaming Request Body Support (Completed 2025-09-30)
+- [x] Add `mode: "streaming" | "buffered"` discriminator to `RouteDefinition`
+- [x] Implement composite key pattern (`${connIdHex}:${streamId}`) to prevent stream ID collisions across connections
+- [x] Wire `zig_h3_body_chunk_cb` and `zig_h3_body_complete_cb` through FFI → TypeScript → `ReadableStream`
+- [x] Create `#streamingRequests` map with `ReadableStreamDefaultController` storage
+- [x] **Critical Fix 1**: Populate `conn_id` in `Request` struct (src/quic/server/h3_core.zig:196)
+- [x] **Critical Fix 2**: Wire `on_body_complete` callback to close ReadableStream, breaking deadlock where handler waits for body → body waits for controller.close()
+- [x] **Critical Fix 3**: Invoke cleanup hooks on stream/connection close
+  - Added `OnStreamClose` and `OnConnectionClose` callback types to `QuicServer` (src/quic/server/mod.zig:76-77)
+  - Wired adapters in FFI layer (src/ffi/server.zig:459-478) to bridge Zig → C FFI signatures
+  - Updated `StreamCloseCallback` FFI type to include `conn_id` for composite key discrimination (src/ffi/server.zig:62)
+  - Fixed TypeScript `streamCloseCallback` to use composite keys instead of bare stream IDs (src/bun/server.ts:307-327)
+  - Narrowed error sets: `bodyChunkHandler` and `bodyCompleteHandler` return `errors.StreamingError!void` instead of `anyerror!void` (src/ffi/server.zig:353,365)
+
+#### Phase 1b–6: Remaining Work
+- [ ] Phase 1b: Fix buffered mode memory safety with request snapshot
+- [ ] Phase 2: Add stats API (requests_total, server_start_time_ms)
+- [ ] Phase 3A: Implement QUIC datagram handler with cleanup hooks
+- [ ] Phase 3B: Implement H3 datagram per-route handlers
+- [ ] Phase 3C: Implement WebTransport session API
+- [ ] Phase 4: Add lifecycle extensions (stop with force flag)
+- [ ] Phase 5: Implement 4-tier error handling strategy and JSDoc
+- [ ] Phase 6: Add comprehensive tests for all protocol layers
+
+#### Original M3 Goals (In Progress)
 - [ ] Publish `src/bun/server.ts` with a `createH3Server()` helper that mirrors `Bun.serve` options (`fetch`, `routes`, `static`, `error` handlers) so Bun users can adopt the FFI server without relearning the API.citeturn0search1turn0search2
 - [ ] Ensure server handlers accept/return Bun-native `Request`/`Response` objects and support streaming bodies via `ReadableStream`, async iterators, and `Bun.file(...)` just as `Bun.serve` does.citeturn0search0turn0search5turn0search7
 - [ ] Offer lifecycle methods (`reload`, `stop(force?)`, stats) consistent with Bun’s server interface to ease migration.citeturn0search1
@@ -67,7 +98,13 @@ _Notes_: Current Bun-side coverage exercises synchronous + streaming fetches, ca
 - [ ] Provide shared utilities for translating Bun `Headers`, `Request`, `Response`, `ReadableStream`, and `ArrayBuffer` payloads into the ABI without unnecessary copies, documenting when data is copied vs. borrowed.citeturn0search0turn0search2
 - [ ] Layer structured logging/metrics hooks that forward to user-provided `JSCallback` instances and integrate with Bun’s diagnostics conventions.
 
-_Notes_: Existing `tests/e2e/helpers/ffiClient.ts` offers low-level bindings for the test harness but does not yet expose Bun-style ergonomics; M3 formalizes the public surface on top of those primitives.
+_Notes_: Phase 0–1 deliver production-ready streaming support with proper connection discrimination, deadlock prevention, and resource cleanup. The server now supports both buffered and streaming modes with composite keys preventing cross-connection collisions. Critical fixes ensure:
+1. Connection IDs are populated in Request structs for accurate composite keys
+2. ReadableStream closes when Zig signals body complete, preventing deadlock
+3. Cleanup hooks fire with connection-discriminated keys, preventing cross-connection resource leaks
+4. Error sets are narrowed to StreamingError for type-safe propagation through FFI/routing boundary
+
+Remaining M3 work focuses on protocol-layer handlers (datagrams, WebTransport), lifecycle extensions, and comprehensive documentation. Existing `tests/e2e/helpers/ffiClient.ts` offers low-level bindings; the final M3 deliverable will formalize Bun-style ergonomics on top of these primitives.
 
 ### M4 — End-to-End & Stress Tests
 - [ ] Add Bun test suites that:

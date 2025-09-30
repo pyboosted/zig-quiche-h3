@@ -18,6 +18,7 @@ pub const Request = struct {
     params: std.StringHashMapUnmanaged([]const u8), // Route parameters
     query: std.StringHashMapUnmanaged([]const u8), // Query parameters
     stream_id: u64,
+    conn_id: ?[]const u8 = null, // QUIC connection ID (optional, for FFI layer)
     arena: *std.heap.ArenaAllocator,
     body_buffer: std.ArrayList(u8), // Bounded body buffer for M4
     body_complete: bool,

@@ -100,8 +100,18 @@ This fundamentally changes the server initialization to align with Zig's routing
    - Existing test (tests/e2e/ffi/bun_server_basic.test.ts) uses top-level fetch → still works
    - New tests can use `routes: [...]` for per-route control
 
-### Phase 1: Add Streaming Request Body Support (90-120 min)
+### Phase 1: Add Streaming Request Body Support (90-120 min) — ✅ COMPLETE (with Critical Fixes)
 Now that routes can specify `mode: "streaming"`, implement the infrastructure.
+
+**Status**: Implemented and tested with three critical fixes applied (2025-09-30):
+1. **Fix 1**: Populated `conn_id` in Request struct (src/quic/server/h3_core.zig:196)
+2. **Fix 2**: Wired `on_body_complete` callback to close ReadableStream, preventing deadlock
+3. **Fix 3**: Invoked cleanup hooks with connection-discriminated composite keys
+   - Added `OnStreamClose` and `OnConnectionClose` callback types (src/quic/server/mod.zig:76-77)
+   - Created FFI adapters bridging Zig → C calling conventions (src/ffi/server.zig:459-478)
+   - Updated `StreamCloseCallback` to include `conn_id` for composite key discrimination
+   - Fixed TypeScript callbacks to use `${connIdHex}:${streamId}` keys
+   - Narrowed error sets to `StreamingError!void` for type-safe propagation
 
 1. **Zig FFI** (src/ffi/server.zig):
    - Add `BodyChunkCallback = ?*const fn(user: ?*anyopaque, chunk: ?[*]const u8, len: usize, finished: u8) callconv(.c) void`

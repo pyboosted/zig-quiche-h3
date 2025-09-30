@@ -58,6 +58,8 @@ typedef struct zig_h3_request {
     const zig_h3_header *headers;
     size_t headers_len;
     uint64_t stream_id;
+    const uint8_t *conn_id;
+    size_t conn_id_len;
 } zig_h3_request;
 
 /** Request callback signature. */
@@ -179,8 +181,15 @@ typedef void (*zig_h3_body_chunk_cb)(
     const uint8_t *chunk,
     size_t len);
 
-// Cleanup hooks for resource management
-typedef void (*zig_h3_stream_close_cb)(void *user, uint64_t stream_id, uint8_t aborted);
+// Body complete callback (signals end of request body stream)
+typedef void (*zig_h3_body_complete_cb)(
+    void *user,
+    const uint8_t *conn_id,
+    size_t conn_id_len,
+    uint64_t stream_id);
+
+// Cleanup hooks for resource management (conn_id required for composite key discrimination)
+typedef void (*zig_h3_stream_close_cb)(void *user, const uint8_t *conn_id, size_t conn_id_len, uint64_t stream_id, uint8_t aborted);
 typedef void (*zig_h3_connection_close_cb)(void *user, const uint8_t *conn_id, size_t conn_id_len);
 
 // Register streaming route with body chunk callback
@@ -190,6 +199,7 @@ int zig_h3_server_route_streaming(
     const char *pattern,
     zig_h3_request_cb request_cb,
     zig_h3_body_chunk_cb body_chunk_cb,
+    zig_h3_body_complete_cb body_complete_cb,
     zig_h3_datagram_cb datagram_cb,
     zig_h3_wt_session_cb wt_session_cb,
     void *user_data);

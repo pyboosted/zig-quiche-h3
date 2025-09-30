@@ -231,6 +231,36 @@ pub export fn zig_h3_server_route(
     return server.zig_h3_server_route(server_ptr, method_c, pattern_c, cb, dgram_cb, wt_cb, user);
 }
 
+pub export fn zig_h3_server_route_streaming(
+    server_ptr: ?*server.ZigServer,
+    method_c: ?[*:0]const u8,
+    pattern_c: ?[*:0]const u8,
+    cb: server.RequestCallback,
+    body_chunk_cb: server.BodyChunkCallback,
+    body_complete_cb: server.BodyCompleteCallback,
+    dgram_cb: server.DatagramCallback,
+    wt_cb: server.WTSessionCallback,
+    user: ?*anyopaque,
+) i32 {
+    return server.zig_h3_server_route_streaming(server_ptr, method_c, pattern_c, cb, body_chunk_cb, body_complete_cb, dgram_cb, wt_cb, user);
+}
+
+pub export fn zig_h3_server_set_stream_close_cb(
+    server_ptr: ?*server.ZigServer,
+    cb: server.StreamCloseCallback,
+    user: ?*anyopaque,
+) i32 {
+    return server.zig_h3_server_set_stream_close_cb(server_ptr, cb, user);
+}
+
+pub export fn zig_h3_server_set_connection_close_cb(
+    server_ptr: ?*server.ZigServer,
+    cb: server.ConnectionCloseCallback,
+    user: ?*anyopaque,
+) i32 {
+    return server.zig_h3_server_set_connection_close_cb(server_ptr, cb, user);
+}
+
 pub export fn zig_h3_server_start(server_ptr: ?*server.ZigServer) i32 {
     return server.zig_h3_server_start(server_ptr);
 }

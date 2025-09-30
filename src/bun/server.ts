@@ -241,6 +241,21 @@ export interface H3ServeOptions {
   quicDatagram?: (payload: Uint8Array, ctx: QUICDatagramContext) => void;
 }
 
+// ===== Streaming Request State Management =====
+
+interface StreamingRequestState {
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  connectionId: Uint8Array;
+  streamId: bigint;
+}
+
+function makeStreamingKey(connId: Uint8Array, streamId: bigint): string {
+  const connIdHex = Array.from(connId)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `${connIdHex}:${streamId}`;
+}
+
 export class H3Server {
   #ptr: Pointer;
   readonly #buffers: Uint8Array[] = [];
@@ -253,6 +268,7 @@ export class H3Server {
 
   #running = false;
   #closed = false;
+  #streamingRequests = new Map<string, StreamingRequestState>();
 
   constructor(options: H3ServeOptions) {
     if (typeof options.fetch !== "function") {
@@ -274,12 +290,91 @@ export class H3Server {
     }
     this.#ptr = serverPtr;
 
+    this.#registerCleanupHooks();
     this.#registerRoutes();
     this.start();
   }
 
   get running(): boolean {
     return this.#running;
+  }
+
+  #registerCleanupHooks(): void {
+    const symbols = this.#symbols;
+
+    // Stream close callback: clean up streaming request state using composite key
+    const streamCloseCallback = new JSCallback(
+      (_user, connIdPtr, connIdLen, streamId, aborted) => {
+        if (!connIdPtr || connIdLen === 0) return;
+        const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
+        const key = makeStreamingKey(connId, BigInt(streamId));
+        const state = this.#streamingRequests.get(key);
+
+        if (state) {
+          if (aborted && state.controller) {
+            try {
+              state.controller.error(new Error("Stream aborted"));
+            } catch {
+              // Controller may already be closed
+            }
+          }
+          this.#streamingRequests.delete(key);
+        }
+      },
+      {
+        returns: FFIType.void,
+        args: [FFIType.pointer, FFIType.pointer, FFIType.usize, FFIType.u64, FFIType.u8],
+        threadsafe: true,
+      },
+    );
+
+    // Connection close callback: clean up all streams for this connection
+    const connectionCloseCallback = new JSCallback(
+      (_user, connIdPtr, connIdLen) => {
+        if (!connIdPtr || connIdLen === 0) return;
+        const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
+        const connIdHex = Array.from(connId)
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+
+        // Remove all entries for this connection
+        for (const [key, state] of this.#streamingRequests.entries()) {
+          if (key.startsWith(connIdHex + ":")) {
+            if (state.controller) {
+              try {
+                state.controller.error(new Error("Connection closed"));
+              } catch {
+                // Controller may already be closed
+              }
+            }
+            this.#streamingRequests.delete(key);
+          }
+        }
+      },
+      {
+        returns: FFIType.void,
+        args: [FFIType.pointer, FFIType.pointer, FFIType.usize],
+        threadsafe: true,
+      },
+    );
+
+    if (!streamCloseCallback.ptr || !connectionCloseCallback.ptr) {
+      streamCloseCallback.close();
+      connectionCloseCallback.close();
+      throw new Error("JSCallback.ptr unavailable for cleanup hooks");
+    }
+
+    this.#callbacks.push(streamCloseCallback, connectionCloseCallback);
+
+    check(
+      symbols.zig_h3_server_set_stream_close_cb(this.#ptr, streamCloseCallback.ptr, null),
+      "zig_h3_server_set_stream_close_cb",
+    );
+
+    check(
+      symbols.zig_h3_server_set_connection_close_cb(this.#ptr, connectionCloseCallback.ptr, null),
+      "zig_h3_server_set_connection_close_cb",
+    );
   }
 
   #buildConfigBuffer(): ArrayBuffer {
@@ -343,6 +438,7 @@ export class H3Server {
 
     // Determine handler: use route-specific fetch or fallback to global fetch
     const fetchHandler = route.fetch || this.#options.fetch;
+    const isStreaming = route.mode === "streaming";
 
     const callback = new JSCallback(
       (_user, reqPtr, respPtr) => {
@@ -359,7 +455,7 @@ export class H3Server {
         }
 
         queueMicrotask(() => {
-          this.#handleRequest(requestPtr, responsePtr, fetchHandler).catch((error) => {
+          this.#handleRequest(requestPtr, responsePtr, fetchHandler, isStreaming).catch((error) => {
             this.#handleError(error, responsePtr).catch((fallbackErr) => {
               console.error("Unable to emit error response", fallbackErr);
             });
@@ -379,32 +475,158 @@ export class H3Server {
     }
 
     this.#callbacks.push(callback);
-    check(
-      symbols.zig_h3_server_route(
-        this.#ptr,
-        ptr(methodBuf),
-        ptr(patternBuf),
-        callback.ptr,
-        null,
-        null,
-        null,
-      ),
-      "zig_h3_server_route",
-    );
+
+    // Create body chunk callback for streaming routes
+    let bodyChunkCallback: JSCallback | null = null;
+    let bodyCompleteCallback: JSCallback | null = null;
+    if (isStreaming) {
+      bodyChunkCallback = new JSCallback(
+        (_user, connIdPtr, connIdLen, streamId, chunkPtr, chunkLen) => {
+          if (!connIdPtr || connIdLen === 0) return;
+          const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
+          const key = makeStreamingKey(connId, BigInt(streamId));
+          const state = this.#streamingRequests.get(key);
+
+          if (!state || !state.controller) return;
+
+          if (chunkPtr && chunkLen > 0) {
+            const chunk = new Uint8Array(toArrayBuffer(pointerFrom(chunkPtr), chunkLen));
+            try {
+              state.controller.enqueue(chunk);
+            } catch (err) {
+              console.error("Error enqueuing chunk", err);
+            }
+          }
+        },
+        {
+          returns: FFIType.void,
+          args: [FFIType.pointer, FFIType.pointer, FFIType.usize, FFIType.u64, FFIType.pointer, FFIType.usize],
+          threadsafe: true,
+        },
+      );
+
+      // Create body complete callback to close the ReadableStream
+      bodyCompleteCallback = new JSCallback(
+        (_user, connIdPtr, connIdLen, streamId) => {
+          if (!connIdPtr || connIdLen === 0) return;
+          const connId = new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen));
+          const key = makeStreamingKey(connId, BigInt(streamId));
+          const state = this.#streamingRequests.get(key);
+
+          if (state?.controller) {
+            try {
+              state.controller.close();
+            } catch {
+              // Controller may already be closed
+            }
+          }
+          this.#streamingRequests.delete(key);
+        },
+        {
+          returns: FFIType.void,
+          args: [FFIType.pointer, FFIType.pointer, FFIType.usize, FFIType.u64],
+          threadsafe: true,
+        },
+      );
+
+      if (!bodyChunkCallback.ptr || !bodyCompleteCallback.ptr) {
+        callback.close();
+        bodyChunkCallback?.close();
+        bodyCompleteCallback?.close();
+        throw new Error("JSCallback.ptr unavailable for streaming callbacks");
+      }
+
+      this.#callbacks.push(bodyChunkCallback, bodyCompleteCallback);
+    }
+
+    // Register route with appropriate function
+    if (isStreaming && bodyChunkCallback && bodyCompleteCallback) {
+      check(
+        symbols.zig_h3_server_route_streaming(
+          this.#ptr,
+          ptr(methodBuf),
+          ptr(patternBuf),
+          callback.ptr,
+          bodyChunkCallback.ptr,
+          bodyCompleteCallback.ptr,
+          null,
+          null,
+          null,
+        ),
+        "zig_h3_server_route_streaming",
+      );
+    } else {
+      check(
+        symbols.zig_h3_server_route(
+          this.#ptr,
+          ptr(methodBuf),
+          ptr(patternBuf),
+          callback.ptr,
+          null,
+          null,
+          null,
+        ),
+        "zig_h3_server_route",
+      );
+    }
   }
 
   async #handleRequest(
     requestPtr: Pointer,
     responsePtr: Pointer,
     fetchHandler: (req: Request, server: H3Server) => Response | Promise<Response>,
+    isStreaming: boolean = false,
   ): Promise<void> {
     try {
-      const request = this.#decodeRequest(requestPtr);
-      if (process.env.H3_DEBUG_SERVER === "1") {
-        console.debug(`[H3Server] handling ${request.method} ${request.url}`);
+      const { request: baseRequest, streamId, connId } = this.#decodeRequest(requestPtr);
+
+      let request = baseRequest;
+
+      // For streaming routes, create a ReadableStream and store the controller
+      if (isStreaming) {
+        const key = makeStreamingKey(connId, streamId);
+        let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
+
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller;
+          },
+          cancel(reason) {
+            // Stream was cancelled by the user
+            if (process.env.H3_DEBUG_SERVER === "1") {
+              console.debug(`[H3Server] stream ${streamId} cancelled:`, reason);
+            }
+          },
+        });
+
+        // Store controller in map for body chunk callback
+        if (streamController) {
+          this.#streamingRequests.set(key, {
+            controller: streamController,
+            connectionId: connId,
+            streamId,
+          });
+        }
+
+        // Create new Request with the streaming body
+        request = new Request(baseRequest.url, {
+          method: baseRequest.method,
+          headers: baseRequest.headers,
+          body: stream,
+          // @ts-expect-error - Bun supports duplex option
+          duplex: "half",
+        });
       }
+
+      if (process.env.H3_DEBUG_SERVER === "1") {
+        console.debug(`[H3Server] handling ${request.method} ${request.url} (streaming: ${isStreaming})`);
+      }
+
       const result = await Promise.resolve(fetchHandler(request, this));
       await this.#sendResponse(result, responsePtr);
+
+      // Note: Cleanup is handled by bodyCompleteCallback when body finishes
+      // This prevents the deadlock where fetchHandler waits for body to complete
     } catch (error) {
       throw error;
     }
@@ -418,8 +640,8 @@ export class H3Server {
     await this.#sendResponse(fallback, responsePtr);
   }
 
-  #decodeRequest(requestPtr: Pointer): Request {
-    const structSize = 72; // sizeof(zig_h3_request) on 64-bit
+  #decodeRequest(requestPtr: Pointer): { request: Request; streamId: bigint; connId: Uint8Array } {
+    const structSize = 88; // sizeof(zig_h3_request) on 64-bit (now includes conn_id fields)
     const buffer = new Uint8Array(toArrayBuffer(requestPtr, structSize));
     const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
@@ -431,21 +653,31 @@ export class H3Server {
     const authorityLen = Number(view.getBigUint64(40, true));
     const headersPtr = Number(view.getBigUint64(48, true));
     const headersLen = Number(view.getBigUint64(56, true));
+    const streamId = view.getBigUint64(64, true);
+    const connIdPtr = Number(view.getBigUint64(72, true));
+    const connIdLen = Number(view.getBigUint64(80, true));
 
     const method = decodeUtf8(methodPtr, methodLen) || "GET";
     const path = decodeUtf8(pathPtr, pathLen) || "/";
     const authority = decodeUtf8(authorityPtr, authorityLen) || this.hostname;
     const headers = toHeaders(decodeHeaders(headersPtr, headersLen));
 
+    const connId =
+      connIdPtr && connIdLen > 0
+        ? new Uint8Array(toArrayBuffer(pointerFrom(connIdPtr), connIdLen))
+        : new Uint8Array(0);
+
     const url = new URL(path, `${this.#baseUrl}`);
     if (!headers.has("host")) {
       headers.set("host", authority);
     }
 
-    return new Request(url.toString(), {
+    const request = new Request(url.toString(), {
       method,
       headers,
     });
+
+    return { request, streamId, connId };
   }
 
   async #sendResponse(response: Response, responsePtr: Pointer): Promise<void> {

@@ -73,6 +73,8 @@ pub const RequestState = struct {
 // WT uni-stream preface accumulator lives in the WT facade now
 
 pub const OnDatagram = *const fn (server: *QuicServer, conn: *connection.Connection, payload: []const u8, user: ?*anyopaque) errors.DatagramError!void;
+pub const OnStreamClose = *const fn (conn_id: []const u8, stream_id: u64, aborted: bool, user: ?*anyopaque) void;
+pub const OnConnectionClose = *const fn (conn_id: []const u8, user: ?*anyopaque) void;
 
 pub const QuicServer = struct {
     allocator: std.mem.Allocator,
@@ -115,6 +117,12 @@ pub const QuicServer = struct {
 
     on_datagram: ?OnDatagram = null,
     on_datagram_user: ?*anyopaque = null,
+
+    // Cleanup callbacks (for FFI layer integration)
+    on_stream_close: ?OnStreamClose = null,
+    on_stream_close_user: ?*anyopaque = null,
+    on_connection_close: ?OnConnectionClose = null,
+    on_connection_close_user: ?*anyopaque = null,
 
     // Feature facades (Zig 0.15.1 lacks container-scope `usingnamespace` support here)
     const DatagramFeature = @import("datagram.zig");
@@ -1423,6 +1431,11 @@ pub const QuicServer = struct {
             h3_conn.deinit();
             self.allocator.destroy(h3_conn);
             conn.http3 = null;
+        }
+
+        // Invoke connection close callback if set
+        if (self.on_connection_close) |callback| {
+            callback(conn.dcid[0..conn.dcid_len], self.on_connection_close_user);
         }
 
         // Remove from table and cleanup

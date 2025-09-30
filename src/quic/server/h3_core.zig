@@ -193,6 +193,7 @@ pub fn Impl(comptime S: type) type {
                         );
                         state.request.user_data = state.user_data;
                         state.request.state_ptr = @ptrCast(state);
+                        state.request.conn_id = conn.dcid[0..conn.dcid_len]; // Fix: populate for FFI composite keys
                         const clen = state.request.contentLength() orelse 0;
                         server_logging.debugf(self, "  headers parsed: content-length={}, path-decoded={s}\n", .{ clen, state.request.path_decoded });
 
@@ -674,6 +675,11 @@ pub fn Impl(comptime S: type) type {
         pub fn cleanupStreamState(self: *Self, conn: *connection.Connection, stream_id: u64, state: *RequestState, force_cleanup: bool) void {
             _ = self.stream_states.remove(.{ .conn = conn, .stream_id = stream_id });
             state.request.state_ptr = null;
+
+            // Invoke stream close callback if set (pass conn_id for composite key discrimination)
+            if (self.on_stream_close) |callback| {
+                callback(conn.dcid[0..conn.dcid_len], stream_id, force_cleanup, self.on_stream_close_user);
+            }
 
             // MILESTONE-1: Handle WebTransport session cleanup
             if (state.is_webtransport and Self.WithWT) {

@@ -198,6 +198,28 @@ const SERVER_SYMBOL_DEFINITIONS = {
       FFIType.pointer,
     ],
   },
+  zig_h3_server_route_streaming: {
+    returns: FFIType.i32,
+    args: [
+      FFIType.pointer,
+      FFIType.pointer,
+      FFIType.pointer,
+      FFIType.pointer,
+      FFIType.pointer,
+      FFIType.pointer,
+      FFIType.pointer,
+      FFIType.pointer,
+      FFIType.pointer,
+    ],
+  },
+  zig_h3_server_set_stream_close_cb: {
+    returns: FFIType.i32,
+    args: [FFIType.pointer, FFIType.pointer, FFIType.pointer],
+  },
+  zig_h3_server_set_connection_close_cb: {
+    returns: FFIType.i32,
+    args: [FFIType.pointer, FFIType.pointer, FFIType.pointer],
+  },
   zig_h3_server_start: {
     returns: FFIType.i32,
     args: [FFIType.pointer],
