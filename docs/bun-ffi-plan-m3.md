@@ -1,5 +1,70 @@
 # Complete M3 Bun Server TypeScript Bindings
 
+## Progress Tracker
+
+### Implementation Phases
+- [x] **Phase 0**: Refactor to Route Definition API (90-120 min)
+  - [x] Add RouteDefinition interface with mode discriminator
+  - [x] Replace default route registration with explicit routes
+  - [x] Add context wrapper objects for QUIC/H3/WebTransport
+  - [x] Ensure backward compatibility with top-level fetch handler
+- [x] **Phase 1**: Add Streaming Request Body Support (90-120 min)
+  - [x] Implement composite key pattern (${connIdHex}:${streamId})
+  - [x] Wire zig_h3_body_chunk_cb and zig_h3_body_complete_cb
+  - [x] Create #streamingRequests map with ReadableStreamDefaultController
+  - [x] Critical Fix 1: Populate conn_id in Request struct
+  - [x] Critical Fix 2: Wire on_body_complete to close ReadableStream
+  - [x] Critical Fix 3: Invoke cleanup hooks with connection discrimination
+- [ ] **Phase 1b**: Fix Memory Safety for Buffered Mode (30-40 min)
+  - [ ] Refactor request callback to build complete snapshot synchronously
+  - [ ] Add body_ptr/body_len to ZigRequest struct
+  - [ ] Update include/zig_h3.h with body fields
+  - [ ] Copy body buffer in requestHandler before invoking callback
+  - [ ] Test POST with 10KB body for memory safety
+- [ ] **Phase 2**: Add Stats API (30-40 min)
+  - [ ] Add requests_total and server_start_time_ms to QuicServer
+  - [ ] Increment requests_total in h3_core when creating RequestState
+  - [ ] Add zig_h3_server_stats() FFI export
+  - [ ] Add getStats() method to TypeScript H3Server
+  - [ ] Test stats accuracy with multiple requests
+- [ ] **Phase 3A**: Raw QUIC Datagram FFI Bridge (60-75 min)
+  - [ ] Add zig_h3_server_set_quic_datagram_cb() FFI export
+  - [ ] Add zig_h3_server_send_quic_datagram() FFI export
+  - [ ] Implement QUICDatagramContext TypeScript wrapper
+  - [ ] Wire server-level quicDatagram callback in constructor
+  - [ ] Test with native quic_dgram_echo client
+- [ ] **Phase 3B**: H3 DATAGRAM Per-Route Handlers (30-40 min)
+  - [ ] Implement H3DatagramContext TypeScript wrapper
+  - [ ] Wire H3 DATAGRAM callback in route registration
+  - [ ] Test route with h3Datagram handler
+- [ ] **Phase 3C**: WebTransport Session API (40-50 min)
+  - [ ] Implement WTContext TypeScript wrapper
+  - [ ] Wire WebTransport callback in route registration
+  - [ ] Test CONNECT with WebTransport session
+- [ ] **Phase 4**: Lifecycle Extensions (20-30 min)
+  - [ ] Add force flag to stop() method
+  - [ ] Test Bun.file() response bodies
+  - [ ] Test async iterator response bodies
+  - [ ] Add JSDoc for all public methods
+- [ ] **Phase 5**: Error Handling & Documentation (30-40 min)
+  - [ ] Implement 4-tier error handling strategy
+  - [ ] Create src/bun/internal/conversions.ts
+  - [ ] Add comprehensive JSDoc comments
+  - [ ] Document limitations and edge cases
+- [ ] **Phase 6**: Comprehensive Testing (50-60 min)
+  - [ ] Buffered mode tests (small, large, empty, oversized bodies)
+  - [ ] Streaming mode tests (5MB uploads, concurrent uploads)
+  - [ ] Protocol layer tests (QUIC/H3/WT datagrams)
+  - [ ] Route-specific tests (multiple routes, fallbacks)
+  - [ ] Error handling tests
+  - [ ] Lifecycle tests (graceful/force shutdown)
+  - [ ] Stress tests (H3_STRESS=1)
+
+### Time Estimate
+- **Completed**: ~4-5 hours (Phase 0 + Phase 1 with critical fixes)
+- **Remaining**: ~18-26 hours (Phase 1b through Phase 6)
+- **Total**: 22-31 hours
+
 ## Current State Analysis
 
 `src/bun/server.ts` (434 lines) already implements:
