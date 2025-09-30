@@ -115,6 +115,111 @@ function check(rc: number, ctx: string): void {
   }
 }
 
+// ===== Context Wrapper Classes for Protocol Layers =====
+
+/**
+ * Context for raw QUIC datagrams (connection-scoped, server-level).
+ * QUIC datagrams arrive before HTTP exchange and have no request context.
+ */
+export class QUICDatagramContext {
+  readonly #symbols: ServerSymbols;
+  readonly #connPtr: Pointer;
+  readonly connectionId: Uint8Array;
+  readonly connectionIdHex: string;
+
+  constructor(symbols: ServerSymbols, connPtr: Pointer, connectionId: Uint8Array) {
+    this.#symbols = symbols;
+    this.#connPtr = connPtr;
+    this.connectionId = connectionId;
+    // Convert to hex for logging/comparison (binary-safe)
+    this.connectionIdHex = Array.from(connectionId)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  sendReply(data: Uint8Array): void {
+    check(
+      this.#symbols.zig_h3_server_send_quic_datagram(this.#connPtr, ptr(data), data.length),
+      "QUICDatagramContext.sendReply",
+    );
+  }
+}
+
+/**
+ * Context for HTTP/3 DATAGRAMs (request-associated with flow IDs).
+ */
+export class H3DatagramContext {
+  readonly #symbols: ServerSymbols;
+  readonly #responsePtr: Pointer;
+  readonly streamId: bigint;
+  readonly flowId: bigint;
+  readonly request: Request;
+
+  constructor(
+    symbols: ServerSymbols,
+    responsePtr: Pointer,
+    streamId: bigint,
+    flowId: bigint,
+    request: Request,
+  ) {
+    this.#symbols = symbols;
+    this.#responsePtr = responsePtr;
+    this.streamId = streamId;
+    this.flowId = flowId;
+    this.request = request;
+  }
+
+  sendReply(data: Uint8Array): void {
+    check(
+      this.#symbols.zig_h3_response_send_h3_datagram(this.#responsePtr, ptr(data), data.length),
+      "H3DatagramContext.sendReply",
+    );
+  }
+}
+
+/**
+ * Context for WebTransport sessions (session-based with bidirectional streams).
+ */
+export class WTContext {
+  readonly #symbols: ServerSymbols;
+  readonly #sessionPtr: Pointer;
+  readonly request: Request;
+  readonly sessionId: bigint;
+
+  constructor(symbols: ServerSymbols, sessionPtr: Pointer, request: Request, sessionId: bigint) {
+    this.#symbols = symbols;
+    this.#sessionPtr = sessionPtr;
+    this.request = request;
+    this.sessionId = sessionId;
+  }
+
+  sendDatagram(data: Uint8Array): void {
+    check(
+      this.#symbols.zig_h3_wt_send_datagram(this.#sessionPtr, ptr(data), data.length),
+      "WTContext.sendDatagram",
+    );
+  }
+
+  close(errorCode: number = 0, reason: string = ""): void {
+    const reasonBuf = textEncoder.encode(reason);
+    check(
+      this.#symbols.zig_h3_wt_close(this.#sessionPtr, errorCode, ptr(reasonBuf), reasonBuf.length),
+      "WTContext.close",
+    );
+  }
+}
+
+// ===== Route Definition Interface =====
+
+export interface RouteDefinition {
+  method: string;
+  pattern: string;
+  mode?: "buffered" | "streaming"; // Default: buffered
+  fetch?: (req: Request, server: H3Server) => Response | Promise<Response>;
+  h3Datagram?: (payload: Uint8Array, ctx: H3DatagramContext) => void;
+  webtransport?: (ctx: WTContext) => void;
+}
+
 export interface H3ServeOptions {
   port?: number;
   hostname?: string;
@@ -124,8 +229,16 @@ export interface H3ServeOptions {
   enableWebTransport?: boolean;
   qlogDir?: string;
   logLevel?: number;
+
+  // Route-first architecture: optional explicit routes
+  routes?: RouteDefinition[];
+
+  // Fallback handler (required if routes not provided, or for unmatched routes)
   fetch(request: Request, server: H3Server): Response | Promise<Response>;
   error?(error: unknown, server: H3Server): Response | Promise<Response>;
+
+  // Server-level handler (not route-specific)
+  quicDatagram?: (payload: Uint8Array, ctx: QUICDatagramContext) => void;
 }
 
 export class H3Server {
@@ -161,7 +274,7 @@ export class H3Server {
     }
     this.#ptr = serverPtr;
 
-    this.#registerDefaultRoutes();
+    this.#registerRoutes();
     this.start();
   }
 
@@ -196,23 +309,40 @@ export class H3Server {
     return cfg;
   }
 
-  #registerDefaultRoutes(): void {
+  #registerRoutes(): void {
+    if (this.#options.routes && this.#options.routes.length > 0) {
+      // Register explicit routes first (higher precedence)
+      for (const route of this.#options.routes) {
+        this.#registerRoute(route);
+      }
+    }
+
+    // Always register catch-all fallback for unmatched routes
+    // Zig routing layer ensures specific patterns match before wildcards
     const patterns = ["/", "/*"];
     for (const method of DEFAULT_METHODS) {
       for (const pattern of patterns) {
-        this.#registerRoute(method, pattern);
+        this.#registerRoute({
+          method,
+          pattern,
+          mode: "buffered",
+          fetch: this.#options.fetch,
+        });
       }
     }
   }
 
-  #registerRoute(method: string, pattern: string): void {
+  #registerRoute(route: RouteDefinition): void {
     const symbols = this.#symbols;
-    const methodBuf = makeCString(method);
-    const patternBuf = makeCString(pattern);
+    const methodBuf = makeCString(route.method);
+    const patternBuf = makeCString(route.pattern);
     if (!methodBuf || !patternBuf) {
-      throw new Error(`Failed to allocate strings for route ${method} ${pattern}`);
+      throw new Error(`Failed to allocate strings for route ${route.method} ${route.pattern}`);
     }
     this.#buffers.push(methodBuf, patternBuf);
+
+    // Determine handler: use route-specific fetch or fallback to global fetch
+    const fetchHandler = route.fetch || this.#options.fetch;
 
     const callback = new JSCallback(
       (_user, reqPtr, respPtr) => {
@@ -229,7 +359,7 @@ export class H3Server {
         }
 
         queueMicrotask(() => {
-          this.#handleRequest(requestPtr, responsePtr).catch((error) => {
+          this.#handleRequest(requestPtr, responsePtr, fetchHandler).catch((error) => {
             this.#handleError(error, responsePtr).catch((fallbackErr) => {
               console.error("Unable to emit error response", fallbackErr);
             });
@@ -263,13 +393,17 @@ export class H3Server {
     );
   }
 
-  async #handleRequest(requestPtr: Pointer, responsePtr: Pointer): Promise<void> {
+  async #handleRequest(
+    requestPtr: Pointer,
+    responsePtr: Pointer,
+    fetchHandler: (req: Request, server: H3Server) => Response | Promise<Response>,
+  ): Promise<void> {
     try {
       const request = this.#decodeRequest(requestPtr);
       if (process.env.H3_DEBUG_SERVER === "1") {
         console.debug(`[H3Server] handling ${request.method} ${request.url}`);
       }
-      const result = await Promise.resolve(this.#options.fetch(request, this));
+      const result = await Promise.resolve(fetchHandler(request, this));
       await this.#sendResponse(result, responsePtr);
     } catch (error) {
       throw error;
