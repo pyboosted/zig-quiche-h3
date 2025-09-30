@@ -70,6 +70,13 @@ typedef void (*zig_h3_datagram_cb)(void *user, const zig_h3_request *req, zig_h3
 typedef void (*zig_h3_wt_session_cb)(void *user, const zig_h3_request *req, zig_h3_wt_session *session);
 typedef void (*zig_h3_log_cb)(void *user, const char *line);
 
+typedef struct zig_h3_server_stats {
+    uint64_t connections_total;
+    uint64_t connections_active;
+    uint64_t requests_total;
+    int64_t uptime_ms;
+} zig_h3_server_stats;
+
 typedef struct zig_h3_client_config {
     uint8_t verify_peer;
     uint8_t enable_dgram;
@@ -213,6 +220,7 @@ int zig_h3_server_set_connection_close_cb(zig_h3_server *server, zig_h3_connecti
 int zig_h3_server_start(zig_h3_server *server);
 int zig_h3_server_stop(zig_h3_server *server);
 int zig_h3_server_set_log(zig_h3_server *server, zig_h3_log_cb callback, void *user_data);
+int zig_h3_server_stats(zig_h3_server *server, zig_h3_server_stats *out);
 
 int zig_h3_response_status(zig_h3_response *response, uint16_t status);
 int zig_h3_response_header(

@@ -56,6 +56,9 @@ pub fn Impl(comptime S: type) type {
                             self.allocator.destroy(state);
                         }
 
+                        // Phase 2: Increment requests counter for stats API
+                        self.requests_total += 1;
+
                         const arena_allocator = state.arena.allocator();
                         const headers = try h3.collectHeaders(arena_allocator, result.raw_event);
 

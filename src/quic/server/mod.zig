@@ -109,6 +109,8 @@ pub const QuicServer = struct {
     connections_accepted: usize = 0,
     packets_received: usize = 0,
     packets_sent: usize = 0,
+    requests_total: u64 = 0,
+    server_start_time_ms: i64 = 0,
 
     // Embedded state
     datagram: conn_state.DatagramStats = .{},
@@ -274,6 +276,7 @@ pub const QuicServer = struct {
             .stream_states = stream_states,
             .h3 = h3_state,
             .wt = wt_state,
+            .server_start_time_ms = std.time.milliTimestamp(),
         };
 
         // Reapply DATAGRAM setting on stored quiche config to ensure move semantics

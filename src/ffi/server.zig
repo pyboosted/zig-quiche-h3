@@ -56,6 +56,13 @@ pub const ZigResponse = opaque {};
 pub const ZigServer = opaque {};
 pub const ZigWebTransportSession = opaque {};
 
+pub const ZigServerStats = extern struct {
+    connections_total: u64,
+    connections_active: u64,
+    requests_total: u64,
+    uptime_ms: i64,
+};
+
 pub const RequestCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, resp: *ZigResponse) callconv(.c) void;
 pub const DatagramCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, resp: *ZigResponse, data: ?[*]const u8, data_len: usize) callconv(.c) void;
 pub const WTSessionCallback = ?*const fn (user: ?*anyopaque, req: *const ZigRequest, session: *ZigWebTransportSession) callconv(.c) void;
@@ -679,6 +686,38 @@ pub fn zig_h3_server_set_log(server_ptr: ?*ZigServer, cb: LogCallback, user: ?*a
     const handle = asHandle(server_ptr) orelse return -1;
     handle.log_callback = cb;
     handle.log_user = if (cb != null) user else null;
+    return 0;
+}
+
+pub fn zig_h3_server_stats(server_ptr: ?*ZigServer, out_ptr: ?*ZigServerStats) i32 {
+    if (out_ptr == null) return -1;
+    const out = out_ptr.?;
+    const handle = asHandle(server_ptr) orelse {
+        out.* = .{
+            .connections_total = 0,
+            .connections_active = 0,
+            .requests_total = 0,
+            .uptime_ms = 0,
+        };
+        return 0;
+    };
+    const srv = handle.server orelse {
+        out.* = .{
+            .connections_total = 0,
+            .connections_active = 0,
+            .requests_total = 0,
+            .uptime_ms = 0,
+        };
+        return 0;
+    };
+    const now = std.time.milliTimestamp();
+    const uptime = now - srv.server_start_time_ms;
+    out.* = .{
+        .connections_total = @as(u64, @intCast(srv.connections_accepted)),
+        .connections_active = @as(u64, @intCast(srv.connections.count())),
+        .requests_total = srv.requests_total,
+        .uptime_ms = uptime,
+    };
     return 0;
 }
 

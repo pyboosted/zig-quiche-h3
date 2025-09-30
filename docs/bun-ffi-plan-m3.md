@@ -22,12 +22,13 @@
   - [x] Copy body buffer in buildRequestView before invoking callback
   - [x] Create #buildRequestSnapshot method for synchronous data copy
   - [x] Fix user_data propagation bug in h3_core.zig
-- [ ] **Phase 2**: Add Stats API (30-40 min)
-  - [ ] Add requests_total and server_start_time_ms to QuicServer
-  - [ ] Increment requests_total in h3_core when creating RequestState
-  - [ ] Add zig_h3_server_stats() FFI export
-  - [ ] Add getStats() method to TypeScript H3Server
-  - [ ] Test stats accuracy with multiple requests
+- [x] **Phase 2**: Add Stats API (30-40 min) — ✅ COMPLETE (2025-09-30)
+  - [x] Add requests_total and server_start_time_ms to QuicServer
+  - [x] Increment requests_total in h3_core when creating RequestState
+  - [x] Add zig_h3_server_stats() FFI export with out-parameter pattern
+  - [x] Add getStats() method to TypeScript H3Server
+  - [x] Test stats accuracy with multiple requests
+  - [x] Fix type safety with @as(u64, @intCast()) for usize→u64 conversion
 - [ ] **Phase 3A**: Raw QUIC Datagram FFI Bridge (60-75 min)
   - [ ] Add zig_h3_server_set_quic_datagram_cb() FFI export
   - [ ] Add zig_h3_server_send_quic_datagram() FFI export
@@ -62,8 +63,8 @@
   - [ ] Stress tests (H3_STRESS=1)
 
 ### Time Estimate
-- **Completed**: ~4.5-5.5 hours (Phase 0 + Phase 1 + Phase 1b with critical fixes)
-- **Remaining**: ~17.5-25.5 hours (Phase 2 through Phase 6)
+- **Completed**: ~5.0-6.0 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2)
+- **Remaining**: ~17.0-25.0 hours (Phase 3A through Phase 6)
 - **Total**: 22-31 hours
 
 ## Current State Analysis

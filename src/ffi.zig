@@ -273,6 +273,10 @@ pub export fn zig_h3_server_set_log(server_ptr: ?*server.ZigServer, cb: server.L
     return server.zig_h3_server_set_log(server_ptr, cb, user);
 }
 
+pub export fn zig_h3_server_stats(server_ptr: ?*server.ZigServer, out_ptr: ?*server.ZigServerStats) i32 {
+    return server.zig_h3_server_stats(server_ptr, out_ptr);
+}
+
 pub export fn zig_h3_response_status(resp_ptr: ?*server.ZigResponse, status: u16) i32 {
     return server.zig_h3_response_status(resp_ptr, status);
 }

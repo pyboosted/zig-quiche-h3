@@ -81,8 +81,8 @@ _Notes_: Current Bun-side coverage exercises synchronous + streaming fetches, ca
   - Narrowed error sets: `bodyChunkHandler` and `bodyCompleteHandler` return `errors.StreamingError!void` instead of `anyerror!void` (src/ffi/server.zig:353,365)
 
 #### Phase 1b–6: Remaining Work
-- [ ] Phase 1b: Fix buffered mode memory safety with request snapshot
-- [ ] Phase 2: Add stats API (requests_total, server_start_time_ms)
+- [x] Phase 1b: Fix buffered mode memory safety with request snapshot
+- [x] Phase 2: Add stats API (requests_total, server_start_time_ms)
 - [ ] Phase 3A: Implement QUIC datagram handler with cleanup hooks
 - [ ] Phase 3B: Implement H3 datagram per-route handlers
 - [ ] Phase 3C: Implement WebTransport session API

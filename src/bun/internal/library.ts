@@ -232,6 +232,10 @@ const SERVER_SYMBOL_DEFINITIONS = {
     returns: FFIType.i32,
     args: [FFIType.pointer, FFIType.pointer, FFIType.pointer],
   },
+  zig_h3_server_stats: {
+    returns: FFIType.i32,
+    args: [FFIType.pointer, FFIType.pointer],
+  },
   zig_h3_response_status: {
     returns: FFIType.i32,
     args: [FFIType.pointer, FFIType.u16],

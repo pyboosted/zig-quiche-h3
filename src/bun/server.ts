@@ -220,6 +220,13 @@ export interface RouteDefinition {
   webtransport?: (ctx: WTContext) => void;
 }
 
+export interface ServerStats {
+  connectionsTotal: bigint;
+  connectionsActive: bigint;
+  requests: bigint;
+  uptimeMs: bigint;
+}
+
 export interface H3ServeOptions {
   port?: number;
   hostname?: string;
@@ -870,6 +877,26 @@ export class H3Server {
     if (!this.#running) return;
     check(this.#symbols.zig_h3_server_stop(this.#ptr), "zig_h3_server_stop");
     this.#running = false;
+  }
+
+  getStats(): ServerStats {
+    if (this.#closed) {
+      throw new Error("Server is closed");
+    }
+    // Struct layout: 4 u64/i64 fields = 32 bytes
+    const statsBuffer = new ArrayBuffer(32);
+    check(
+      this.#symbols.zig_h3_server_stats(this.#ptr, ptr(new Uint8Array(statsBuffer))),
+      "zig_h3_server_stats",
+    );
+    const view = new DataView(statsBuffer);
+
+    return {
+      connectionsTotal: view.getBigUint64(0, true),
+      connectionsActive: view.getBigUint64(8, true),
+      requests: view.getBigUint64(16, true),
+      uptimeMs: view.getBigInt64(24, true),
+    };
   }
 
   close(): void {
