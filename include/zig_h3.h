@@ -233,7 +233,12 @@ int zig_h3_server_set_quic_datagram_cb(zig_h3_server *server, zig_h3_quic_datagr
 int zig_h3_server_send_quic_datagram(zig_h3_server *server, void *conn_ptr, const uint8_t *data, size_t data_len);
 
 int zig_h3_server_start(zig_h3_server *server);
-int zig_h3_server_stop(zig_h3_server *server);
+/**
+ * Stop the server. If force is non-zero, all active connections are immediately
+ * closed before stopping. If force is zero, performs graceful shutdown allowing
+ * in-flight requests to complete.
+ */
+int zig_h3_server_stop(zig_h3_server *server, uint8_t force);
 int zig_h3_server_set_log(zig_h3_server *server, zig_h3_log_cb callback, void *user_data);
 int zig_h3_server_stats(zig_h3_server *server, zig_h3_server_stats *out);
 

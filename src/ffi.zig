@@ -282,8 +282,8 @@ pub export fn zig_h3_server_start(server_ptr: ?*server.ZigServer) i32 {
     return server.zig_h3_server_start(server_ptr);
 }
 
-pub export fn zig_h3_server_stop(server_ptr: ?*server.ZigServer) i32 {
-    return server.zig_h3_server_stop(server_ptr);
+pub export fn zig_h3_server_stop(server_ptr: ?*server.ZigServer, force: u8) i32 {
+    return server.zig_h3_server_stop(server_ptr, force);
 }
 
 pub export fn zig_h3_server_set_log(server_ptr: ?*server.ZigServer, cb: server.LogCallback, user: ?*anyopaque) i32 {

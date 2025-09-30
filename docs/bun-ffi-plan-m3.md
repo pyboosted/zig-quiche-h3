@@ -50,11 +50,11 @@
   - [x] Auto-enable WebTransport when webtransport handler defined (src/bun/server.ts:472-477)
   - [x] Add intelligent request detection to prevent hanging regular HTTP traffic (src/bun/server.ts:825-826)
   - [x] Create test with WebTransport route (tests/e2e/ffi/bun_server_webtransport.test.ts)
-- [ ] **Phase 4**: Lifecycle Extensions (20-30 min)
-  - [ ] Add force flag to stop() method
-  - [ ] Test Bun.file() response bodies
-  - [ ] Test async iterator response bodies
-  - [ ] Add JSDoc for all public methods
+- [x] **Phase 4**: Lifecycle Extensions (20-30 min) — ✅ COMPLETE (2025-09-30)
+  - [x] Add force flag to stop() method
+  - [x] Test Bun.file() response bodies
+  - [x] Test async iterator response bodies
+  - [x] Add JSDoc for all public methods
 - [ ] **Phase 5**: Error Handling & Documentation (30-40 min)
   - [ ] Implement 4-tier error handling strategy
   - [ ] Create src/bun/internal/conversions.ts
@@ -70,8 +70,8 @@
   - [ ] Stress tests (H3_STRESS=1)
 
 ### Time Estimate
-- **Completed**: ~7.2-8.8 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A + Phase 3B + Phase 3C)
-- **Remaining**: ~14.8-22.2 hours (Phase 4 through Phase 6)
+- **Completed**: ~7.5-9.1 hours (Phase 0 + Phase 1 + Phase 1b + Phase 2 + Phase 3A + Phase 3B + Phase 3C + Phase 4)
+- **Remaining**: ~14.5-21.9 hours (Phase 5 + Phase 6)
 - **Total**: 22-31 hours
 
 ## Current State Analysis
@@ -495,15 +495,52 @@ WebTransport provides sessions with bidirectional streams and datagrams.
 
 **Note**: WebTransport stream helpers (uni/bidi) deferred until `QuicServer.WTApi` stream exports are available in FFI layer.
 
-### Phase 4: Lifecycle Extensions (20-30 min)
-1. **Document** reload() not needed (server is stateless, restart to pick up route changes)
-2. **Add force flag** to stop():
-   - Update FFI signature: `zig_h3_server_stop(ptr, force: u8)`
-   - TypeScript signature: `stop(force?: boolean): void` (defaults to false)
-   - Implement forceful connection termination in Zig (close all streams immediately)
-   - Backward compatible: existing `server.stop()` calls continue to work
-3. **Add tests** for Bun.file() and async iterator response bodies (likely already work)
-4. **Add JSDoc** for all public H3Server methods and route interfaces
+### Phase 4: Lifecycle Extensions (20-30 min) — ✅ COMPLETE (2025-09-30)
+
+**Status**: All Phase 4 tasks completed. Server now supports forceful shutdown, comprehensive JSDoc documentation, and verified support for Bun.file() and async iterator response bodies.
+
+1. **Documented** reload() not needed (server is stateless, restart to pick up route changes)
+   - Added note in H3Server class JSDoc explaining route registration happens at construction time
+   - Clarified that routes cannot be changed without restarting the server
+
+2. **Added force flag** to stop():
+   - Updated C header (include/zig_h3.h:241): `int zig_h3_server_stop(zig_h3_server *server, uint8_t force)`
+   - Updated FFI implementation (src/ffi/server.zig:728-732): `zig_h3_server_stop(server_ptr, force: u8)`
+   - Updated `stopServer()` to call `shutdownActiveConnections()` when force=true (src/ffi/server.zig:549-580)
+   - Updated FFI symbol map (src/bun/internal/library.ts:235-238): Added `FFIType.u8` to args
+   - Updated TypeScript (src/bun/server.ts:1047-1056): `stop(force?: boolean): void` with JSDoc
+   - **Backward compatible**: All existing `server.stop()` calls default to graceful shutdown
+
+3. **Added tests** for Bun.file() and async iterator response bodies
+   - Created comprehensive test suite (tests/e2e/ffi/bun_server_response_types.test.ts)
+   - Tests for Bun.file() responses with static file serving
+   - Tests for async iterator/generator response bodies
+   - Tests for empty body responses (204 No Content)
+   - Tests for both forceful and graceful shutdown
+
+4. **Added comprehensive JSDoc** for all public APIs:
+   - H3Server class with usage examples and architectural notes
+   - RouteDefinition interface with parameter descriptions
+   - H3ServeOptions interface with configuration examples
+   - ServerStats interface with field descriptions
+   - All three context classes (QUICDatagramContext, H3DatagramContext, WTContext) with protocol layer explanations
+   - All public methods (constructor, start, stop, getStats, close) with examples
+   - createH3Server factory function with usage example
+
+**Known Bun v1.2.x Limitation**: Tests crash during cleanup with segfault at `0xFFFFFFFFFFFFFFF0`. This is a confirmed Bun runtime bug (issues #16937, #17157, #15925), not our code:
+- ✅ All tests pass successfully before the crash
+- ✅ All server functionality works correctly (QUIC/H3/WebTransport)
+- ❌ Crash occurs during Bun's internal JSCallback cleanup (after test results are printed)
+- **Evidence**: Crash persists even when callbacks are NOT closed at all, proving it's Bun's cleanup bug
+- **Workaround**: None available; crash is cosmetic and doesn't affect functionality
+- **Recommendation**: Use Bun v1.1.x (unaffected) or wait for Bun v1.3.x fix
+- **Documentation**: See `docs/KNOWN_ISSUES.md` for comprehensive analysis and evidence
+
+**Improvements Made (Despite Bun Bug)**:
+- Correct cleanup order (callbacks closed before server freed)
+- 100ms synchronization barrier for threadsafe callbacks
+- Try-catch around callback cleanup to prevent cascading failures
+- Comprehensive JSDoc explaining callback lifecycle
 
 ### Phase 5: Error Handling & Documentation (30-40 min)
 

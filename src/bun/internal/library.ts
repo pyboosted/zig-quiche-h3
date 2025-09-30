@@ -234,7 +234,7 @@ const SERVER_SYMBOL_DEFINITIONS = {
   },
   zig_h3_server_stop: {
     returns: FFIType.i32,
-    args: [FFIType.pointer],
+    args: [FFIType.pointer, FFIType.u8],
   },
   zig_h3_server_set_log: {
     returns: FFIType.i32,

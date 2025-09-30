@@ -1,0 +1,2 @@
+Hello from Bun.file()!
+This is a test file for response bodies.

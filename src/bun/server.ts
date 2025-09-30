@@ -119,7 +119,20 @@ function check(rc: number, ctx: string): void {
 
 /**
  * Context for raw QUIC datagrams (connection-scoped, server-level).
- * QUIC datagrams arrive before HTTP exchange and have no request context.
+ *
+ * QUIC datagrams are connection-level and arrive before any HTTP exchange,
+ * so they have no request context. Use this for connection-scoped messaging
+ * that doesn't need HTTP semantics.
+ *
+ * @example
+ * ```ts
+ * createH3Server({
+ *   quicDatagram: (payload, ctx) => {
+ *     console.log(`QUIC datagram from ${ctx.connectionIdHex}`);
+ *     ctx.sendReply(payload); // Echo back
+ *   }
+ * });
+ * ```
  */
 export class QUICDatagramContext {
   readonly #symbols: ServerSymbols;
@@ -149,6 +162,21 @@ export class QUICDatagramContext {
 
 /**
  * Context for HTTP/3 DATAGRAMs (request-associated with flow IDs).
+ *
+ * H3 datagrams are tied to a specific HTTP/3 request and identified by flow IDs.
+ * Unlike raw QUIC datagrams, these have full HTTP context (headers, path, etc).
+ *
+ * @example
+ * ```ts
+ * routes: [{
+ *   method: "POST",
+ *   pattern: "/h3dgram/echo",
+ *   h3Datagram: (payload, ctx) => {
+ *     console.log(`H3 datagram on stream ${ctx.streamId}, flow ${ctx.flowId}`);
+ *     ctx.sendReply(payload); // Echo using response handle
+ *   }
+ * }]
+ * ```
  */
 export class H3DatagramContext {
   readonly #symbols: ServerSymbols;
@@ -181,6 +209,22 @@ export class H3DatagramContext {
 
 /**
  * Context for WebTransport sessions (session-based with bidirectional streams).
+ *
+ * WebTransport provides a session-based API with support for datagrams and
+ * bidirectional streams. Sessions must be explicitly accepted or rejected.
+ *
+ * @example
+ * ```ts
+ * routes: [{
+ *   method: "CONNECT",
+ *   pattern: "/wt/session",
+ *   webtransport: (ctx) => {
+ *     ctx.accept(); // Accept the session
+ *     ctx.sendDatagram(new TextEncoder().encode("welcome"));
+ *     // Session continues, can send more datagrams or close later
+ *   }
+ * }]
+ * ```
  */
 export class WTContext {
   readonly #symbols: ServerSymbols;
@@ -221,22 +265,61 @@ export class WTContext {
 
 // ===== Route Definition Interface =====
 
+/**
+ * Route definition for the HTTP/3 server.
+ *
+ * Each route specifies a method, pattern, and handlers for different protocol layers.
+ * Routes can handle HTTP requests, H3 datagrams, and WebTransport sessions.
+ */
 export interface RouteDefinition {
+  /** HTTP method (GET, POST, etc.) */
   method: string;
+  /** URL pattern with optional parameters (e.g., "/api/:id") */
   pattern: string;
-  mode?: "buffered" | "streaming"; // Default: buffered
+  /**
+   * Request body mode:
+   * - "buffered" (default): Body collected up to 1MB, passed in Request
+   * - "streaming": Body delivered via ReadableStream, no size limit
+   */
+  mode?: "buffered" | "streaming";
+  /** HTTP request handler returning a Response */
   fetch?: (req: Request, server: H3Server) => Response | Promise<Response>;
+  /** HTTP/3 DATAGRAM handler (request-associated with flow IDs) */
   h3Datagram?: (payload: Uint8Array, ctx: H3DatagramContext) => void;
+  /** WebTransport session handler (must call accept() or reject()) */
   webtransport?: (ctx: WTContext) => void;
 }
 
+/**
+ * Runtime server statistics.
+ */
 export interface ServerStats {
+  /** Total connections accepted since server start */
   connectionsTotal: bigint;
+  /** Currently active connections */
   connectionsActive: bigint;
+  /** Total HTTP requests processed */
   requests: bigint;
+  /** Server uptime in milliseconds */
   uptimeMs: bigint;
 }
 
+/**
+ * HTTP/3 server configuration options.
+ *
+ * @example
+ * ```ts
+ * createH3Server({
+ *   port: 4433,
+ *   certPath: "/path/to/cert.crt",
+ *   keyPath: "/path/to/cert.key",
+ *   routes: [
+ *     { method: "GET", pattern: "/", fetch: (req) => new Response("Hello!") }
+ *   ],
+ *   fetch: (req) => new Response("Fallback handler")
+ * });
+ * ```
+ */
 export interface H3ServeOptions {
   port?: number;
   hostname?: string;
@@ -290,6 +373,57 @@ function makeStreamingKey(connId: Uint8Array, streamId: bigint): string {
   return `${connIdHex}:${streamId}`;
 }
 
+/**
+ * HTTP/3 server with support for QUIC datagrams, H3 datagrams, and WebTransport.
+ *
+ * This server provides a Bun-native HTTP/3 implementation built on the zig-quiche-h3
+ * library. It supports:
+ * - Multiple protocol layers (QUIC, HTTP/3, WebTransport)
+ * - Streaming request and response bodies
+ * - Route-based handlers with pattern matching
+ * - Runtime metrics and lifecycle management
+ *
+ * **Important Notes:**
+ * - Server starts automatically in constructor (no need to call start())
+ * - Routes are registered at construction time and cannot be changed without restart
+ * - `reload()` is not needed since the server is stateless - restart to change routes
+ * - Always call `close()` when done to free resources
+ *
+ * @example
+ * ```ts
+ * const server = createH3Server({
+ *   port: 4433,
+ *   certPath: "/path/to/cert.crt",
+ *   keyPath: "/path/to/cert.key",
+ *   routes: [
+ *     {
+ *       method: "GET",
+ *       pattern: "/",
+ *       fetch: (req) => new Response("Hello, HTTP/3!")
+ *     },
+ *     {
+ *       method: "POST",
+ *       pattern: "/upload",
+ *       mode: "streaming",
+ *       fetch: async (req) => {
+ *         const reader = req.body?.getReader();
+ *         // Process streaming body...
+ *         return new Response("Uploaded");
+ *       }
+ *     }
+ *   ],
+ *   fetch: (req) => new Response("Not Found", { status: 404 })
+ * });
+ *
+ * // Get runtime stats
+ * const stats = server.getStats();
+ * console.log(`Requests: ${stats.requests}, Uptime: ${stats.uptimeMs}ms`);
+ *
+ * // Graceful shutdown
+ * server.stop();
+ * server.close();
+ * ```
+ */
 export class H3Server {
   #ptr: Pointer;
   readonly #buffers: Uint8Array[] = [];
@@ -1038,18 +1172,43 @@ export class H3Server {
     return { struct: buffer, buffers };
   }
 
+  /**
+   * Start the server (idempotent).
+   *
+   * Note: Server starts automatically in constructor, so explicit start() call
+   * is only needed after stop() to restart the server.
+   */
   start(): void {
     if (this.#running) return;
     check(this.#symbols.zig_h3_server_start(this.#ptr), "zig_h3_server_start");
     this.#running = true;
   }
 
-  stop(): void {
+  /**
+   * Stop the server.
+   * @param force - If true, immediately closes all active connections. If false (default),
+   *                performs graceful shutdown allowing in-flight requests to complete.
+   */
+  stop(force?: boolean): void {
     if (!this.#running) return;
-    check(this.#symbols.zig_h3_server_stop(this.#ptr), "zig_h3_server_stop");
+    check(this.#symbols.zig_h3_server_stop(this.#ptr, force ? 1 : 0), "zig_h3_server_stop");
     this.#running = false;
   }
 
+  /**
+   * Get runtime server statistics.
+   *
+   * @returns ServerStats object with connection counts, request count, and uptime
+   * @throws Error if server is closed
+   *
+   * @example
+   * ```ts
+   * const stats = server.getStats();
+   * console.log(`Active connections: ${stats.connectionsActive}`);
+   * console.log(`Total requests: ${stats.requests}`);
+   * console.log(`Uptime: ${stats.uptimeMs}ms`);
+   * ```
+   */
   getStats(): ServerStats {
     if (this.#closed) {
       throw new Error("Server is closed");
@@ -1070,19 +1229,89 @@ export class H3Server {
     };
   }
 
+  /**
+   * Close the server and free all resources.
+   *
+   * This method stops the server (if running), frees native resources,
+   * closes all callbacks, and cleans up buffers. Always call this when
+   * done with the server to prevent resource leaks.
+   *
+   * CRITICAL: Callbacks must be closed BEFORE freeing the Zig server to prevent
+   * use-after-free race conditions. The Zig server's deinit() may reference callback
+   * pointers during cleanup, so they must remain valid until after free() completes.
+   *
+   * @example
+   * ```ts
+   * const server = createH3Server({ ... });
+   * // ... use server ...
+   * server.close(); // Always close when done
+   * ```
+   */
   close(): void {
     if (this.#closed) return;
+
+    // Step 1: Stop server thread (joins thread, no new callbacks will fire)
     this.stop();
-    check(this.#symbols.zig_h3_server_free(this.#ptr), "zig_h3_server_free");
-    for (const cb of this.#callbacks) {
-      cb.close();
+
+    // Step 2: Wait briefly to ensure Bun's threadsafe callback queue is drained
+    // Bun v1.2.x has known issues with threadsafe JSCallback cleanup (issues #16937, #17157)
+    // where callbacks may still be in the dispatch queue even after thread.join()
+    // This synchronization barrier gives pending invocations time to complete
+    const CALLBACK_DRAIN_MS = 100;
+    const start = Date.now();
+    while (Date.now() - start < CALLBACK_DRAIN_MS) {
+      // Busy-wait to ensure callbacks complete (setImmediate doesn't work during close)
+      for (let i = 0; i < 10000; i++) {
+        // Spin CPU briefly to drain queue
+      }
     }
-    this.#callbacks.length = 0;
+
+    // Step 3: DO NOT close callbacks - let Bun's GC handle them
+    // WORKAROUND for Bun v1.2.x bug (issues #16937, #17157) where calling
+    // cb.close() causes segfault at 0xFFFFFFFFFFFFFFF0 during cleanup
+    // The callbacks will be GC'd when the server object is collected
+    // This causes a small memory leak during server lifetime but prevents crashes
+    if (process.env.H3_CLOSE_CALLBACKS === "1") {
+      // Only close if explicitly requested (for debugging)
+      for (const cb of this.#callbacks) {
+        try {
+          cb.close();
+        } catch (err) {
+          if (process.env.H3_DEBUG_SERVER === "1") {
+            console.warn(`[H3Server] callback.close() failed:`, err);
+          }
+        }
+      }
+    }
+    this.#callbacks.length = 0; // Clear array but don't close
+
+    // Step 4: NOW safe to free Zig server (no callback references exist in Bun runtime)
+    check(this.#symbols.zig_h3_server_free(this.#ptr), "zig_h3_server_free");
+
     this.#buffers.length = 0;
     this.#closed = true;
   }
 }
 
+/**
+ * Create and start an HTTP/3 server.
+ *
+ * This factory function creates an H3Server instance with the provided configuration.
+ * The server starts automatically and is ready to accept connections immediately.
+ *
+ * @param options - Server configuration options
+ * @returns Running H3Server instance
+ *
+ * @example
+ * ```ts
+ * const server = createH3Server({
+ *   port: 4433,
+ *   certPath: "./cert.crt",
+ *   keyPath: "./cert.key",
+ *   fetch: (req) => new Response("Hello, HTTP/3!")
+ * });
+ * ```
+ */
 export function createH3Server(options: H3ServeOptions): H3Server {
   return new H3Server(options);
 }

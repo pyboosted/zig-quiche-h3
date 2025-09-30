@@ -1449,7 +1449,7 @@ pub const QuicServer = struct {
         }
     }
 
-    fn shutdownActiveConnections(self: *QuicServer) void {
+    pub fn shutdownActiveConnections(self: *QuicServer) void {
         const conn_count = self.connections.count();
         while (self.wt.session_handles.items.len > 0) {
             const handle = self.wt.session_handles.items[self.wt.session_handles.items.len - 1];

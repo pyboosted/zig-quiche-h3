@@ -546,9 +546,13 @@ fn runServerThread(handle: *ServerHandle) void {
     handle.state = .stopped;
 }
 
-fn stopServer(handle: *ServerHandle) void {
+fn stopServer(handle: *ServerHandle, force: bool) void {
     if (handle.state != .running) return;
     if (handle.server) |srv| {
+        // If force is true, immediately close all active connections
+        if (force) {
+            srv.shutdownActiveConnections();
+        }
         srv.stop();
     }
     if (handle.thread) |t| {
@@ -613,7 +617,7 @@ pub fn zig_h3_server_new(cfg_ptr: ?*const ZigServerConfig) ?*ZigServer {
 
 pub fn zig_h3_server_free(server_ptr: ?*ZigServer) i32 {
     if (asHandle(server_ptr)) |handle| {
-        stopServer(handle);
+        stopServer(handle, false); // Graceful shutdown when freeing
         handle.deinit();
         return 0;
     }
@@ -725,9 +729,9 @@ pub fn zig_h3_server_start(server_ptr: ?*ZigServer) i32 {
     return 0;
 }
 
-pub fn zig_h3_server_stop(server_ptr: ?*ZigServer) i32 {
+pub fn zig_h3_server_stop(server_ptr: ?*ZigServer, force: u8) i32 {
     const handle = asHandle(server_ptr) orelse return -1;
-    stopServer(handle);
+    stopServer(handle, force != 0);
     return 0;
 }
 
